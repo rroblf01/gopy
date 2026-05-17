@@ -23,13 +23,18 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}}
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
 	// for super() dispatch.
 	for _, d := range m.Decls {
-		if c, ok := d.(*ir.Class); ok {
-			g.classes[c.Name] = c
+		switch x := d.(type) {
+		case *ir.Class:
+			g.classes[x.Name] = x
+		case *ir.Func:
+			if x.IsGenerator {
+				g.generators[x.Name] = true
+			}
 		}
 	}
 	// Scan for usage of the builtin `Exception` type so we know whether to
@@ -55,6 +60,10 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 			return nil, fmt.Errorf("transpile: unsupported decl %T", d)
 		}
 		g.writef("\n")
+	}
+	// Emit any inline runtime helpers (e.g. time.time shim) once at module end.
+	for _, names := range sortedKeys(g.helpers) {
+		g.writef("\n%s\n", g.helpers[names])
 	}
 
 	src := assembleSource(opt.PackageName, g.collectImports(), g.body.String())
@@ -153,6 +162,9 @@ type gen struct {
 	classes        map[string]*ir.Class // class name → decl (for super() lookup)
 	needsException bool                 // module references the builtin Exception type
 	currentClass   *ir.Class            // set while emitting a method body, used for super()
+	helpers        map[string]string    // inline runtime helpers emitted once at module end
+	fileVars       map[string]bool      // names currently bound to *os.File inside an active `with` block
+	generators     map[string]bool      // function names that return a channel (Python generators)
 }
 
 func (g *gen) writef(f string, a ...any) { fmt.Fprintf(&g.body, f, a...) }
@@ -173,6 +185,16 @@ func (g *gen) addImport(path string) {
 func (g *gen) collectImports() []string {
 	out := make([]string, 0, len(g.imports))
 	for k := range g.imports {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// sortedKeys returns the keys of m in lexical order.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
 		out = append(out, k)
 	}
 	sort.Strings(out)
@@ -229,6 +251,9 @@ func (g *gen) fn(fn *ir.Func) error {
 		g.currentClass = g.classes[fn.Receiver.Ty.Name]
 		defer func() { g.currentClass = prev }()
 	}
+	if fn.IsGenerator {
+		return g.generatorFn(fn)
+	}
 	g.writef("func ")
 	if fn.Receiver != nil {
 		g.writef("(%s *%s) ", fn.Receiver.Name, fn.Receiver.Ty.Name)
@@ -249,6 +274,50 @@ func (g *gen) fn(fn *ir.Func) error {
 	if err := g.stmts(fn.Body); err != nil {
 		return err
 	}
+	g.indent--
+	g.writef("}\n")
+	return nil
+}
+
+// generatorFn lowers a Python generator (function with yield) to a Go
+// function that returns a receive-only channel. The body runs in a
+// goroutine; each `yield X` becomes `__yield <- X`; the channel closes
+// when the goroutine returns.
+//
+// Limitations: no `send`/`throw`, no `return value` from generator
+// (return without value ends the goroutine).
+func (g *gen) generatorFn(fn *ir.Func) error {
+	if fn.Receiver != nil {
+		return fmt.Errorf("generator methods not supported (F4)")
+	}
+	elem := g.goType(fn.YieldType)
+	if elem == "" || elem == "any" {
+		elem = "any"
+	}
+	g.writef("func %s(", fn.Name)
+	for i, p := range fn.Params {
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("%s %s", p.Name, g.goType(p.Ty))
+	}
+	g.writef(") <-chan %s {\n", elem)
+	g.indent++
+	g.writeIndent()
+	g.writef("__yield := make(chan %s)\n", elem)
+	g.writeIndent()
+	g.writef("go func() {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("defer close(__yield)\n")
+	if err := g.stmts(fn.Body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	g.writeIndent()
+	g.writef("return __yield\n")
 	g.indent--
 	g.writef("}\n")
 	return nil
@@ -374,8 +443,112 @@ func (g *gen) stmt(s ir.Stmt) error {
 		return g.try(x)
 	case *ir.Raise:
 		return g.raise(x)
+	case *ir.WithFile:
+		return g.withFile(x)
+	case *ir.Yield:
+		g.writeIndent()
+		g.writef("__yield <- ")
+		if x.X == nil {
+			g.writef("0\n") // bare `yield` is rare; emit something compilable
+			return nil
+		}
+		if err := g.expr(x.X); err != nil {
+			return err
+		}
+		g.writef("\n")
+		return nil
 	}
 	return fmt.Errorf("transpile: unsupported stmt %T", s)
+}
+
+// withFile emits the IIFE pattern for `with open(path, mode) as fh: body`.
+// It opens the file, defers Close, and tags the file variable so method
+// calls like fh.read() / fh.write(s) inside the body translate to the
+// right Go expressions.
+// helperPyPrint imitates Python's print(): bools render as "True"/"False",
+// nil renders as "None", everything else falls through to fmt.Print.
+// Items are space-separated and the line is newline-terminated.
+const helperPyPrint = `func __gopy_print(args ...any) {
+	for i, a := range args {
+		if i > 0 {
+			fmt.Print(" ")
+		}
+		switch v := a.(type) {
+		case bool:
+			if v {
+				fmt.Print("True")
+			} else {
+				fmt.Print("False")
+			}
+		case nil:
+			fmt.Print("None")
+			_ = v
+		default:
+			fmt.Print(a)
+		}
+	}
+	fmt.Println()
+}`
+
+const helperFileReadAll = `func __gopy_fh_read(f *os.File) string {
+	b, err := io.ReadAll(f)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}`
+
+const helperFileWrite = `func __gopy_fh_write(f *os.File, s string) {
+	if _, err := f.WriteString(s); err != nil {
+		panic(err)
+	}
+}`
+
+func (g *gen) withFile(w *ir.WithFile) error {
+	g.addImport("os")
+	g.writeIndent()
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	if w.Mode == "w" {
+		g.writef("%s, __err := os.Create(", w.VarName)
+	} else {
+		g.writef("%s, __err := os.Open(", w.VarName)
+	}
+	if err := g.expr(w.Path); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("if __err != nil {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("panic(__err)\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("defer %s.Close()\n", w.VarName)
+
+	// Mark the var as a file handle for the duration of the body so
+	// method-call codegen can route fh.read() / fh.write() to helpers.
+	prev := g.fileVars[w.VarName]
+	g.fileVars[w.VarName] = true
+	defer func() {
+		if prev {
+			g.fileVars[w.VarName] = true
+		} else {
+			delete(g.fileVars, w.VarName)
+		}
+	}()
+
+	if err := g.stmts(w.Body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	return nil
 }
 
 // try emits a try/except/finally as an IIFE so the deferred recover()
@@ -510,9 +683,21 @@ func (g *gen) forRange(x *ir.ForRange) error {
 
 func (g *gen) forEach(x *ir.ForEach) error {
 	g.writeIndent()
-	// Dict: range yields key; list/str: range yields index, value — we want value.
+	// Choose single- vs two-variable range form based on iterable kind:
+	//   - dict:      `for k := range m`           — Python iterates keys
+	//   - generator: `for v := range ch`          — channel receive
+	//   - list/str:  `for _, v := range slice`    — index discarded
 	iterTy := x.Iter.TypeOf()
+	single := false
 	if iterTy != nil && iterTy.Kind == ir.TyDict {
+		single = true
+	}
+	if c, ok := x.Iter.(*ir.Call); ok {
+		if n, ok := c.Func.(*ir.Name); ok && g.generators[n.N] {
+			single = true
+		}
+	}
+	if single {
 		g.writef("for %s := range ", x.Var)
 	} else {
 		g.writef("for _, %s := range ", x.Var)
@@ -610,6 +795,20 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.MethodCall:
 		return g.methodCall(x)
 	case *ir.Attribute:
+		// Stdlib module attribute: sys.argv, etc.
+		if n, ok := x.Recv.(*ir.Name); ok {
+			if mod, ok := stdlibModules[n.N]; ok {
+				attr, ok := mod.Attrs[x.Name]
+				if !ok {
+					return fmt.Errorf("unsupported stdlib attribute %s.%s", n.N, x.Name)
+				}
+				if attr.GoImport != "" {
+					g.addImport(attr.GoImport)
+				}
+				g.writef("%s", attr.GoExpr)
+				return nil
+			}
+		}
 		if err := g.expr(x.Recv); err != nil {
 			return err
 		}
@@ -700,8 +899,11 @@ func (g *gen) call(c *ir.Call) error {
 		// Builtins.
 		switch name.N {
 		case "print":
+			// Route through a small helper so bool prints as "True"/"False"
+			// and None as "None", matching Python's repr.
 			g.addImport("fmt")
-			g.writef("fmt.Println(")
+			g.helpers["__gopy_print"] = helperPyPrint
+			g.writef("__gopy_print(")
 			for i, a := range c.Args {
 				if i > 0 {
 					g.writef(", ")
@@ -773,6 +975,64 @@ func (g *gen) call(c *ir.Call) error {
 }
 
 func (g *gen) methodCall(m *ir.MethodCall) error {
+	// File handle methods inside a `with open(...) as fh:` block.
+	if n, ok := m.Recv.(*ir.Name); ok && g.fileVars[n.N] {
+		switch m.Method {
+		case "read":
+			g.addImport("os")
+			g.addImport("io")
+			g.helpers["__gopy_fh_read"] = helperFileReadAll
+			g.writef("__gopy_fh_read(%s)", n.N)
+			return nil
+		case "write":
+			if len(m.Args) != 1 {
+				return fmt.Errorf("file.write() takes exactly 1 argument")
+			}
+			g.addImport("os")
+			g.helpers["__gopy_fh_write"] = helperFileWrite
+			g.writef("__gopy_fh_write(%s, ", n.N)
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
+		}
+		return fmt.Errorf("file.%s() not supported (F4: read/write only)", m.Method)
+	}
+	// Stdlib module function: os.getenv(...), time.time(), sys.exit(...)
+	if n, ok := m.Recv.(*ir.Name); ok {
+		if mod, ok := stdlibModules[n.N]; ok {
+			fn, ok := mod.Funcs[m.Method]
+			if !ok {
+				return fmt.Errorf("unsupported stdlib function %s.%s", n.N, m.Method)
+			}
+			if fn.GoImport != "" {
+				g.addImport(fn.GoImport)
+			}
+			if fn.Helper != "" {
+				g.helpers[fn.GoFunc] = fn.Helper
+			}
+			g.writef("%s(", fn.GoFunc)
+			for i, a := range m.Args {
+				if i > 0 {
+					g.writef(", ")
+				}
+				if i == 0 && fn.IntArg0 {
+					g.writef("int(")
+					if err := g.expr(a); err != nil {
+						return err
+					}
+					g.writef(")")
+				} else {
+					if err := g.expr(a); err != nil {
+						return err
+					}
+				}
+			}
+			g.writef(")")
+			return nil
+		}
+	}
 	// super().X(...) → resolve against the current class's base.
 	if isSuperCall(m.Recv) {
 		if g.currentClass == nil || len(g.currentClass.Bases) == 0 {

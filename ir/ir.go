@@ -46,6 +46,11 @@ type Func struct {
 	// Receiver is non-nil for methods. The transpiler emits
 	//   func (self *T) name(...) {...}
 	Receiver *Param
+	// IsGenerator is true when the function body contains `yield`.
+	// Codegen routes the body through a goroutine and exposes a
+	// `<-chan YieldType` to the caller.
+	IsGenerator bool
+	YieldType   *Type
 }
 
 func (*Func) declNode() {}
@@ -142,6 +147,22 @@ type Raise struct {
 	Exc Expr // nil for bare re-raise
 }
 
+// Yield emits one value from a generator function. Codegen lowers it
+// to `__ch <- value` inside the goroutine that wraps the function body.
+type Yield struct {
+	X Expr
+}
+
+// WithFile is the lowered form of `with open(path, mode) as name: body`.
+// F4 only supports file context managers; arbitrary __enter__/__exit__
+// objects are rejected at lower time.
+type WithFile struct {
+	VarName string
+	Path    Expr
+	Mode    string // "r" (default) or "w"
+	Body    []Stmt
+}
+
 func (*ExprStmt) stmtNode()   {}
 func (*Assign) stmtNode()     {}
 func (*Return) stmtNode()     {}
@@ -153,6 +174,8 @@ func (*AssignSub) stmtNode()  {}
 func (*AssignAttr) stmtNode() {}
 func (*Try) stmtNode()        {}
 func (*Raise) stmtNode()      {}
+func (*WithFile) stmtNode()   {}
+func (*Yield) stmtNode()      {}
 
 // Expr is any value-producing node.
 type Expr interface {

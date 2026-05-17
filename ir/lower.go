@@ -109,6 +109,9 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		if m.Type() != "FunctionDef" {
 			return nil, fmt.Errorf("line %d: class %s: only methods supported (F2)", m.Lineno(), name)
 		}
+		if len(m.Children("decorator_list")) > 0 {
+			return nil, fmt.Errorf("line %d: class %s: method decorators not supported (F4)", m.Lineno(), name)
+		}
 		methName := m.Str("name")
 		args := m.Child("args").Children("args")
 		if len(args) == 0 {
@@ -193,6 +196,22 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 }
 
 func lowerFunc(n parser.Node) (*Func, error) {
+	// F4 accepts only `@staticmethod` (silently ignored — methods don't get a
+	// `self`-bound receiver at the call site, which matches Go semantics for
+	// plain functions). Other decorators are rejected so we don't quietly
+	// produce wrong output.
+	for _, d := range n.Children("decorator_list") {
+		if d.Type() == "Name" && d.Str("id") == "staticmethod" {
+			continue
+		}
+		var name string
+		if d.Type() == "Name" {
+			name = d.Str("id")
+		} else {
+			name = d.Type()
+		}
+		return nil, fmt.Errorf("line %d: decorator %q not supported (F4: only @staticmethod)", n.Lineno(), name)
+	}
 	f := &Func{Name: n.Str("name")}
 	args := n.Child("args")
 	if args == nil {
@@ -219,7 +238,58 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		return nil, err
 	}
 	f.Body = body
+	// Promote function to generator if any Yield appears in the body.
+	if ty := findYieldType(body); ty != nil {
+		f.IsGenerator = true
+		f.YieldType = ty
+	}
 	return f, nil
+}
+
+// findYieldType walks a function body recursively, returning the inferred
+// element type of the first Yield encountered. Returns nil if the function
+// is not a generator.
+func findYieldType(ss []Stmt) *Type {
+	for _, s := range ss {
+		if t := yieldTypeStmt(s); t != nil {
+			return t
+		}
+	}
+	return nil
+}
+
+func yieldTypeStmt(s Stmt) *Type {
+	switch x := s.(type) {
+	case *Yield:
+		if x.X != nil {
+			return x.X.TypeOf()
+		}
+		return &Type{Kind: TyUnknown}
+	case *If:
+		if t := findYieldType(x.Then); t != nil {
+			return t
+		}
+		return findYieldType(x.Else)
+	case *While:
+		return findYieldType(x.Body)
+	case *ForRange:
+		return findYieldType(x.Body)
+	case *ForEach:
+		return findYieldType(x.Body)
+	case *Try:
+		if t := findYieldType(x.Body); t != nil {
+			return t
+		}
+		for _, h := range x.Handlers {
+			if t := findYieldType(h.Body); t != nil {
+				return t
+			}
+		}
+		return findYieldType(x.Finally)
+	case *WithFile:
+		return findYieldType(x.Body)
+	}
+	return nil
 }
 
 func lowerAnnotation(n parser.Node) (*Type, error) {
@@ -323,6 +393,20 @@ func lowerBody(stmts []parser.Node, sc *scope) ([]Stmt, error) {
 func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 	switch n.Type() {
 	case "Expr":
+		// `yield X` parses as Expr(value=Yield(value=X)). Catch it here so
+		// we can treat it as a control-flow statement rather than a
+		// value-producing expression — generators don't return per-yield.
+		if v := n.Child("value"); v != nil && v.Type() == "Yield" {
+			var x Expr
+			if val := v.Child("value"); val != nil {
+				e, err := lowerExpr(val, sc)
+				if err != nil {
+					return nil, err
+				}
+				x = e
+			}
+			return &Yield{X: x}, nil
+		}
 		x, err := lowerExpr(n.Child("value"), sc)
 		if err != nil {
 			return nil, err
@@ -517,6 +601,8 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		return &Raise{Exc: exc}, nil
 	case "Pass":
 		return nil, nil
+	case "With":
+		return lowerWith(n, sc)
 	default:
 		return nil, fmt.Errorf("line %d: unsupported statement %q", n.Lineno(), n.Type())
 	}
@@ -819,6 +905,57 @@ func lowerCmpKind(s string) (string, error) {
 		return ">=", nil
 	}
 	return "", fmt.Errorf("unsupported Compare op %q", s)
+}
+
+// lowerWith handles only `with open(path[, mode]) as name: body` in F4.
+// Other context managers raise an explicit "unsupported" error so users see
+// a precise failure mode rather than mysterious downstream Go errors.
+func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
+	items := n.Children("items")
+	if len(items) != 1 {
+		return nil, fmt.Errorf("line %d: multi-item `with` not supported (F4)", n.Lineno())
+	}
+	item := items[0]
+	ctx := item.Child("context_expr")
+	if ctx.Type() != "Call" {
+		return nil, fmt.Errorf("line %d: only `with open(...)` supported (F4)", n.Lineno())
+	}
+	fn := ctx.Child("func")
+	if fn.Type() != "Name" || fn.Str("id") != "open" {
+		return nil, fmt.Errorf("line %d: only `with open(...)` supported (F4)", n.Lineno())
+	}
+	args := ctx.Children("args")
+	if len(args) < 1 || len(args) > 2 {
+		return nil, fmt.Errorf("line %d: open() takes 1 or 2 positional args", n.Lineno())
+	}
+	pathE, err := lowerExpr(args[0], sc)
+	if err != nil {
+		return nil, err
+	}
+	mode := "r"
+	if len(args) == 2 {
+		if args[1].Type() != "Constant" {
+			return nil, fmt.Errorf("line %d: open() mode must be a string literal", n.Lineno())
+		}
+		s, _ := args[1]["value"].(string)
+		if s != "r" && s != "w" {
+			return nil, fmt.Errorf("line %d: open() mode %q not supported (F4: only \"r\" or \"w\")", n.Lineno(), s)
+		}
+		mode = s
+	}
+	asNode := item.Child("optional_vars")
+	if asNode == nil || asNode.Type() != "Name" {
+		return nil, fmt.Errorf("line %d: `with open(...) as <name>` required", n.Lineno())
+	}
+	varName := asNode.Str("id")
+	innerSc := &scope{vars: copyVars(sc.vars)}
+	// File handle type tracked as a named type; codegen knows what to emit.
+	innerSc.declare(varName, &Type{Kind: TyNamed, Name: "__gopy_file"})
+	body, err := lowerBody(n.Children("body"), innerSc)
+	if err != nil {
+		return nil, err
+	}
+	return &WithFile{VarName: varName, Path: pathE, Mode: mode, Body: body}, nil
 }
 
 // lowerFor handles two shapes:
