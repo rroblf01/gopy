@@ -23,7 +23,7 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}}
 	g.buildAliases(m)
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
@@ -35,6 +35,11 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 		case *ir.Func:
 			if x.IsGenerator {
 				g.generators[x.Name] = true
+			}
+			// Only free functions are looked up for kwarg/default
+			// resolution; methods carry a Receiver.
+			if x.Receiver == nil {
+				g.funcs[x.Name] = x
 			}
 		}
 	}
@@ -216,6 +221,7 @@ type gen struct {
 	imports        map[string]bool
 	indent         int
 	classes        map[string]*ir.Class // class name → decl (for super() lookup)
+	funcs          map[string]*ir.Func  // free function name → decl (for kwarg/default resolution)
 	needsException bool                 // module references the builtin Exception type
 	currentClass   *ir.Class            // set while emitting a method body, used for super()
 	helpers        map[string]string    // inline runtime helpers emitted once at module end
@@ -950,9 +956,129 @@ func (g *gen) expr(e ir.Expr) error {
 		g.writef("}")
 	case *ir.FStr:
 		return g.fstring(x)
+	case *ir.ListComp:
+		return g.listComp(x)
+	case *ir.DictComp:
+		return g.dictComp(x)
 	default:
 		return fmt.Errorf("transpile: unsupported expr %T", e)
 	}
+	return nil
+}
+
+// listComp emits an IIFE that builds the result slice in-place. The
+// element-collection variable is named __out so it never collides with
+// user code; the user's loop variable keeps its Python name.
+func (g *gen) listComp(c *ir.ListComp) error {
+	elem := g.goType(c.ElemTy)
+	if elem == "" || elem == "any" {
+		elem = "any"
+	}
+	g.writef("func() []%s {\n", elem)
+	g.indent++
+	g.writeIndent()
+	g.writef("__out := []%s{}\n", elem)
+	g.writeIndent()
+	iterTy := c.Iter.TypeOf()
+	if iterTy != nil && iterTy.Kind == ir.TyDict {
+		g.writef("for %s := range ", c.Var)
+	} else {
+		g.writef("for _, %s := range ", c.Var)
+	}
+	if err := g.expr(c.Iter); err != nil {
+		return err
+	}
+	g.writef(" {\n")
+	g.indent++
+	if c.Cond != nil {
+		g.writeIndent()
+		g.writef("if !(")
+		if err := g.expr(c.Cond); err != nil {
+			return err
+		}
+		g.writef(") {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("continue\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
+	g.writeIndent()
+	g.writef("__out = append(__out, ")
+	if err := g.expr(c.Elt); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// dictComp is the dict analogue of listComp.
+func (g *gen) dictComp(c *ir.DictComp) error {
+	kt := g.goType(c.KeyTy)
+	vt := g.goType(c.ValTy)
+	if kt == "" || kt == "any" {
+		kt = "any"
+	}
+	if vt == "" || vt == "any" {
+		vt = "any"
+	}
+	g.writef("func() map[%s]%s {\n", kt, vt)
+	g.indent++
+	g.writeIndent()
+	g.writef("__out := map[%s]%s{}\n", kt, vt)
+	g.writeIndent()
+	iterTy := c.Iter.TypeOf()
+	if iterTy != nil && iterTy.Kind == ir.TyDict {
+		g.writef("for %s := range ", c.Var)
+	} else {
+		g.writef("for _, %s := range ", c.Var)
+	}
+	if err := g.expr(c.Iter); err != nil {
+		return err
+	}
+	g.writef(" {\n")
+	g.indent++
+	if c.Cond != nil {
+		g.writeIndent()
+		g.writef("if !(")
+		if err := g.expr(c.Cond); err != nil {
+			return err
+		}
+		g.writef(") {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("continue\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
+	g.writeIndent()
+	g.writef("__out[")
+	if err := g.expr(c.Key); err != nil {
+		return err
+	}
+	g.writef("] = ")
+	if err := g.expr(c.Val); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
 	return nil
 }
 
@@ -1098,6 +1224,12 @@ func (g *gen) call(c *ir.Call) error {
 			return nil
 		}
 	}
+	// User-defined free function: resolve kwargs/defaults if any.
+	if name, ok := c.Func.(*ir.Name); ok {
+		if fn, ok := g.funcs[name.N]; ok {
+			return g.userFuncCall(fn, c)
+		}
+	}
 	if err := g.expr(c.Func); err != nil {
 		return err
 	}
@@ -1109,6 +1241,57 @@ func (g *gen) call(c *ir.Call) error {
 		if err := g.expr(a); err != nil {
 			return err
 		}
+	}
+	if len(c.Keywords) > 0 {
+		return fmt.Errorf("kwargs not supported on this call target")
+	}
+	g.writef(")")
+	return nil
+}
+
+// userFuncCall emits a call to a known free function, resolving the call's
+// positional arguments and keyword arguments against the function's
+// parameter list. Missing trailing arguments are filled from each
+// parameter's Default expression, evaluated at the call site.
+func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
+	if len(c.Args) > len(fn.Params) {
+		return fmt.Errorf("%s: too many positional arguments (got %d, expected %d)", fn.Name, len(c.Args), len(fn.Params))
+	}
+	kwIdx := map[string]ir.Expr{}
+	for _, kw := range c.Keywords {
+		if _, dup := kwIdx[kw.Name]; dup {
+			return fmt.Errorf("%s: duplicate keyword %q", fn.Name, kw.Name)
+		}
+		kwIdx[kw.Name] = kw.Value
+	}
+	g.writef("%s(", fn.Name)
+	for i, p := range fn.Params {
+		if i > 0 {
+			g.writef(", ")
+		}
+		switch {
+		case i < len(c.Args):
+			if _, dup := kwIdx[p.Name]; dup {
+				return fmt.Errorf("%s: keyword %q clashes with positional", fn.Name, p.Name)
+			}
+			if err := g.expr(c.Args[i]); err != nil {
+				return err
+			}
+		case kwIdx[p.Name] != nil:
+			if err := g.expr(kwIdx[p.Name]); err != nil {
+				return err
+			}
+			delete(kwIdx, p.Name)
+		case p.Default != nil:
+			if err := g.expr(p.Default); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("%s: missing argument for %q", fn.Name, p.Name)
+		}
+	}
+	for k := range kwIdx {
+		return fmt.Errorf("%s: unknown keyword %q", fn.Name, k)
 	}
 	g.writef(")")
 	return nil
@@ -1253,6 +1436,24 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 					if err := g.expr(a); err != nil {
 						return err
 					}
+				}
+			}
+			g.writef(")")
+			return nil
+		}
+	}
+	// Class-level method call: `Class.method(args)` when method is a
+	// @classmethod becomes a free `<Class>_<method>(args)` call. Triggered
+	// when Recv is Name(ClassName) and ClassName has the method registered.
+	if n, ok := m.Recv.(*ir.Name); ok {
+		if cls, ok := g.classes[n.N]; ok && cls.ClassMethods[m.Method] {
+			g.writef("%s_%s(", n.N, m.Method)
+			for i, a := range m.Args {
+				if i > 0 {
+					g.writef(", ")
+				}
+				if err := g.expr(a); err != nil {
+					return err
 				}
 			}
 			g.writef(")")

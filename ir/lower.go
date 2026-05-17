@@ -125,13 +125,22 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		if m.Type() != "FunctionDef" {
 			return nil, fmt.Errorf("line %d: class %s: only methods supported (F2)", m.Lineno(), name)
 		}
-		// F5 accepts `@property` on methods (emitted as a regular method,
-		// call sites add the `()`); other decorators are still rejected.
+		// Accepted method decorators:
+		//   @property     — call sites emit `.attr()`
+		//   @classmethod  — lowered to a free `<Class>_<method>` Go function
+		//                   so it doesn't need a `*Class` receiver
 		isProperty := false
+		isClassMethod := false
 		for _, d := range m.Children("decorator_list") {
-			if d.Type() == "Name" && d.Str("id") == "property" {
-				isProperty = true
-				continue
+			if d.Type() == "Name" {
+				switch d.Str("id") {
+				case "property":
+					isProperty = true
+					continue
+				case "classmethod":
+					isClassMethod = true
+					continue
+				}
 			}
 			var dname string
 			if d.Type() == "Name" {
@@ -140,6 +149,9 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				dname = d.Type()
 			}
 			return nil, fmt.Errorf("line %d: class %s: method decorator %q not supported", m.Lineno(), name, dname)
+		}
+		if isProperty && isClassMethod {
+			return nil, fmt.Errorf("line %d: class %s: cannot combine @property and @classmethod", m.Lineno(), name)
 		}
 		methName := m.Str("name")
 		args := m.Child("args").Children("args")
@@ -189,10 +201,16 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			continue
 		}
 
-		// Regular method.
-		fn := &Func{
-			Name:     methName,
-			Receiver: &Param{Name: "self", Ty: &Type{Kind: TyNamed, Name: name}},
+		// Regular method (or @classmethod). For @classmethod we emit a
+		// free function `<Class>_<method>` so it doesn't take a *Class
+		// receiver; calls like `Class.method(args)` are rewritten at
+		// codegen time. References to `cls` inside the body are rewritten
+		// to the class name, matching Python's semantics for `cls(...)`.
+		fn := &Func{Name: methName}
+		if !isClassMethod {
+			fn.Receiver = &Param{Name: "self", Ty: &Type{Kind: TyNamed, Name: name}}
+		} else {
+			fn.Name = name + "_" + methName
 		}
 		for _, p := range params {
 			ty, err := lowerAnnotation(p.Child("annotation"))
@@ -208,7 +226,14 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		fn.Ret = ret
 
 		sc := newScope()
-		sc.declare("self", fn.Receiver.Ty)
+		if isClassMethod {
+			// `cls` is a stand-in for the class itself; treat it as a
+			// declared name with the class's named type so lookups don't
+			// trip the undeclared-identifier path.
+			sc.declare("cls", &Type{Kind: TyNamed, Name: name})
+		} else {
+			sc.declare("self", fn.Receiver.Ty)
+		}
 		for _, p := range fn.Params {
 			sc.declare(p.Name, p.Ty)
 		}
@@ -216,8 +241,22 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		if err != nil {
 			return nil, err
 		}
+		if isClassMethod {
+			// Rewrite every `cls` Name in the body to the class's own name.
+			// `cls(...)` then routes through the constructor; `cls.attr`
+			// becomes `<Class>.attr` (undefined unless attr is a registered
+			// class method).
+			substituteName(body, "cls", name)
+		}
 		fn.Body = body
 		decls = append(decls, fn)
+		if isClassMethod {
+			if class.ClassMethods == nil {
+				class.ClassMethods = map[string]bool{}
+			}
+			class.ClassMethods[methName] = true
+			continue
+		}
 		class.MethodNames = append(class.MethodNames, methName)
 		if isProperty {
 			if class.Properties == nil {
@@ -253,12 +292,34 @@ func lowerFunc(n parser.Node) (*Func, error) {
 	if args == nil {
 		return nil, fmt.Errorf("FunctionDef %q missing args", f.Name)
 	}
-	for _, a := range args.Children("args") {
+	paramNodes := args.Children("args")
+	for _, a := range paramNodes {
 		ty, err := lowerAnnotation(a.Child("annotation"))
 		if err != nil {
 			return nil, fmt.Errorf("param %q: %w", a.Str("arg"), err)
 		}
 		f.Params = append(f.Params, Param{Name: a.Str("arg"), Ty: ty})
+	}
+	// Python aligns `args.defaults` to the END of the positional params:
+	// for `def f(a, b, c=1, d=2)`, defaults == [1, 2] aligns to c, d.
+	defaults := args.Children("defaults")
+	if n := len(defaults); n > 0 {
+		off := len(f.Params) - n
+		// Defaults are evaluated in a scope that already has the earlier
+		// params declared (Python evaluates them at def-time in the
+		// enclosing scope; we approximate by using an empty scope here
+		// since defaults are typically literals or stable references).
+		dsc := newScope()
+		for _, p := range f.Params[:off] {
+			dsc.declare(p.Name, p.Ty)
+		}
+		for i, dn := range defaults {
+			d, err := lowerExpr(dn, dsc)
+			if err != nil {
+				return nil, fmt.Errorf("default for param %q: %w", f.Params[off+i].Name, err)
+			}
+			f.Params[off+i].Default = d
+		}
 	}
 	ret, err := lowerAnnotation(n.Child("returns"))
 	if err != nil {
@@ -349,9 +410,24 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			return &Type{Kind: TyNamed, Name: n.Str("id")}, nil
 		}
 	case "Constant":
-		// e.g. `-> None` parses as Constant(None)
-		if n["value"] == nil {
+		// `-> None` parses as Constant(None); forward-reference string
+		// annotations like `-> "Foo"` parse as Constant("Foo") and resolve
+		// to a named user type.
+		switch v := n["value"].(type) {
+		case nil:
 			return &Type{Kind: TyNone}, nil
+		case string:
+			switch v {
+			case "int":
+				return &Type{Kind: TyInt}, nil
+			case "float":
+				return &Type{Kind: TyFloat}, nil
+			case "str":
+				return &Type{Kind: TyStr}, nil
+			case "bool":
+				return &Type{Kind: TyBool}, nil
+			}
+			return &Type{Kind: TyNamed, Name: v}, nil
 		}
 		return nil, fmt.Errorf("unsupported constant annotation")
 	case "Subscript":
@@ -737,9 +813,6 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		}
 		return &UnaryOp{Op: op, X: x, Ty: ty}, nil
 	case "Call":
-		if kws := n.Children("keywords"); len(kws) > 0 {
-			return nil, fmt.Errorf("line %d: keyword arguments not supported", n.Lineno())
-		}
 		var args []Expr
 		for _, a := range n.Children("args") {
 			x, err := lowerExpr(a, sc)
@@ -747,6 +820,19 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 				return nil, err
 			}
 			args = append(args, x)
+		}
+		var kws []Keyword
+		for _, kw := range n.Children("keywords") {
+			name := kw.Str("arg")
+			if name == "" {
+				// **kwargs splat — no Python keyword name. Not supported yet.
+				return nil, fmt.Errorf("line %d: **kwargs splat not supported", n.Lineno())
+			}
+			v, err := lowerExpr(kw.Child("value"), sc)
+			if err != nil {
+				return nil, err
+			}
+			kws = append(kws, Keyword{Name: name, Value: v})
 		}
 		// Method call: callee is Attribute(value, attr).
 		if fnNode := n.Child("func"); fnNode.Type() == "Attribute" {
@@ -760,7 +846,25 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Call{Func: callee, Args: args, Ty: &Type{Kind: TyUnknown}}, nil
+		retTy := &Type{Kind: TyUnknown}
+		// Builtin return types we can pin down without a full inference pass.
+		// Useful so list/dict comprehensions over `len(x)` know to type
+		// their element/value as int rather than `any`.
+		if name, ok := callee.(*Name); ok {
+			switch name.N {
+			case "len":
+				retTy = &Type{Kind: TyInt}
+			case "int":
+				retTy = &Type{Kind: TyInt}
+			case "float":
+				retTy = &Type{Kind: TyFloat}
+			case "str":
+				retTy = &Type{Kind: TyStr}
+			case "bool":
+				retTy = &Type{Kind: TyBool}
+			}
+		}
+		return &Call{Func: callee, Args: args, Keywords: kws, Ty: retTy}, nil
 	case "Attribute":
 		recv, err := lowerExpr(n.Child("value"), sc)
 		if err != nil {
@@ -842,6 +946,10 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			vt = &Type{Kind: TyAny}
 		}
 		return &DictLit{Keys: ks, Vals: vs, KeyTy: kt, ValTy: vt, Ty: &Type{Kind: TyDict, Key: kt, Val: vt}}, nil
+	case "ListComp":
+		return lowerListComp(n, sc)
+	case "DictComp":
+		return lowerDictComp(n, sc)
 	case "JoinedStr":
 		// f"..." — list of Constant(str) and FormattedValue.
 		var parts []FStrPart
@@ -949,6 +1057,267 @@ func lowerCmpKind(s string) (string, error) {
 		return "!=", nil
 	}
 	return "", fmt.Errorf("unsupported Compare op %q", s)
+}
+
+// substituteName rewrites every Name(from) anywhere in ss to Name(to).
+// Used so @classmethod bodies can refer to `cls` while we emit the
+// class's actual name in Go output.
+func substituteName(ss []Stmt, from, to string) {
+	for _, s := range ss {
+		subStmt(s, from, to)
+	}
+}
+
+func subStmt(s Stmt, from, to string) {
+	switch x := s.(type) {
+	case *ExprStmt:
+		x.X = subExpr(x.X, from, to)
+	case *Assign:
+		x.Value = subExpr(x.Value, from, to)
+	case *AssignSub:
+		x.Target = subExpr(x.Target, from, to)
+		x.Index = subExpr(x.Index, from, to)
+		x.Value = subExpr(x.Value, from, to)
+	case *AssignAttr:
+		x.Target = subExpr(x.Target, from, to)
+		x.Value = subExpr(x.Value, from, to)
+	case *Return:
+		if x.X != nil {
+			x.X = subExpr(x.X, from, to)
+		}
+	case *If:
+		x.Cond = subExpr(x.Cond, from, to)
+		substituteName(x.Then, from, to)
+		substituteName(x.Else, from, to)
+	case *While:
+		x.Cond = subExpr(x.Cond, from, to)
+		substituteName(x.Body, from, to)
+	case *ForRange:
+		x.Start = subExpr(x.Start, from, to)
+		x.Stop = subExpr(x.Stop, from, to)
+		if x.Step != nil {
+			x.Step = subExpr(x.Step, from, to)
+		}
+		substituteName(x.Body, from, to)
+	case *ForEach:
+		x.Iter = subExpr(x.Iter, from, to)
+		substituteName(x.Body, from, to)
+	case *Try:
+		substituteName(x.Body, from, to)
+		for i := range x.Handlers {
+			substituteName(x.Handlers[i].Body, from, to)
+		}
+		substituteName(x.Finally, from, to)
+	case *Raise:
+		if x.Exc != nil {
+			x.Exc = subExpr(x.Exc, from, to)
+		}
+	case *WithFile:
+		x.Path = subExpr(x.Path, from, to)
+		substituteName(x.Body, from, to)
+	case *Yield:
+		if x.X != nil {
+			x.X = subExpr(x.X, from, to)
+		}
+	}
+}
+
+func subExpr(e Expr, from, to string) Expr {
+	if e == nil {
+		return nil
+	}
+	switch x := e.(type) {
+	case *Name:
+		if x.N == from {
+			return &Name{N: to, Ty: x.Ty}
+		}
+		return x
+	case *BinOp:
+		x.L = subExpr(x.L, from, to)
+		x.R = subExpr(x.R, from, to)
+	case *CmpOp:
+		x.L = subExpr(x.L, from, to)
+		x.R = subExpr(x.R, from, to)
+	case *BoolOp:
+		x.L = subExpr(x.L, from, to)
+		x.R = subExpr(x.R, from, to)
+	case *UnaryOp:
+		x.X = subExpr(x.X, from, to)
+	case *Call:
+		x.Func = subExpr(x.Func, from, to)
+		for i := range x.Args {
+			x.Args[i] = subExpr(x.Args[i], from, to)
+		}
+		for i := range x.Keywords {
+			x.Keywords[i].Value = subExpr(x.Keywords[i].Value, from, to)
+		}
+	case *MethodCall:
+		x.Recv = subExpr(x.Recv, from, to)
+		for i := range x.Args {
+			x.Args[i] = subExpr(x.Args[i], from, to)
+		}
+	case *Attribute:
+		x.Recv = subExpr(x.Recv, from, to)
+	case *Subscript:
+		x.Value = subExpr(x.Value, from, to)
+		x.Index = subExpr(x.Index, from, to)
+	case *ListLit:
+		for i := range x.Elems {
+			x.Elems[i] = subExpr(x.Elems[i], from, to)
+		}
+	case *DictLit:
+		for i := range x.Keys {
+			x.Keys[i] = subExpr(x.Keys[i], from, to)
+			x.Vals[i] = subExpr(x.Vals[i], from, to)
+		}
+	case *FStr:
+		for i := range x.Parts {
+			if x.Parts[i].Expr != nil {
+				x.Parts[i].Expr = subExpr(x.Parts[i].Expr, from, to)
+			}
+		}
+	case *ListComp:
+		x.Iter = subExpr(x.Iter, from, to)
+		x.Elt = subExpr(x.Elt, from, to)
+		if x.Cond != nil {
+			x.Cond = subExpr(x.Cond, from, to)
+		}
+	case *DictComp:
+		x.Iter = subExpr(x.Iter, from, to)
+		x.Key = subExpr(x.Key, from, to)
+		x.Val = subExpr(x.Val, from, to)
+		if x.Cond != nil {
+			x.Cond = subExpr(x.Cond, from, to)
+		}
+	}
+	return e
+}
+
+// lowerListComp lowers `[Elt for Var in Iter if Cond]` to a ListComp IR.
+// F7 supports exactly one generator and at most one filter.
+func lowerListComp(n parser.Node, sc *scope) (Expr, error) {
+	gens := n.Children("generators")
+	if len(gens) != 1 {
+		return nil, fmt.Errorf("line %d: only single-generator comprehensions supported (F7)", n.Lineno())
+	}
+	g := gens[0]
+	tgt := g.Child("target")
+	if tgt.Type() != "Name" {
+		return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
+	}
+	iter, err := lowerExpr(g.Child("iter"), sc)
+	if err != nil {
+		return nil, err
+	}
+	varName := tgt.Str("id")
+	innerSc := &scope{vars: copyVars(sc.vars)}
+	var elemTy *Type
+	if t := iter.TypeOf(); t != nil {
+		switch t.Kind {
+		case TyList:
+			elemTy = t.Elem
+		case TyDict:
+			elemTy = t.Key
+		case TyStr:
+			elemTy = &Type{Kind: TyStr}
+		}
+	}
+	innerSc.declare(varName, elemTy)
+	elt, err := lowerExpr(n.Child("elt"), innerSc)
+	if err != nil {
+		return nil, err
+	}
+	var cond Expr
+	if ifs := g.Children("ifs"); len(ifs) > 0 {
+		if len(ifs) > 1 {
+			return nil, fmt.Errorf("line %d: only one if-filter supported", n.Lineno())
+		}
+		c, err := lowerExpr(ifs[0], innerSc)
+		if err != nil {
+			return nil, err
+		}
+		cond = c
+	}
+	resultElemTy := elt.TypeOf()
+	if resultElemTy == nil {
+		resultElemTy = &Type{Kind: TyAny}
+	}
+	return &ListComp{
+		Elt:    elt,
+		Var:    varName,
+		Iter:   iter,
+		Cond:   cond,
+		ElemTy: resultElemTy,
+		Ty:     &Type{Kind: TyList, Elem: resultElemTy},
+	}, nil
+}
+
+// lowerDictComp lowers `{K: V for Var in Iter if Cond}`.
+func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
+	gens := n.Children("generators")
+	if len(gens) != 1 {
+		return nil, fmt.Errorf("line %d: only single-generator dict comprehensions supported (F7)", n.Lineno())
+	}
+	g := gens[0]
+	tgt := g.Child("target")
+	if tgt.Type() != "Name" {
+		return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
+	}
+	iter, err := lowerExpr(g.Child("iter"), sc)
+	if err != nil {
+		return nil, err
+	}
+	varName := tgt.Str("id")
+	innerSc := &scope{vars: copyVars(sc.vars)}
+	var elemTy *Type
+	if t := iter.TypeOf(); t != nil {
+		switch t.Kind {
+		case TyList:
+			elemTy = t.Elem
+		case TyDict:
+			elemTy = t.Key
+		case TyStr:
+			elemTy = &Type{Kind: TyStr}
+		}
+	}
+	innerSc.declare(varName, elemTy)
+	key, err := lowerExpr(n.Child("key"), innerSc)
+	if err != nil {
+		return nil, err
+	}
+	val, err := lowerExpr(n.Child("value"), innerSc)
+	if err != nil {
+		return nil, err
+	}
+	var cond Expr
+	if ifs := g.Children("ifs"); len(ifs) > 0 {
+		if len(ifs) > 1 {
+			return nil, fmt.Errorf("line %d: only one if-filter supported", n.Lineno())
+		}
+		c, err := lowerExpr(ifs[0], innerSc)
+		if err != nil {
+			return nil, err
+		}
+		cond = c
+	}
+	kt := key.TypeOf()
+	if kt == nil {
+		kt = &Type{Kind: TyAny}
+	}
+	vt := val.TypeOf()
+	if vt == nil {
+		vt = &Type{Kind: TyAny}
+	}
+	return &DictComp{
+		Key:   key,
+		Val:   val,
+		Var:   varName,
+		Iter:  iter,
+		Cond:  cond,
+		KeyTy: kt,
+		ValTy: vt,
+		Ty:    &Type{Kind: TyDict, Key: kt, Val: vt},
+	}, nil
 }
 
 // lowerWith handles only `with open(path[, mode]) as name: body` in F4.

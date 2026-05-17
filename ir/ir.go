@@ -87,6 +87,10 @@ type Class struct {
 	// diamond-inheritance conflicts when a subclass with multiple bases
 	// inherits the same method name from two of them without overriding.
 	MethodNames []string
+	// ClassMethods is the set of method names declared with @classmethod.
+	// They are emitted as free functions named `<Class>_<method>`; call
+	// sites of the form `Class.method(args)` rewrite to that free call.
+	ClassMethods map[string]bool
 }
 
 func (*Class) declNode() {}
@@ -94,6 +98,11 @@ func (*Class) declNode() {}
 type Param struct {
 	Name string
 	Ty   *Type
+	// Default is the expression used when a call site omits this argument.
+	// nil when no default was declared. Note: unlike CPython, defaults
+	// here are re-evaluated at every call site, so users avoid the
+	// classic "mutable default argument" trap.
+	Default Expr
 }
 
 // Stmt is any statement in a function body or module top level.
@@ -248,9 +257,16 @@ type UnaryOp struct {
 	Ty *Type
 }
 type Call struct {
-	Func Expr
-	Args []Expr
-	Ty   *Type
+	Func     Expr
+	Args     []Expr
+	Keywords []Keyword
+	Ty       *Type
+}
+
+// Keyword is one `name=value` pair in a call expression.
+type Keyword struct {
+	Name  string
+	Value Expr
 }
 
 // MethodCall is `recv.method(args)`. Kept distinct from Call to make
@@ -291,6 +307,30 @@ type DictLit struct {
 	Ty         *Type
 }
 
+// ListComp is `[ Elt for Var in Iter [if Cond] ]`. F7 supports one
+// generator and at most one filter expression.
+type ListComp struct {
+	Elt    Expr
+	Var    string
+	Iter   Expr
+	Cond   Expr // optional filter
+	ElemTy *Type
+	Ty     *Type
+}
+
+// DictComp is `{ Key: Val for Var in Iter [if Cond] }`. Same restrictions
+// as ListComp.
+type DictComp struct {
+	Key   Expr
+	Val   Expr
+	Var   string
+	Iter  Expr
+	Cond  Expr
+	KeyTy *Type
+	ValTy *Type
+	Ty    *Type
+}
+
 // FStr is a Python f-string lowered to a list of literal / expression parts.
 // Codegen emits fmt.Sprintf with %v for each expression part.
 type FStr struct {
@@ -321,6 +361,8 @@ func (*Subscript) exprNode()  {}
 func (*ListLit) exprNode()    {}
 func (*DictLit) exprNode()    {}
 func (*FStr) exprNode()       {}
+func (*ListComp) exprNode()   {}
+func (*DictComp) exprNode()   {}
 
 func (e *IntLit) TypeOf() *Type     { return e.Ty }
 func (e *FloatLit) TypeOf() *Type   { return e.Ty }
@@ -339,3 +381,5 @@ func (e *Subscript) TypeOf() *Type  { return e.Ty }
 func (e *ListLit) TypeOf() *Type    { return e.Ty }
 func (e *DictLit) TypeOf() *Type    { return e.Ty }
 func (e *FStr) TypeOf() *Type       { return e.Ty }
+func (e *ListComp) TypeOf() *Type   { return e.Ty }
+func (e *DictComp) TypeOf() *Type   { return e.Ty }

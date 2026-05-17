@@ -47,6 +47,12 @@ var stdlibModules = map[string]stdlibModule{
 			"sub":     {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub},
 		},
 	},
+	"csv": {
+		Funcs: map[string]stdlibFunc{
+			"reader": {GoFunc: "__gopy_csv_reader", GoImport: "encoding/csv", Helper: helperCSVReader, HelperImports: []string{"strings"}},
+			"writer": {GoFunc: "__gopy_csv_writer", GoImport: "encoding/csv", Helper: helperCSVWriter, HelperImports: []string{"strings"}},
+		},
+	},
 	"pathlib": {
 		Funcs: map[string]stdlibFunc{
 			"Path": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os"}},
@@ -222,6 +228,39 @@ const helperReMatch = `func __gopy_re_match(pattern, s string) *__Match {
 const helperReSub = `func __gopy_re_sub(pattern, repl, s string) string {
 	r := regexp.MustCompile(pattern)
 	return r.ReplaceAllString(s, repl)
+}`
+
+// helperCSVReader materializes Python's `csv.reader(iterable_of_lines)`
+// as a list of rows. CPython returns an iterator; we return a slice to
+// keep the shim simple and to match common idioms (`for row in
+// csv.reader(lines)`, `list(csv.reader(lines))`). Pass already-split
+// lines (each without a trailing newline) for parity with CPython.
+const helperCSVReader = `func __gopy_csv_reader(lines []string) [][]string {
+	r := csv.NewReader(strings.NewReader(strings.Join(lines, "\n")))
+	rows, err := r.ReadAll()
+	if err != nil {
+		panic(err)
+	}
+	return rows
+}`
+
+// helperCSVWriter renders a list of rows to a single CSV-formatted string.
+// CPython's csv.writer is stateful and bound to a file-like object; the
+// gopy shim takes the rows directly to avoid pulling in the StringIO
+// machinery.
+const helperCSVWriter = `func __gopy_csv_writer(rows [][]string) string {
+	var b strings.Builder
+	w := csv.NewWriter(&b)
+	for _, row := range rows {
+		if err := w.Write(row); err != nil {
+			panic(err)
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		panic(err)
+	}
+	return b.String()
 }`
 
 // helperPathType is the runtime Path struct used by pathlib.Path.
