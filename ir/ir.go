@@ -99,6 +99,15 @@ type Class struct {
 	// They are emitted as free functions named `<Class>_<method>`; call
 	// sites of the form `Class.method(args)` rewrite to that free call.
 	ClassMethods map[string]bool
+	// IsORM is true when this class inherits from `Model` (gopy_django.models).
+	// The transpiler then synthesizes a kwargs constructor, a Save method,
+	// and a per-class Manager singleton instead of running the normal
+	// __init__-driven flow.
+	IsORM bool
+	// ORMFields is the ordered list of Field-typed class attributes for
+	// IsORM classes — derived from `name = CharField(...)` style decls in
+	// the class body.
+	ORMFields []Param
 }
 
 func (*Class) declNode() {}

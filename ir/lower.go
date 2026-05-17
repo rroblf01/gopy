@@ -117,11 +117,31 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		if bn == "object" {
 			continue // implicit base, ignore
 		}
+		if bn == "Model" {
+			class.IsORM = true
+			continue // do not embed; Model is virtual at the Go level
+		}
 		class.Bases = append(class.Bases, bn)
 	}
 	var decls []Decl
 
 	for _, m := range n.Children("body") {
+		// ORM models accept class-level field declarations like
+		//   name = CharField(max_length=100)
+		// alongside (or instead of) methods. Parse the Field call into an
+		// IR Param so codegen can lay out the struct.
+		if class.IsORM && m.Type() == "Assign" {
+			ty, err := ormFieldType(m)
+			if err != nil {
+				return nil, fmt.Errorf("class %s: %w", name, err)
+			}
+			targets := m.Children("targets")
+			if len(targets) != 1 || targets[0].Type() != "Name" {
+				return nil, fmt.Errorf("class %s: field declarations need a single Name target", name)
+			}
+			class.ORMFields = append(class.ORMFields, Param{Name: targets[0].Str("id"), Ty: ty})
+			continue
+		}
 		if m.Type() != "FunctionDef" {
 			return nil, fmt.Errorf("line %d: class %s: only methods supported (F2)", m.Lineno(), name)
 		}
@@ -1104,6 +1124,30 @@ func lowerCmpKind(s string) (string, error) {
 		return "!=", nil
 	}
 	return "", fmt.Errorf("unsupported Compare op %q", s)
+}
+
+// ormFieldType inspects a class-level `name = SomeField(...)` Assign and
+// returns the IR Type implied by the field constructor. Only the three
+// scalar Django-flavored fields are recognized; anything else is an error
+// so users see a precise failure rather than a silent `any`-typed column.
+func ormFieldType(assign parser.Node) (*Type, error) {
+	val := assign.Child("value")
+	if val == nil || val.Type() != "Call" {
+		return nil, fmt.Errorf("ORM field declaration: RHS must be a Field constructor call")
+	}
+	fn := val.Child("func")
+	if fn == nil || fn.Type() != "Name" {
+		return nil, fmt.Errorf("ORM field declaration: callee must be a Field class name")
+	}
+	switch fn.Str("id") {
+	case "CharField":
+		return &Type{Kind: TyStr}, nil
+	case "IntegerField":
+		return &Type{Kind: TyInt}, nil
+	case "BooleanField":
+		return &Type{Kind: TyBool}, nil
+	}
+	return nil, fmt.Errorf("unsupported ORM field type %q (F9 recognizes CharField, IntegerField, BooleanField)", fn.Str("id"))
 }
 
 // substituteName rewrites every Name(from) anywhere in ss to Name(to).

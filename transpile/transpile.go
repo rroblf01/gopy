@@ -161,6 +161,12 @@ func (g *gen) detectExceptionUsage(m *ir.Module) {
 					g.needsException = true
 				}
 			}
+			// ORM Manager.Get() may panic with NewException for the
+			// DoesNotExist / MultipleObjectsReturned cases, so always
+			// emit the base type for ORM modules.
+			if x.IsORM {
+				g.needsException = true
+			}
 			g.scanStmtsForException(x.InitBody)
 		case *ir.Func:
 			g.scanStmtsForException(x.Body)
@@ -281,6 +287,10 @@ func (g *gen) class(c *ir.Class) error {
 	prev := g.currentClass
 	g.currentClass = c
 	defer func() { g.currentClass = prev }()
+
+	if c.IsORM {
+		return g.ormClass(c)
+	}
 
 	// Emit struct type.
 	g.writef("type %s struct {\n", c.Name)
@@ -1238,7 +1248,12 @@ func (g *gen) call(c *ir.Call) error {
 			}
 		}
 		// Class constructor: rewrite Foo(...) → NewFoo(...).
-		if _, ok := g.classes[name.N]; ok {
+		if cls, ok := g.classes[name.N]; ok {
+			if cls.IsORM {
+				// ORM constructors take a single kwargs map; pack all
+				// keyword arguments at the call site into it.
+				return g.ormKwargCall(fmt.Sprintf("New%s", name.N), c.Args, c.Keywords)
+			}
 			g.writef("New%s(", name.N)
 			for i, a := range c.Args {
 				if i > 0 {
@@ -1608,6 +1623,33 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			}
 			g.writef(")")
 			return nil
+		}
+	}
+	// ORM manager dispatch: `Class.objects.X(**kwargs)` →
+	// `<Class>Objects.X(map[string]any{...})`. Recognized when the receiver
+	// is Attribute(Name(Class), "objects") and Class is an ORM Model.
+	if attr, ok := m.Recv.(*ir.Attribute); ok && attr.Name == "objects" {
+		if classNode, ok := attr.Recv.(*ir.Name); ok {
+			if cls, ok := g.classes[classNode.N]; ok && cls.IsORM {
+				method := ""
+				switch m.Method {
+				case "all":
+					method = "All"
+				case "filter":
+					method = "Filter"
+				case "get":
+					method = "Get"
+				case "create":
+					method = "Create"
+				default:
+					return fmt.Errorf("ORM manager method %s.objects.%s not supported (F9: all/filter/get/create)", classNode.N, m.Method)
+				}
+				if method == "All" {
+					g.writef("%sObjects.All()", classNode.N)
+					return nil
+				}
+				return g.ormKwargCall(fmt.Sprintf("%sObjects.%s", classNode.N, method), m.Args, m.Keywords)
+			}
 		}
 	}
 	// Class-level method call: `Class.method(args)` when method is a
@@ -1995,6 +2037,200 @@ func (g *gen) boolExpr(e ir.Expr) error {
 				return nil
 			}
 		}
+	}
+	return g.expr(e)
+}
+
+// ormClass emits the full ORM scaffolding for a `class Foo(Model):`
+// declaration: the data struct, a kwargs-driven constructor, an instance
+// Save method, a per-class Manager type, and a module-level Objects
+// singleton. The output is self-contained — no runtime import required.
+func (g *gen) ormClass(c *ir.Class) error {
+	// 1) Data struct.
+	g.writef("type %s struct {\n", c.Name)
+	g.indent++
+	for _, f := range c.ORMFields {
+		g.writeIndent()
+		g.writef("%s %s\n", f.Name, g.goType(f.Ty))
+	}
+	g.indent--
+	g.writef("}\n\n")
+
+	// 2) Constructor: takes kwargs as map[string]any, fills declared fields.
+	g.writef("func New%s(kwargs map[string]any) *%s {\n", c.Name, c.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("self := &%s{}\n", c.Name)
+	for _, f := range c.ORMFields {
+		g.writeIndent()
+		g.writef("if __v, __ok := kwargs[%q]; __ok {\n", f.Name)
+		g.indent++
+		g.writeIndent()
+		g.writef("self.%s = __v.(%s)\n", f.Name, g.goType(f.Ty))
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
+	g.writeIndent()
+	g.writef("return self\n")
+	g.indent--
+	g.writef("}\n\n")
+
+	// 3) save method — kept lowercase so user code `u.save()` dispatches
+	// without renaming. The manager's Create() uses the same name.
+	g.writef("func (self *%s) save() {\n", c.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("for _, r := range %sObjects.records {\n", c.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("if r == self { return }\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("%sObjects.records = append(%sObjects.records, self)\n", c.Name, c.Name)
+	g.indent--
+	g.writef("}\n\n")
+
+	// 4) Manager type + methods.
+	g.writef("type %sManager struct {\n\trecords []*%s\n}\n\n", c.Name, c.Name)
+
+	g.writef("func (m *%sManager) All() []*%s {\n", c.Name, c.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("out := make([]*%s, len(m.records))\n", c.Name)
+	g.writeIndent()
+	g.writef("copy(out, m.records)\n")
+	g.writeIndent()
+	g.writef("return out\n")
+	g.indent--
+	g.writef("}\n\n")
+
+	g.writef("func (m *%sManager) Filter(kwargs map[string]any) []*%s {\n", c.Name, c.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("out := []*%s{}\n", c.Name)
+	g.writeIndent()
+	g.writef("for _, r := range m.records {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("match := true\n")
+	g.writeIndent()
+	g.writef("for k, v := range kwargs {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("switch k {\n")
+	for _, f := range c.ORMFields {
+		g.writeIndent()
+		g.writef("case %q:\n", f.Name)
+		g.indent++
+		g.writeIndent()
+		g.writef("if r.%s != v.(%s) { match = false }\n", f.Name, g.goType(f.Ty))
+		g.indent--
+	}
+	g.writeIndent()
+	g.writef("default:\n\t\t\tmatch = false\n")
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("if !match { break }\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("if match { out = append(out, r) }\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return out\n")
+	g.indent--
+	g.writef("}\n\n")
+
+	g.writef("func (m *%sManager) Get(kwargs map[string]any) *%s {\n", c.Name, c.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("hits := m.Filter(kwargs)\n")
+	g.writeIndent()
+	g.writef("if len(hits) == 0 { panic(NewException(\"DoesNotExist\")) }\n")
+	g.writeIndent()
+	g.writef("if len(hits) > 1 { panic(NewException(\"MultipleObjectsReturned\")) }\n")
+	g.writeIndent()
+	g.writef("return hits[0]\n")
+	g.indent--
+	g.writef("}\n\n")
+
+	g.writef("func (m *%sManager) Create(kwargs map[string]any) *%s {\n", c.Name, c.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("r := New%s(kwargs)\n", c.Name)
+	g.writeIndent()
+	g.writef("r.save()\n")
+	g.writeIndent()
+	g.writef("return r\n")
+	g.indent--
+	g.writef("}\n\n")
+
+	// 5) Module-level Objects var.
+	g.writef("var %sObjects = &%sManager{}\n", c.Name, c.Name)
+
+	// The Manager's Get/MultipleObjectsReturned paths panic with NewException,
+	// so we need the inline Exception base type emitted.
+	g.needsException = true
+
+	return nil
+}
+
+// ormKwargCall renders an ORM call as `funcName(map[string]any{...})`.
+// Positional args at the call site are rejected (Django-style construction
+// is keyword-only); keyword args are packed in declaration order. Each
+// value is wrapped with an explicit numeric conversion so the resulting
+// `any` interfaces hold the exact Go type the ORM manager will later
+// type-assert against (int → int64, float → float64).
+func (g *gen) ormKwargCall(funcName string, args []ir.Expr, kws []ir.Keyword) error {
+	if len(args) > 0 {
+		return fmt.Errorf("%s: ORM construction requires keyword arguments only", funcName)
+	}
+	g.writef("%s(map[string]any{", funcName)
+	for i, kw := range kws {
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("%q: ", kw.Name)
+		if err := g.boxedExpr(kw.Value); err != nil {
+			return err
+		}
+	}
+	g.writef("})")
+	return nil
+}
+
+// boxedExpr emits an expression wrapped in a Go conversion that produces
+// a concretely-typed value (int64 / float64 / string / bool). Used when
+// the value is about to be stored in an `any` slot — otherwise an untyped
+// integer literal would land in the slot as `int`, not the `int64` the
+// ORM later asserts against.
+func (g *gen) boxedExpr(e ir.Expr) error {
+	t := e.TypeOf()
+	if t == nil {
+		return g.expr(e)
+	}
+	switch t.Kind {
+	case ir.TyInt:
+		g.writef("int64(")
+		if err := g.expr(e); err != nil {
+			return err
+		}
+		g.writef(")")
+		return nil
+	case ir.TyFloat:
+		g.writef("float64(")
+		if err := g.expr(e); err != nil {
+			return err
+		}
+		g.writef(")")
+		return nil
 	}
 	return g.expr(e)
 }
