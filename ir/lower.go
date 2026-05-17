@@ -218,6 +218,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		}
 		fn.Body = body
 		decls = append(decls, fn)
+		class.MethodNames = append(class.MethodNames, methName)
 		if isProperty {
 			if class.Properties == nil {
 				class.Properties = map[string]bool{}
@@ -938,6 +939,14 @@ func lowerCmpKind(s string) (string, error) {
 		return ">", nil
 	case "GtE":
 		return ">=", nil
+	// `x is y` / `x is not y` lower to plain equality. The compared side
+	// is typically `None` (i.e. a NoneLit) and codegen handles that as
+	// a nil check; for non-None operands Go's `==` still gives the right
+	// answer for pointer identity.
+	case "Is":
+		return "==", nil
+	case "IsNot":
+		return "!=", nil
 	}
 	return "", fmt.Errorf("unsupported Compare op %q", s)
 }

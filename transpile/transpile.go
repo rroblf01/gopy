@@ -23,7 +23,7 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}}
 	g.buildAliases(m)
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
@@ -37,6 +37,13 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 				g.generators[x.Name] = true
 			}
 		}
+	}
+	// Diamond-inheritance method conflict check. Go's embedding rules will
+	// reject ambiguous selectors at compile time with a cryptic message
+	// ("ambiguous selector"); surfacing the same condition here with the
+	// Python-level class and method names is much friendlier.
+	if err := g.detectDiamondConflicts(); err != nil {
+		return nil, err
 	}
 	// Scan for usage of the builtin `Exception` type so we know whether to
 	// emit the embedded definition (keeps generated programs self-contained
@@ -218,6 +225,11 @@ type gen struct {
 	// `import X as Y`) to a dotted stdlib path the codegen knows about.
 	// Example: `from datetime import datetime` → aliases["datetime"] = "datetime.datetime".
 	aliases map[string]string
+	// varTypes records the runtime tag of a local variable when it was
+	// assigned the result of a typed stdlib call (Match, Path, Timedelta).
+	// Codegen consults this for method dispatch (e.g. m.group()) and for
+	// nil-safety on `if m:` truthy checks. Cleared between functions.
+	varTypes map[string]string
 }
 
 func (g *gen) writef(f string, a ...any) { fmt.Fprintf(&g.body, f, a...) }
@@ -312,6 +324,12 @@ func (g *gen) fn(fn *ir.Func) error {
 		g.currentClass = g.classes[fn.Receiver.Ty.Name]
 		defer func() { g.currentClass = prev }()
 	}
+	// Var-type tracking is function-local: a name reused across two
+	// functions could plausibly hold different stdlib types in each, so
+	// we start fresh and restore on exit.
+	prevVars := g.varTypes
+	g.varTypes = map[string]string{}
+	defer func() { g.varTypes = prevVars }()
 	if fn.IsGenerator {
 		return g.generatorFn(fn)
 	}
@@ -403,10 +421,19 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("\n")
 		return nil
 	case *ir.Assign:
+		// Track stdlib-call return tags so later method dispatch and
+		// truthy checks see the right type. We do this regardless of
+		// whether the declaration carries an explicit annotation.
+		if tag := g.stdlibCallRetTag(x.Value); tag != "" {
+			g.varTypes[x.Target] = tag
+		}
 		g.writeIndent()
 		switch {
 		case x.Decl && x.Ty != nil && x.Ty.Kind != ir.TyUnknown:
 			g.writef("var %s %s = ", x.Target, g.goType(x.Ty))
+		case x.Decl && g.varTypes[x.Target] != "":
+			// Tagged var (stdlib return): let Go infer the pointer type from RHS.
+			g.writef("%s := ", x.Target)
 		case x.Decl:
 			g.writef("%s := ", x.Target)
 		default:
@@ -458,7 +485,7 @@ func (g *gen) stmt(s ir.Stmt) error {
 	case *ir.If:
 		g.writeIndent()
 		g.writef("if ")
-		if err := g.expr(x.Cond); err != nil {
+		if err := g.boolExpr(x.Cond); err != nil {
 			return err
 		}
 		g.writef(" {\n")
@@ -484,7 +511,7 @@ func (g *gen) stmt(s ir.Stmt) error {
 	case *ir.While:
 		g.writeIndent()
 		g.writef("for ")
-		if err := g.expr(x.Cond); err != nil {
+		if err := g.boolExpr(x.Cond); err != nil {
 			return err
 		}
 		g.writef(" {\n")
@@ -966,6 +993,12 @@ func (g *gen) call(c *ir.Call) error {
 					}
 					if fn.Helper != "" {
 						g.helpers[fn.GoFunc] = fn.Helper
+						for _, imp := range fn.HelperImports {
+							g.addImport(imp)
+						}
+					}
+					for k, v := range fn.ExtraHelpers {
+						g.helpers[k] = v
 					}
 					g.writef("%s(", fn.GoFunc)
 					for i, a := range c.Args {
@@ -1081,7 +1114,47 @@ func (g *gen) call(c *ir.Call) error {
 	return nil
 }
 
+// taggedMethodRename maps Python-style method names on stdlib-wrapped
+// objects to the exported Go method names emitted by the inline helpers.
+// snake_case → CamelCase, mostly.
+var taggedMethodRename = map[string]map[string]string{
+	"__Match": {
+		"group":  "Group",
+		"groups": "Groups",
+	},
+	"__Path": {
+		"exists":     "Exists",
+		"is_file":    "IsFile",
+		"is_dir":     "IsDir",
+		"read_text":  "ReadText",
+		"write_text": "WriteText",
+	},
+}
+
 func (g *gen) methodCall(m *ir.MethodCall) error {
+	// Tagged-variable method dispatch (Match.group, Path.exists, ...).
+	// Tag is recorded in g.varTypes when the variable was assigned the
+	// result of a typed stdlib call.
+	if n, ok := m.Recv.(*ir.Name); ok {
+		if tag := g.varTypes[n.N]; tag != "" {
+			if rename, ok := taggedMethodRename[tag]; ok {
+				if goName, ok := rename[m.Method]; ok {
+					g.writef("%s.%s(", n.N, goName)
+					for i, a := range m.Args {
+						if i > 0 {
+							g.writef(", ")
+						}
+						if err := g.expr(a); err != nil {
+							return err
+						}
+					}
+					g.writef(")")
+					return nil
+				}
+				return fmt.Errorf("method %s.%s not supported on %s-tagged value", n.N, m.Method, tag)
+			}
+		}
+	}
 	// Stdlib resolution that crosses module aliases or nested submodules
 	// (e.g. `datetime.datetime.now()` and the aliased
 	// `from datetime import datetime` form). Build a dotted path from the
@@ -1097,6 +1170,9 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 				for _, imp := range fn.HelperImports {
 					g.addImport(imp)
 				}
+			}
+			for k, v := range fn.ExtraHelpers {
+				g.helpers[k] = v
 			}
 			g.writef("%s(", fn.GoFunc)
 			for i, a := range m.Args {
@@ -1158,6 +1234,9 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 				for _, imp := range fn.HelperImports {
 					g.addImport(imp)
 				}
+			}
+			for k, v := range fn.ExtraHelpers {
+				g.helpers[k] = v
 			}
 			g.writef("%s(", fn.GoFunc)
 			for i, a := range m.Args {
@@ -1349,6 +1428,60 @@ func collectAttrChain(e ir.Expr) ([]string, bool) {
 	}
 }
 
+// detectDiamondConflicts walks each multi-base class and rejects cases
+// where two distinct bases provide methods with the same name AND the
+// subclass does not override it. Single-base classes are fine; subclasses
+// that explicitly override the shadowed method are also fine.
+func (g *gen) detectDiamondConflicts() error {
+	for _, cls := range g.classes {
+		if len(cls.Bases) < 2 {
+			continue
+		}
+		// Collect inherited method names with their source base.
+		seen := map[string]string{}
+		own := map[string]bool{}
+		for _, name := range cls.MethodNames {
+			own[name] = true
+		}
+		for _, b := range cls.Bases {
+			base, ok := g.classes[b]
+			if !ok {
+				continue
+			}
+			for _, name := range g.collectInheritedMethods(base) {
+				if own[name] {
+					continue // subclass overrides; no conflict
+				}
+				if prev, hit := seen[name]; hit && prev != b {
+					return fmt.Errorf("class %s inherits %q from both %s and %s; override it explicitly in %s to disambiguate", cls.Name, name, prev, b, cls.Name)
+				}
+				seen[name] = b
+			}
+		}
+	}
+	return nil
+}
+
+// collectInheritedMethods returns every method name defined on the given
+// class or any of its ancestors. Walks the base chain transitively.
+func (g *gen) collectInheritedMethods(cls *ir.Class) []string {
+	visited := map[string]bool{}
+	var out []string
+	var walk func(*ir.Class)
+	walk = func(c *ir.Class) {
+		if c == nil || visited[c.Name] {
+			return
+		}
+		visited[c.Name] = true
+		out = append(out, c.MethodNames...)
+		for _, b := range c.Bases {
+			walk(g.classes[b])
+		}
+	}
+	walk(cls)
+	return out
+}
+
 // hasProperty walks className and its base chain looking for a @property
 // method named attr. The class registry is keyed by Python class name and
 // bases are also Python names, so the lookup is uniform.
@@ -1375,6 +1508,70 @@ func (g *gen) hasProperty(className, attr string) bool {
 		return false
 	}
 	return walk(className)
+}
+
+// boolExpr emits e as a boolean condition. If e is a Name bound to a
+// nullable stdlib type (Match, Path, Timedelta), Go won't accept the bare
+// variable as a condition, so we rewrite to a nil comparison. Same for
+// UnaryOp(Not, Name) where the Name is tagged.
+func (g *gen) boolExpr(e ir.Expr) error {
+	switch x := e.(type) {
+	case *ir.Name:
+		if g.varTypes[x.N] != "" {
+			g.writef("%s != nil", x.N)
+			return nil
+		}
+	case *ir.UnaryOp:
+		if x.Op == "not" {
+			if n, ok := x.X.(*ir.Name); ok && g.varTypes[n.N] != "" {
+				g.writef("%s == nil", n.N)
+				return nil
+			}
+		}
+	}
+	return g.expr(e)
+}
+
+// stdlibCallRetTag returns the RetTag of a stdlib call expression, or "".
+// It handles both forms: a bare Call(Name(alias), ...) where the alias
+// resolves to a dotted path, and a MethodCall(Recv, method) where the
+// receiver is itself a stdlib module/submodule chain.
+func (g *gen) stdlibCallRetTag(e ir.Expr) string {
+	switch x := e.(type) {
+	case *ir.Call:
+		n, ok := x.Func.(*ir.Name)
+		if !ok {
+			return ""
+		}
+		path, hit := g.aliases[n.N]
+		if !hit {
+			return ""
+		}
+		segs := splitDotted(path)
+		if len(segs) != 2 {
+			return ""
+		}
+		mod, ok := stdlibModules[segs[0]]
+		if !ok {
+			return ""
+		}
+		fn, ok := mod.Funcs[segs[1]]
+		if !ok {
+			return ""
+		}
+		return fn.RetTag
+	case *ir.MethodCall:
+		path, ok := stdlibPathOf(x.Recv, g.aliases)
+		if !ok {
+			return ""
+		}
+		fn := lookupStdlibFunc(path, x.Method)
+		if fn == nil {
+			return ""
+		}
+		return fn.RetTag
+	}
+	return ""
 }
 
 // isSuperCall returns true when expr is a call to bare `super()`.

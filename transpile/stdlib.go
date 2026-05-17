@@ -42,12 +42,20 @@ var stdlibModules = map[string]stdlibModule{
 	"re": {
 		Funcs: map[string]stdlibFunc{
 			"findall": {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall},
-			"search":  {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch},
-			"match":   {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch},
+			"search":  {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
+			"match":   {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
 			"sub":     {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub},
 		},
 	},
+	"pathlib": {
+		Funcs: map[string]stdlibFunc{
+			"Path": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os"}},
+		},
+	},
 	"datetime": {
+		Funcs: map[string]stdlibFunc{
+			"timedelta": {GoFunc: "__gopy_timedelta_new", GoImport: "time", Helper: helperTimedeltaNew, RetTag: "__Timedelta", ExtraHelpers: map[string]string{"__Timedelta": helperTimedeltaType}, HelperImports: []string{"fmt"}},
+		},
 		Subs: map[string]stdlibModule{
 			"datetime": {
 				Funcs: map[string]stdlibFunc{
@@ -81,6 +89,17 @@ type stdlibFunc struct {
 	// HelperImports lists additional Go imports the Helper body relies on.
 	// They are added to the output only when this function is used.
 	HelperImports []string
+	// RetTag is a stable tag for the function's return type. When non-empty,
+	// the codegen records it under the assigned variable so subsequent
+	// MethodCall / If / `is None` checks can dispatch by type. Tags:
+	//   "__Match"     — re.search / re.match
+	//   "__Path"      — pathlib.Path constructor
+	//   "__Timedelta" — datetime.timedelta constructor
+	RetTag string
+	// ExtraHelpers lists additional helper definitions and matching keys to
+	// emit when this function is used. Each helper is keyed by its own
+	// stable name to avoid duplication.
+	ExtraHelpers map[string]string
 }
 
 const helperTimeNowSeconds = `func __gopy_time_now_seconds() float64 { return float64(time.Now().UnixNano()) / 1e9 }`
@@ -152,27 +171,121 @@ const helperReFindall = `func __gopy_re_findall(pattern, s string) []string {
 	return out
 }`
 
-// helperReSearch returns the first match as a string, or empty string when
-// the pattern doesn't match. Truthy checks (` + "`if re.search(...):`" + `) work
-// because empty string is falsy under our convention; users wanting strict
-// None checks should be rewritten to inspect emptiness.
-const helperReSearch = `func __gopy_re_search(pattern, s string) string {
+// helperMatchType is the runtime Match struct used by re.search / re.match.
+// Methods mirror a (very) thin subset of Python's Match: Group(n) returns
+// the full match for n=0 or empty, and capture n otherwise. Strings round
+// through fmt as the match text so callers can pass Match directly to
+// __gopy_print.
+const helperMatchType = `type __Match struct {
+	full   string
+	groups []string
+}
+
+func (m *__Match) Group(n ...int) string {
+	if len(n) == 0 || n[0] == 0 {
+		return m.full
+	}
+	if n[0] < 1 || n[0] > len(m.groups) {
+		return ""
+	}
+	return m.groups[n[0]-1]
+}
+
+func (m *__Match) Groups() []string { return m.groups }
+
+func (m *__Match) String() string { return m.full }`
+
+// helperReSearch returns a *__Match on hit, nil on miss — mirroring
+// Python's re.search semantics. Truthy / `is None` checks at call sites
+// work because the codegen rewrites them to a nil comparison.
+const helperReSearch = `func __gopy_re_search(pattern, s string) *__Match {
 	r := regexp.MustCompile(pattern)
-	m := r.FindString(s)
-	return m
+	parts := r.FindStringSubmatch(s)
+	if parts == nil {
+		return nil
+	}
+	return &__Match{full: parts[0], groups: parts[1:]}
 }`
 
 // helperReMatch anchors the pattern to the start of the string, matching
-// Python's re.match semantics.
-const helperReMatch = `func __gopy_re_match(pattern, s string) string {
+// Python's re.match semantics. Returns nil on miss.
+const helperReMatch = `func __gopy_re_match(pattern, s string) *__Match {
 	r := regexp.MustCompile("^(?:" + pattern + ")")
-	return r.FindString(s)
+	parts := r.FindStringSubmatch(s)
+	if parts == nil {
+		return nil
+	}
+	return &__Match{full: parts[0], groups: parts[1:]}
 }`
 
 // helperReSub replaces every match of pattern with repl.
 const helperReSub = `func __gopy_re_sub(pattern, repl, s string) string {
 	r := regexp.MustCompile(pattern)
 	return r.ReplaceAllString(s, repl)
+}`
+
+// helperPathType is the runtime Path struct used by pathlib.Path.
+// Mirrors a handful of Path methods sufficient for "open this, check
+// existence, read/write text" workflows.
+const helperPathType = `type __Path struct{ p string }
+
+func (p *__Path) Exists() bool {
+	_, err := os.Stat(p.p)
+	return err == nil
+}
+
+func (p *__Path) IsFile() bool {
+	i, err := os.Stat(p.p)
+	return err == nil && !i.IsDir()
+}
+
+func (p *__Path) IsDir() bool {
+	i, err := os.Stat(p.p)
+	return err == nil && i.IsDir()
+}
+
+func (p *__Path) ReadText() string {
+	b, err := os.ReadFile(p.p)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+func (p *__Path) WriteText(s string) {
+	if err := os.WriteFile(p.p, []byte(s), 0o644); err != nil {
+		panic(err)
+	}
+}
+
+func (p *__Path) String() string { return p.p }`
+
+const helperPathNew = `func __gopy_path_new(s string) *__Path { return &__Path{p: s} }`
+
+// helperTimedeltaType mirrors Python's str(timedelta(days=...)) output
+// so cross-runtime fixtures can print the value directly. Supports
+// only the positional-days constructor in F6-fix; richer kwargs land
+// once general kwargs support exists.
+const helperTimedeltaType = `type __Timedelta struct{ d time.Duration }
+
+func (t *__Timedelta) String() string {
+	d := t.d
+	days := int(d / (24 * time.Hour))
+	rem := d - time.Duration(days)*24*time.Hour
+	h := int(rem / time.Hour)
+	m := int((rem % time.Hour) / time.Minute)
+	s := int((rem % time.Minute) / time.Second)
+	if days == 1 {
+		return fmt.Sprintf("1 day, %d:%02d:%02d", h, m, s)
+	}
+	if days != 0 {
+		return fmt.Sprintf("%d days, %d:%02d:%02d", days, h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+}`
+
+const helperTimedeltaNew = `func __gopy_timedelta_new(days int64) *__Timedelta {
+	return &__Timedelta{d: time.Duration(days) * 24 * time.Hour}
 }`
 
 // helperDatetimeNow returns Python's datetime.datetime.now() in a form

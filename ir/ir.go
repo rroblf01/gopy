@@ -82,6 +82,11 @@ type Class struct {
 	// Properties is the set of methods marked with @property: at call sites,
 	// `instance.prop` should emit `instance.prop()` rather than a field load.
 	Properties map[string]bool
+	// MethodNames lists every regular method defined directly on this
+	// class (excluding __init__). The transpiler uses this to catch
+	// diamond-inheritance conflicts when a subclass with multiple bases
+	// inherits the same method name from two of them without overriding.
+	MethodNames []string
 }
 
 func (*Class) declNode() {}
