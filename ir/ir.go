@@ -99,15 +99,6 @@ type Class struct {
 	// They are emitted as free functions named `<Class>_<method>`; call
 	// sites of the form `Class.method(args)` rewrite to that free call.
 	ClassMethods map[string]bool
-	// IsORM is true when this class inherits from `Model` (gopy_django.models).
-	// The transpiler then synthesizes a kwargs constructor, a Save method,
-	// and a per-class Manager singleton instead of running the normal
-	// __init__-driven flow.
-	IsORM bool
-	// ORMFields is the ordered list of Field-typed class attributes for
-	// IsORM classes — derived from `name = CharField(...)` style decls in
-	// the class body.
-	ORMFields []Param
 }
 
 func (*Class) declNode() {}
@@ -310,6 +301,17 @@ type Subscript struct {
 	Ty    *Type
 }
 
+// Slice is `value[low:high]` or `value[low:high:step]`. Any of Low/High/Step
+// may be nil to mark an omitted bound (e.g. `xs[1:]`). Step is not yet
+// supported at codegen time and is rejected when non-nil.
+type Slice struct {
+	Value Expr
+	Low   Expr
+	High  Expr
+	Step  Expr
+	Ty    *Type
+}
+
 // ListLit is `[e1, e2, ...]`. ElemTy is inferred (or TyAny if mixed/unknown).
 type ListLit struct {
 	Elems  []Expr
@@ -376,6 +378,7 @@ func (*Call) exprNode()       {}
 func (*MethodCall) exprNode() {}
 func (*Attribute) exprNode()  {}
 func (*Subscript) exprNode()  {}
+func (*Slice) exprNode()      {}
 func (*ListLit) exprNode()    {}
 func (*DictLit) exprNode()    {}
 func (*FStr) exprNode()       {}
@@ -396,6 +399,7 @@ func (e *Call) TypeOf() *Type       { return e.Ty }
 func (e *MethodCall) TypeOf() *Type { return e.Ty }
 func (e *Attribute) TypeOf() *Type  { return e.Ty }
 func (e *Subscript) TypeOf() *Type  { return e.Ty }
+func (e *Slice) TypeOf() *Type      { return e.Ty }
 func (e *ListLit) TypeOf() *Type    { return e.Ty }
 func (e *DictLit) TypeOf() *Type    { return e.Ty }
 func (e *FStr) TypeOf() *Type       { return e.Ty }

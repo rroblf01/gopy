@@ -109,39 +109,25 @@ func lowerTopLevel(n parser.Node) ([]Decl, error) {
 func lowerClass(n parser.Node) ([]Decl, error) {
 	name := n.Str("name")
 	class := &Class{Name: name}
+	// First pass: collect all base names (including any registered plugin
+	// markers like `Model`). Plugin bases are consumed by the lower hook
+	// — they don't appear as Go-level embeds.
+	var rawBases []string
 	for _, b := range n.Children("bases") {
 		if b.Type() != "Name" {
 			return nil, fmt.Errorf("class %s: complex base expressions not supported", name)
 		}
 		bn := b.Str("id")
 		if bn == "object" {
-			continue // implicit base, ignore
-		}
-		if bn == "Model" {
-			class.IsORM = true
-			continue // do not embed; Model is virtual at the Go level
-		}
-		class.Bases = append(class.Bases, bn)
-	}
-	var decls []Decl
-
-	for _, m := range n.Children("body") {
-		// ORM models accept class-level field declarations like
-		//   name = CharField(max_length=100)
-		// alongside (or instead of) methods. Parse the Field call into an
-		// IR Param so codegen can lay out the struct.
-		if class.IsORM && m.Type() == "Assign" {
-			ty, err := ormFieldType(m)
-			if err != nil {
-				return nil, fmt.Errorf("class %s: %w", name, err)
-			}
-			targets := m.Children("targets")
-			if len(targets) != 1 || targets[0].Type() != "Name" {
-				return nil, fmt.Errorf("class %s: field declarations need a single Name target", name)
-			}
-			class.ORMFields = append(class.ORMFields, Param{Name: targets[0].Str("id"), Ty: ty})
 			continue
 		}
+		rawBases = append(rawBases, bn)
+	}
+	class.Bases = append(class.Bases, rawBases...)
+	bodyNodes := n.Children("body")
+	var decls []Decl
+
+	for _, m := range bodyNodes {
 		if m.Type() != "FunctionDef" {
 			return nil, fmt.Errorf("line %d: class %s: only methods supported (F2)", m.Lineno(), name)
 		}
@@ -907,7 +893,9 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			if err != nil {
 				return nil, err
 			}
-			return &MethodCall{Recv: recv, Method: fnNode.Str("attr"), Args: args, Keywords: kws, Ty: &Type{Kind: TyUnknown}}, nil
+			method := fnNode.Str("attr")
+			retTy := inferMethodRet(recv, method)
+			return &MethodCall{Recv: recv, Method: method, Args: args, Keywords: kws, Ty: retTy}, nil
 		}
 		callee, err := lowerExpr(n.Child("func"), sc)
 		if err != nil {
@@ -943,7 +931,37 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		idx, err := lowerExpr(n.Child("slice"), sc)
+		sliceNode := n.Child("slice")
+		// Python AST: `xs[a:b]` parses slice as Slice(lower, upper, step);
+		// `xs[k]` parses slice as a plain expression. Disambiguate here.
+		if sliceNode != nil && sliceNode.Type() == "Slice" {
+			var low, high, step Expr
+			if l := sliceNode.Child("lower"); l != nil {
+				e, err := lowerExpr(l, sc)
+				if err != nil {
+					return nil, err
+				}
+				low = e
+			}
+			if h := sliceNode.Child("upper"); h != nil {
+				e, err := lowerExpr(h, sc)
+				if err != nil {
+					return nil, err
+				}
+				high = e
+			}
+			if s := sliceNode.Child("step"); s != nil {
+				e, err := lowerExpr(s, sc)
+				if err != nil {
+					return nil, err
+				}
+				step = e
+			}
+			// Slice preserves the container type for list/str; unknown otherwise.
+			ty := val.TypeOf()
+			return &Slice{Value: val, Low: low, High: high, Step: step, Ty: ty}, nil
+		}
+		idx, err := lowerExpr(sliceNode, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -1126,28 +1144,42 @@ func lowerCmpKind(s string) (string, error) {
 	return "", fmt.Errorf("unsupported Compare op %q", s)
 }
 
-// ormFieldType inspects a class-level `name = SomeField(...)` Assign and
-// returns the IR Type implied by the field constructor. Only the three
-// scalar Django-flavored fields are recognized; anything else is an error
-// so users see a precise failure rather than a silent `any`-typed column.
-func ormFieldType(assign parser.Node) (*Type, error) {
-	val := assign.Child("value")
-	if val == nil || val.Type() != "Call" {
-		return nil, fmt.Errorf("ORM field declaration: RHS must be a Field constructor call")
+// inferMethodRet returns the static return type of a method call when
+// the receiver type + method name unambiguously imply it. Used so
+// chained calls like `s.strip().replace(...)` know `strip()` yields a
+// `str` and can dispatch `replace` against TyStr. Returns TyUnknown
+// when no inference applies.
+func inferMethodRet(recv Expr, method string) *Type {
+	rt := recv.TypeOf()
+	if rt == nil {
+		return &Type{Kind: TyUnknown}
 	}
-	fn := val.Child("func")
-	if fn == nil || fn.Type() != "Name" {
-		return nil, fmt.Errorf("ORM field declaration: callee must be a Field class name")
+	switch rt.Kind {
+	case TyStr:
+		switch method {
+		case "upper", "lower", "strip", "replace":
+			return &Type{Kind: TyStr}
+		case "startswith", "endswith":
+			return &Type{Kind: TyBool}
+		case "find":
+			return &Type{Kind: TyInt}
+		case "split":
+			return &Type{Kind: TyList, Elem: &Type{Kind: TyStr}}
+		case "join":
+			return &Type{Kind: TyStr}
+		}
+	case TyList:
+		switch method {
+		case "append":
+			return &Type{Kind: TyNone}
+		}
+	case TyDict:
+		switch method {
+		case "get":
+			return rt.Val
+		}
 	}
-	switch fn.Str("id") {
-	case "CharField":
-		return &Type{Kind: TyStr}, nil
-	case "IntegerField":
-		return &Type{Kind: TyInt}, nil
-	case "BooleanField":
-		return &Type{Kind: TyBool}, nil
-	}
-	return nil, fmt.Errorf("unsupported ORM field type %q (F9 recognizes CharField, IntegerField, BooleanField)", fn.Str("id"))
+	return &Type{Kind: TyUnknown}
 }
 
 // substituteName rewrites every Name(from) anywhere in ss to Name(to).

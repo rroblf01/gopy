@@ -23,7 +23,7 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}}
 	g.buildAliases(m)
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
@@ -161,12 +161,6 @@ func (g *gen) detectExceptionUsage(m *ir.Module) {
 					g.needsException = true
 				}
 			}
-			// ORM Manager.Get() may panic with NewException for the
-			// DoesNotExist / MultipleObjectsReturned cases, so always
-			// emit the base type for ORM modules.
-			if x.IsORM {
-				g.needsException = true
-			}
 			g.scanStmtsForException(x.InitBody)
 		case *ir.Func:
 			g.scanStmtsForException(x.Body)
@@ -247,6 +241,11 @@ type gen struct {
 	// Codegen consults this for method dispatch (e.g. m.group()) and for
 	// nil-safety on `if m:` truthy checks. Cleared between functions.
 	varTypes map[string]string
+	// localVarTypes carries IR types learned from typed assignments
+	// inside the current function (e.g. `u = create_user()` where the
+	// function's declared return type is `User`). Used by Name/Attribute
+	// codegen to dispatch user-class methods when no annotation exists.
+	localVarTypes map[string]*ir.Type
 }
 
 func (g *gen) writef(f string, a ...any) { fmt.Fprintf(&g.body, f, a...) }
@@ -287,10 +286,6 @@ func (g *gen) class(c *ir.Class) error {
 	prev := g.currentClass
 	g.currentClass = c
 	defer func() { g.currentClass = prev }()
-
-	if c.IsORM {
-		return g.ormClass(c)
-	}
 
 	// Emit struct type.
 	g.writef("type %s struct {\n", c.Name)
@@ -350,7 +345,22 @@ func (g *gen) fn(fn *ir.Func) error {
 	// we start fresh and restore on exit.
 	prevVars := g.varTypes
 	g.varTypes = map[string]string{}
-	defer func() { g.varTypes = prevVars }()
+	prevLocal := g.localVarTypes
+	g.localVarTypes = map[string]*ir.Type{}
+	// Seed function parameters so attribute access on them dispatches
+	// against the right class without needing assignment-side inference.
+	for _, p := range fn.Params {
+		if p.Ty != nil {
+			g.localVarTypes[p.Name] = p.Ty
+		}
+	}
+	if fn.Receiver != nil {
+		g.localVarTypes[fn.Receiver.Name] = fn.Receiver.Ty
+	}
+	defer func() {
+		g.varTypes = prevVars
+		g.localVarTypes = prevLocal
+	}()
 	if fn.IsGenerator {
 		return g.generatorFn(fn)
 	}
@@ -468,6 +478,21 @@ func (g *gen) stmt(s ir.Stmt) error {
 		// whether the declaration carries an explicit annotation.
 		if tag := g.stdlibCallRetTag(x.Value); tag != "" {
 			g.varTypes[x.Target] = tag
+		}
+		// Propagate types so later attribute / method dispatch resolves
+		// without requiring an explicit annotation. Sources, in order:
+		//   1. The annotation on this Assign, if any.
+		//   2. The return type of a user-defined function/method call.
+		//   3. The static IR type the value itself carries.
+		switch {
+		case x.Ty != nil && x.Ty.Kind != ir.TyUnknown:
+			g.localVarTypes[x.Target] = x.Ty
+		case g.userCallRetType(x.Value) != nil:
+			g.localVarTypes[x.Target] = g.userCallRetType(x.Value)
+		default:
+			if vt := x.Value.TypeOf(); vt != nil && vt.Kind != ir.TyUnknown {
+				g.localVarTypes[x.Target] = vt
+			}
 		}
 		g.writeIndent()
 		switch {
@@ -595,6 +620,54 @@ func (g *gen) stmt(s ir.Stmt) error {
 // It opens the file, defers Close, and tags the file variable so method
 // calls like fh.read() / fh.write(s) inside the body translate to the
 // right Go expressions.
+// helperCmpStr backs string-typed ORM field comparisons. ops:
+//   eq (default), contains, startswith, endswith
+// Numeric ops (lt/gt) on strings fall through to false to keep the
+// dispatch table closed.
+const helperCmpStr = `func __gopy_cmp_str(a string, expected any, op string) bool {
+	e, _ := expected.(string)
+	switch op {
+	case "eq":
+		return a == e
+	case "contains":
+		return strings.Contains(a, e)
+	case "startswith":
+		return strings.HasPrefix(a, e)
+	case "endswith":
+		return strings.HasSuffix(a, e)
+	}
+	return false
+}`
+
+// helperCmpInt backs integer-typed ORM field comparisons. Accepts the
+// usual numeric operators in addition to plain equality.
+const helperCmpInt = `func __gopy_cmp_int(a int64, expected any, op string) bool {
+	var e int64
+	switch x := expected.(type) {
+	case int64:
+		e = x
+	case int:
+		e = int64(x)
+	case float64:
+		e = int64(x)
+	default:
+		return false
+	}
+	switch op {
+	case "eq":
+		return a == e
+	case "lt":
+		return a < e
+	case "lte":
+		return a <= e
+	case "gt":
+		return a > e
+	case "gte":
+		return a >= e
+	}
+	return false
+}`
+
 // helperGopyInt mirrors Python's int(x) for the common cases: numeric
 // types are truncated to int64, strings are parsed as base-10, bools
 // become 0/1. Used when the static type isn't known to be numeric
@@ -1005,7 +1078,7 @@ func (g *gen) expr(e ir.Expr) error {
 		// @property: receiver is an instance of a user class that registers
 		// this attribute as a property (in itself or in any base). Emit
 		// `recv.x()` (method call) rather than `recv.x` (field load).
-		if ty := x.Recv.TypeOf(); ty != nil && ty.Kind == ir.TyNamed {
+		if ty := g.effectiveType(x.Recv); ty != nil && ty.Kind == ir.TyNamed {
 			if g.hasProperty(ty.Name, x.Name) {
 				if err := g.expr(x.Recv); err != nil {
 					return err
@@ -1025,6 +1098,26 @@ func (g *gen) expr(e ir.Expr) error {
 		g.writef("[")
 		if err := g.expr(x.Index); err != nil {
 			return err
+		}
+		g.writef("]")
+	case *ir.Slice:
+		if x.Step != nil {
+			return fmt.Errorf("slice with explicit step is not supported yet")
+		}
+		if err := g.expr(x.Value); err != nil {
+			return err
+		}
+		g.writef("[")
+		if x.Low != nil {
+			if err := g.expr(x.Low); err != nil {
+				return err
+			}
+		}
+		g.writef(":")
+		if x.High != nil {
+			if err := g.expr(x.High); err != nil {
+				return err
+			}
 		}
 		g.writef("]")
 	case *ir.ListLit:
@@ -1248,12 +1341,7 @@ func (g *gen) call(c *ir.Call) error {
 			}
 		}
 		// Class constructor: rewrite Foo(...) → NewFoo(...).
-		if cls, ok := g.classes[name.N]; ok {
-			if cls.IsORM {
-				// ORM constructors take a single kwargs map; pack all
-				// keyword arguments at the call site into it.
-				return g.ormKwargCall(fmt.Sprintf("New%s", name.N), c.Args, c.Keywords)
-			}
+		if _, ok := g.classes[name.N]; ok {
 			g.writef("New%s(", name.N)
 			for i, a := range c.Args {
 				if i > 0 {
@@ -1351,6 +1439,18 @@ func (g *gen) call(c *ir.Call) error {
 			}
 			g.writef(")")
 			return nil
+		case "sorted":
+			return g.builtinSorted(c)
+		case "any":
+			return g.builtinReduce(c, "any")
+		case "all":
+			return g.builtinReduce(c, "all")
+		case "sum":
+			return g.builtinReduce(c, "sum")
+		case "min":
+			return g.builtinReduce(c, "min")
+		case "max":
+			return g.builtinReduce(c, "max")
 		}
 	}
 	// User-defined free function: resolve kwargs/defaults if any.
@@ -1430,7 +1530,7 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 			if i > 0 {
 				g.writef(", ")
 			}
-			if err := g.expr(a); err != nil {
+			if err := g.boxedExpr(a); err != nil {
 				return err
 			}
 		}
@@ -1448,7 +1548,7 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 			}
 			first = false
 			g.writef("%q: ", k)
-			if err := g.expr(v); err != nil {
+			if err := g.boxedExpr(v); err != nil {
 				return err
 			}
 		}
@@ -1561,6 +1661,14 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return nil
 		}
 	}
+	// String methods: dispatched whenever the receiver carries a TyStr.
+	// Each Python str method maps to a Go strings.* function (or a tiny
+	// shim where the signature shapes differ).
+	if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyStr {
+		if handled, err := g.stringMethod(m); handled || err != nil {
+			return err
+		}
+	}
 	// File handle methods inside a `with open(...) as fh:` block.
 	if n, ok := m.Recv.(*ir.Name); ok && g.fileVars[n.N] {
 		switch m.Method {
@@ -1623,33 +1731,6 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			}
 			g.writef(")")
 			return nil
-		}
-	}
-	// ORM manager dispatch: `Class.objects.X(**kwargs)` →
-	// `<Class>Objects.X(map[string]any{...})`. Recognized when the receiver
-	// is Attribute(Name(Class), "objects") and Class is an ORM Model.
-	if attr, ok := m.Recv.(*ir.Attribute); ok && attr.Name == "objects" {
-		if classNode, ok := attr.Recv.(*ir.Name); ok {
-			if cls, ok := g.classes[classNode.N]; ok && cls.IsORM {
-				method := ""
-				switch m.Method {
-				case "all":
-					method = "All"
-				case "filter":
-					method = "Filter"
-				case "get":
-					method = "Get"
-				case "create":
-					method = "Create"
-				default:
-					return fmt.Errorf("ORM manager method %s.objects.%s not supported (F9: all/filter/get/create)", classNode.N, m.Method)
-				}
-				if method == "All" {
-					g.writef("%sObjects.All()", classNode.N)
-					return nil
-				}
-				return g.ormKwargCall(fmt.Sprintf("%sObjects.%s", classNode.N, method), m.Args, m.Keywords)
-			}
 		}
 	}
 	// Class-level method call: `Class.method(args)` when method is a
@@ -1764,7 +1845,7 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	// User-defined instance method with kwargs/defaults: resolve via class
 	// method registry. Triggers only when the receiver has a known
 	// user-class type AND the method is declared on that class (or a base).
-	if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyNamed {
+	if rt := g.effectiveType(m.Recv); rt != nil && rt.Kind == ir.TyNamed {
 		if fn := g.lookupMethod(rt.Name, m.Method); fn != nil && (len(m.Keywords) > 0 || hasDefault(fn)) {
 			return g.userMethodCall(m, fn)
 		}
@@ -2041,170 +2122,6 @@ func (g *gen) boolExpr(e ir.Expr) error {
 	return g.expr(e)
 }
 
-// ormClass emits the full ORM scaffolding for a `class Foo(Model):`
-// declaration: the data struct, a kwargs-driven constructor, an instance
-// Save method, a per-class Manager type, and a module-level Objects
-// singleton. The output is self-contained — no runtime import required.
-func (g *gen) ormClass(c *ir.Class) error {
-	// 1) Data struct.
-	g.writef("type %s struct {\n", c.Name)
-	g.indent++
-	for _, f := range c.ORMFields {
-		g.writeIndent()
-		g.writef("%s %s\n", f.Name, g.goType(f.Ty))
-	}
-	g.indent--
-	g.writef("}\n\n")
-
-	// 2) Constructor: takes kwargs as map[string]any, fills declared fields.
-	g.writef("func New%s(kwargs map[string]any) *%s {\n", c.Name, c.Name)
-	g.indent++
-	g.writeIndent()
-	g.writef("self := &%s{}\n", c.Name)
-	for _, f := range c.ORMFields {
-		g.writeIndent()
-		g.writef("if __v, __ok := kwargs[%q]; __ok {\n", f.Name)
-		g.indent++
-		g.writeIndent()
-		g.writef("self.%s = __v.(%s)\n", f.Name, g.goType(f.Ty))
-		g.indent--
-		g.writeIndent()
-		g.writef("}\n")
-	}
-	g.writeIndent()
-	g.writef("return self\n")
-	g.indent--
-	g.writef("}\n\n")
-
-	// 3) save method — kept lowercase so user code `u.save()` dispatches
-	// without renaming. The manager's Create() uses the same name.
-	g.writef("func (self *%s) save() {\n", c.Name)
-	g.indent++
-	g.writeIndent()
-	g.writef("for _, r := range %sObjects.records {\n", c.Name)
-	g.indent++
-	g.writeIndent()
-	g.writef("if r == self { return }\n")
-	g.indent--
-	g.writeIndent()
-	g.writef("}\n")
-	g.writeIndent()
-	g.writef("%sObjects.records = append(%sObjects.records, self)\n", c.Name, c.Name)
-	g.indent--
-	g.writef("}\n\n")
-
-	// 4) Manager type + methods.
-	g.writef("type %sManager struct {\n\trecords []*%s\n}\n\n", c.Name, c.Name)
-
-	g.writef("func (m *%sManager) All() []*%s {\n", c.Name, c.Name)
-	g.indent++
-	g.writeIndent()
-	g.writef("out := make([]*%s, len(m.records))\n", c.Name)
-	g.writeIndent()
-	g.writef("copy(out, m.records)\n")
-	g.writeIndent()
-	g.writef("return out\n")
-	g.indent--
-	g.writef("}\n\n")
-
-	g.writef("func (m *%sManager) Filter(kwargs map[string]any) []*%s {\n", c.Name, c.Name)
-	g.indent++
-	g.writeIndent()
-	g.writef("out := []*%s{}\n", c.Name)
-	g.writeIndent()
-	g.writef("for _, r := range m.records {\n")
-	g.indent++
-	g.writeIndent()
-	g.writef("match := true\n")
-	g.writeIndent()
-	g.writef("for k, v := range kwargs {\n")
-	g.indent++
-	g.writeIndent()
-	g.writef("switch k {\n")
-	for _, f := range c.ORMFields {
-		g.writeIndent()
-		g.writef("case %q:\n", f.Name)
-		g.indent++
-		g.writeIndent()
-		g.writef("if r.%s != v.(%s) { match = false }\n", f.Name, g.goType(f.Ty))
-		g.indent--
-	}
-	g.writeIndent()
-	g.writef("default:\n\t\t\tmatch = false\n")
-	g.writeIndent()
-	g.writef("}\n")
-	g.writeIndent()
-	g.writef("if !match { break }\n")
-	g.indent--
-	g.writeIndent()
-	g.writef("}\n")
-	g.writeIndent()
-	g.writef("if match { out = append(out, r) }\n")
-	g.indent--
-	g.writeIndent()
-	g.writef("}\n")
-	g.writeIndent()
-	g.writef("return out\n")
-	g.indent--
-	g.writef("}\n\n")
-
-	g.writef("func (m *%sManager) Get(kwargs map[string]any) *%s {\n", c.Name, c.Name)
-	g.indent++
-	g.writeIndent()
-	g.writef("hits := m.Filter(kwargs)\n")
-	g.writeIndent()
-	g.writef("if len(hits) == 0 { panic(NewException(\"DoesNotExist\")) }\n")
-	g.writeIndent()
-	g.writef("if len(hits) > 1 { panic(NewException(\"MultipleObjectsReturned\")) }\n")
-	g.writeIndent()
-	g.writef("return hits[0]\n")
-	g.indent--
-	g.writef("}\n\n")
-
-	g.writef("func (m *%sManager) Create(kwargs map[string]any) *%s {\n", c.Name, c.Name)
-	g.indent++
-	g.writeIndent()
-	g.writef("r := New%s(kwargs)\n", c.Name)
-	g.writeIndent()
-	g.writef("r.save()\n")
-	g.writeIndent()
-	g.writef("return r\n")
-	g.indent--
-	g.writef("}\n\n")
-
-	// 5) Module-level Objects var.
-	g.writef("var %sObjects = &%sManager{}\n", c.Name, c.Name)
-
-	// The Manager's Get/MultipleObjectsReturned paths panic with NewException,
-	// so we need the inline Exception base type emitted.
-	g.needsException = true
-
-	return nil
-}
-
-// ormKwargCall renders an ORM call as `funcName(map[string]any{...})`.
-// Positional args at the call site are rejected (Django-style construction
-// is keyword-only); keyword args are packed in declaration order. Each
-// value is wrapped with an explicit numeric conversion so the resulting
-// `any` interfaces hold the exact Go type the ORM manager will later
-// type-assert against (int → int64, float → float64).
-func (g *gen) ormKwargCall(funcName string, args []ir.Expr, kws []ir.Keyword) error {
-	if len(args) > 0 {
-		return fmt.Errorf("%s: ORM construction requires keyword arguments only", funcName)
-	}
-	g.writef("%s(map[string]any{", funcName)
-	for i, kw := range kws {
-		if i > 0 {
-			g.writef(", ")
-		}
-		g.writef("%q: ", kw.Name)
-		if err := g.boxedExpr(kw.Value); err != nil {
-			return err
-		}
-	}
-	g.writef("})")
-	return nil
-}
 
 // boxedExpr emits an expression wrapped in a Go conversion that produces
 // a concretely-typed value (int64 / float64 / string / bool). Used when
@@ -2235,6 +2152,264 @@ func (g *gen) boxedExpr(e ir.Expr) error {
 	return g.expr(e)
 }
 
+// builtinSorted emits an IIFE that copies the input slice and sorts it
+// in place. The element type is taken from the static IR type of the
+// argument; non-list inputs are rejected at codegen time. `key` and
+// `reverse` are not yet supported.
+func (g *gen) builtinSorted(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("sorted() takes one positional argument (key/reverse not yet supported)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("sorted(): %w", err)
+	}
+	g.addImport("sort")
+	elemGo := g.goType(elem)
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := make([]%s, len(__src))\n", elemGo)
+	g.writeIndent()
+	g.writef("copy(__out, __src)\n")
+	g.writeIndent()
+	g.writef("sort.Slice(__out, func(i, j int) bool { return __out[i] < __out[j] })\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinReduce handles single-pass list reductions: any/all/sum/min/max.
+// All take exactly one list argument; the element type guides the
+// accumulator and comparator.
+func (g *gen) builtinReduce(c *ir.Call, kind string) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("%s() takes exactly one positional argument", kind)
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("%s(): %w", kind, err)
+	}
+	elemGo := g.goType(elem)
+	emit := func(retGo, init, loopBody string) error {
+		g.writef("func() %s {\n", retGo)
+		g.indent++
+		g.writeIndent()
+		g.writef("__src := ")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("%s\n", init)
+		g.writeIndent()
+		g.writef("for __i, __v := range __src {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("%s\n", loopBody)
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+		g.writeIndent()
+		g.writef("return __acc\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()")
+		return nil
+	}
+	switch kind {
+	case "any":
+		return emit("bool", "__acc := false", "_ = __i; if __v { __acc = true; break }")
+	case "all":
+		return emit("bool", "__acc := true", "_ = __i; if !__v { __acc = false; break }")
+	case "sum":
+		if elem.Kind != ir.TyInt && elem.Kind != ir.TyFloat {
+			return fmt.Errorf("sum(): list must contain int or float, got %s", elemGo)
+		}
+		zero := "0"
+		if elem.Kind == ir.TyFloat {
+			zero = "0.0"
+		}
+		return emit(elemGo, fmt.Sprintf("var __acc %s = %s", elemGo, zero), "_ = __i; __acc += __v")
+	case "min":
+		return emit(elemGo, "var __acc "+elemGo, "if __i == 0 || __v < __acc { __acc = __v }")
+	case "max":
+		return emit(elemGo, "var __acc "+elemGo, "if __i == 0 || __v > __acc { __acc = __v }")
+	}
+	return fmt.Errorf("unknown reduction %q", kind)
+}
+
+// listElemTypeOf extracts the element type from a list-typed expression,
+// surfacing a descriptive error when the static type isn't a list.
+func listElemTypeOf(e ir.Expr) (*ir.Type, error) {
+	t := e.TypeOf()
+	if t == nil || t.Kind != ir.TyList {
+		return nil, fmt.Errorf("argument must be a typed list")
+	}
+	if t.Elem == nil {
+		return &ir.Type{Kind: ir.TyAny}, nil
+	}
+	return t.Elem, nil
+}
+
+// stringMethod handles Python str methods on a TyStr-typed receiver by
+// routing to the Go `strings` package. Returns (true, nil) if it handled
+// the call, (false, nil) to fall through to default codegen, or an error
+// if the method is recognized but argument shape is wrong.
+func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
+	switch m.Method {
+	case "upper":
+		g.addImport("strings")
+		g.writef("strings.ToUpper(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "lower":
+		g.addImport("strings")
+		g.writef("strings.ToLower(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "strip":
+		g.addImport("strings")
+		if len(m.Args) == 0 {
+			g.writef("strings.TrimSpace(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(")")
+			return true, nil
+		}
+		g.writef("strings.Trim(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "split":
+		g.addImport("strings")
+		if len(m.Args) == 0 {
+			// Python's bare split() collapses runs of whitespace; Go's Fields() does too.
+			g.writef("strings.Fields(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(")")
+			return true, nil
+		}
+		g.writef("strings.Split(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "join":
+		// Python: `sep.join(parts)` — receiver is the separator.
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.join() takes exactly one argument")
+		}
+		g.addImport("strings")
+		g.writef("strings.Join(")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "replace":
+		if len(m.Args) != 2 {
+			return true, fmt.Errorf("str.replace() takes (old, new)")
+		}
+		g.addImport("strings")
+		g.writef("strings.ReplaceAll(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[1]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "startswith":
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.startswith() takes one argument")
+		}
+		g.addImport("strings")
+		g.writef("strings.HasPrefix(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "endswith":
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.endswith() takes one argument")
+		}
+		g.addImport("strings")
+		g.writef("strings.HasSuffix(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "find":
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.find() takes one argument")
+		}
+		g.addImport("strings")
+		// Both Python's str.find and Go's strings.Index return -1 when
+		// the substring isn't present, so the int64 cast is enough.
+		g.writef("int64(strings.Index(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef("))")
+		return true, nil
+	}
+	return false, nil
+}
+
 // emitMethodOp renders `recv.Method(arg)` — used by BinOp rewriting when
 // operator overloading on tagged stdlib types needs to delegate to a Go
 // method.
@@ -2260,6 +2435,42 @@ func (g *gen) exprTag(e ir.Expr) string {
 		return g.stdlibCallRetTag(e.(ir.Expr))
 	}
 	return ""
+}
+
+// effectiveType returns the strongest type known for an expression:
+// first the static IR type, then — for bare Names — the local-var
+// inference map populated from earlier assignments / parameters.
+func (g *gen) effectiveType(e ir.Expr) *ir.Type {
+	if t := e.TypeOf(); t != nil && t.Kind != ir.TyUnknown {
+		return t
+	}
+	if n, ok := e.(*ir.Name); ok {
+		if t, ok := g.localVarTypes[n.N]; ok {
+			return t
+		}
+	}
+	return e.TypeOf()
+}
+
+// userCallRetType returns the declared return type of a user-defined
+// function (or method) referenced by the given call, or nil when the
+// call doesn't bind to a known function/method.
+func (g *gen) userCallRetType(e ir.Expr) *ir.Type {
+	switch x := e.(type) {
+	case *ir.Call:
+		if n, ok := x.Func.(*ir.Name); ok {
+			if fn, ok := g.funcs[n.N]; ok {
+				return fn.Ret
+			}
+		}
+	case *ir.MethodCall:
+		if rt := x.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyNamed {
+			if fn := g.lookupMethod(rt.Name, x.Method); fn != nil {
+				return fn.Ret
+			}
+		}
+	}
+	return nil
 }
 
 // stdlibCallRetTag returns the RetTag of a stdlib call expression, or "".
