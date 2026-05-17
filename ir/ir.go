@@ -32,8 +32,23 @@ func (t *Type) IsZero() bool { return t == nil || t.Kind == TyUnknown }
 
 // Module is the root: a flat list of top-level declarations.
 type Module struct {
+	Name    string
+	Decls   []Decl
+	Imports []Import // collected at lower time so codegen can resolve aliases
+}
+
+// Import captures one `import X` or `from X import Y [as Z]`.
+// For plain `import X`, From == "" and Names == [{Name: X}].
+// For `from X import Y`, From == X and Names == [{Name: Y, Alias: ""}].
+// For `from X import Y as Z`, Alias = Z.
+type Import struct {
+	From  string       // "" for plain `import X`
+	Names []ImportName
+}
+
+type ImportName struct {
 	Name  string
-	Decls []Decl
+	Alias string
 }
 
 type Decl interface{ declNode() }
@@ -64,6 +79,9 @@ type Class struct {
 	HasInit  bool
 	InitArgs []Param // params of __init__ excluding self (drives constructor sig)
 	InitBody []Stmt  // __init__ body (self.x = expr, etc.) used as constructor body
+	// Properties is the set of methods marked with @property: at call sites,
+	// `instance.prop` should emit `instance.prop()` rather than a field load.
+	Properties map[string]bool
 }
 
 func (*Class) declNode() {}

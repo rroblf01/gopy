@@ -19,6 +19,7 @@ func main() {
 	out := flag.String("o", "", "output Go file (default: stdout)")
 	pkg := flag.String("pkg", "main", "Go package name for generated file")
 	dumper := flag.String("dumper", "", "path to scripts/py_ast_dump.py (default: auto-locate)")
+	python := flag.String("python", "", "Python interpreter to use (default: ./.venv/bin/python3 if present, else python3)")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -34,7 +35,11 @@ func main() {
 		}
 	}
 
-	root, err := parser.ParseFile(dumperPath, src)
+	pyBin := *python
+	if pyBin == "" {
+		pyBin = parser.LocatePython(src)
+	}
+	root, err := parser.ParseFileWith(pyBin, dumperPath, src)
 	check(err)
 
 	modName := filepath.Base(src)

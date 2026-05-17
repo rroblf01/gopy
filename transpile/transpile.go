@@ -23,7 +23,8 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}}
+	g.buildAliases(m)
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
 	// for super() dispatch.
@@ -72,6 +73,54 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 		return []byte(src), fmt.Errorf("gofmt: %w\n---\n%s", err, src)
 	}
 	return formatted, nil
+}
+
+// buildAliases populates g.aliases from the module's import statements.
+// Only `from <stdlib> import <name>` forms are recorded — bare `import X`
+// already maps `X.attr` to stdlibModules[X] without help, and unknown
+// modules surface as undefined-name errors downstream.
+func (g *gen) buildAliases(m *ir.Module) {
+	for _, imp := range m.Imports {
+		if imp.From == "" {
+			// `import X` or `import X as Y`. Record an alias when `as` was used.
+			for _, n := range imp.Names {
+				if n.Alias != "" {
+					g.aliases[n.Alias] = n.Name
+				}
+			}
+			continue
+		}
+		mod, ok := stdlibModules[imp.From]
+		if !ok {
+			continue // unknown module; let downstream produce the error
+		}
+		for _, n := range imp.Names {
+			local := n.Alias
+			if local == "" {
+				local = n.Name
+			}
+			// If the imported name is a submodule/class registered under
+			// stdlibModules[<from>].Subs, the alias resolves to the dotted path.
+			if _, ok := mod.Subs[n.Name]; ok {
+				g.aliases[local] = imp.From + "." + n.Name
+				continue
+			}
+			// Otherwise it's a function imported directly (e.g. from os import getenv).
+			if _, ok := mod.Funcs[n.Name]; ok {
+				g.aliases[local] = imp.From + "." + n.Name
+				continue
+			}
+		}
+	}
+}
+
+// resolveAlias returns the canonical stdlib path for a local name, or the
+// name unchanged if no alias is registered.
+func (g *gen) resolveAlias(name string) string {
+	if v, ok := g.aliases[name]; ok {
+		return v
+	}
+	return name
 }
 
 // emitExceptionBase writes the inline Exception base type used by raised /
@@ -165,6 +214,10 @@ type gen struct {
 	helpers        map[string]string    // inline runtime helpers emitted once at module end
 	fileVars       map[string]bool      // names currently bound to *os.File inside an active `with` block
 	generators     map[string]bool      // function names that return a channel (Python generators)
+	// aliases maps a local Python name (introduced by `from X import Y` or
+	// `import X as Y`) to a dotted stdlib path the codegen knows about.
+	// Example: `from datetime import datetime` → aliases["datetime"] = "datetime.datetime".
+	aliases map[string]string
 }
 
 func (g *gen) writef(f string, a ...any) { fmt.Fprintf(&g.body, f, a...) }
@@ -809,6 +862,18 @@ func (g *gen) expr(e ir.Expr) error {
 				return nil
 			}
 		}
+		// @property: receiver is an instance of a user class that registers
+		// this attribute as a property. Emit `recv.x()` (method call) rather
+		// than `recv.x` (field load).
+		if ty := x.Recv.TypeOf(); ty != nil && ty.Kind == ir.TyNamed {
+			if cls, ok := g.classes[ty.Name]; ok && cls.Properties[x.Name] {
+				if err := g.expr(x.Recv); err != nil {
+					return err
+				}
+				g.writef(".%s()", x.Name)
+				return nil
+			}
+		}
 		if err := g.expr(x.Recv); err != nil {
 			return err
 		}
@@ -882,6 +947,40 @@ func (g *gen) fstring(f *ir.FStr) error {
 
 func (g *gen) call(c *ir.Call) error {
 	if name, ok := c.Func.(*ir.Name); ok {
+		// Alias from `from X import Y` — e.g. `getenv("PATH")` after
+		// `from os import getenv` resolves to os.Getenv.
+		if path, hit := g.aliases[name.N]; hit {
+			segs := splitDotted(path)
+			if mod, ok := stdlibModules[segs[0]]; ok && len(segs) == 2 {
+				if fn, ok := mod.Funcs[segs[1]]; ok {
+					if fn.GoImport != "" {
+						g.addImport(fn.GoImport)
+					}
+					if fn.Helper != "" {
+						g.helpers[fn.GoFunc] = fn.Helper
+					}
+					g.writef("%s(", fn.GoFunc)
+					for i, a := range c.Args {
+						if i > 0 {
+							g.writef(", ")
+						}
+						if i == 0 && fn.IntArg0 {
+							g.writef("int(")
+							if err := g.expr(a); err != nil {
+								return err
+							}
+							g.writef(")")
+						} else {
+							if err := g.expr(a); err != nil {
+								return err
+							}
+						}
+					}
+					g.writef(")")
+					return nil
+				}
+			}
+		}
 		// Class constructor: rewrite Foo(...) → NewFoo(...).
 		if _, ok := g.classes[name.N]; ok {
 			g.writef("New%s(", name.N)
@@ -975,6 +1074,43 @@ func (g *gen) call(c *ir.Call) error {
 }
 
 func (g *gen) methodCall(m *ir.MethodCall) error {
+	// Stdlib resolution that crosses module aliases or nested submodules
+	// (e.g. `datetime.datetime.now()` and the aliased
+	// `from datetime import datetime` form). Build a dotted path from the
+	// receiver expression and try the registry; if it resolves we emit
+	// the helper call directly without falling through.
+	if path, ok := stdlibPathOf(m.Recv, g.aliases); ok {
+		if fn := lookupStdlibFunc(path, m.Method); fn != nil {
+			if fn.GoImport != "" {
+				g.addImport(fn.GoImport)
+			}
+			if fn.Helper != "" {
+				g.helpers[fn.GoFunc] = fn.Helper
+				for _, imp := range fn.HelperImports {
+					g.addImport(imp)
+				}
+			}
+			g.writef("%s(", fn.GoFunc)
+			for i, a := range m.Args {
+				if i > 0 {
+					g.writef(", ")
+				}
+				if i == 0 && fn.IntArg0 {
+					g.writef("int(")
+					if err := g.expr(a); err != nil {
+						return err
+					}
+					g.writef(")")
+				} else {
+					if err := g.expr(a); err != nil {
+						return err
+					}
+				}
+			}
+			g.writef(")")
+			return nil
+		}
+	}
 	// File handle methods inside a `with open(...) as fh:` block.
 	if n, ok := m.Recv.(*ir.Name); ok && g.fileVars[n.N] {
 		switch m.Method {
@@ -1011,6 +1147,9 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			}
 			if fn.Helper != "" {
 				g.helpers[fn.GoFunc] = fn.Helper
+				for _, imp := range fn.HelperImports {
+					g.addImport(imp)
+				}
 			}
 			g.writef("%s(", fn.GoFunc)
 			for i, a := range m.Args {
@@ -1102,6 +1241,67 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	}
 	g.writef(")")
 	return nil
+}
+
+// stdlibPathOf resolves a receiver expression to a dotted stdlib module
+// path (e.g. "datetime.datetime") if all components are stdlib modules
+// or submodules. It honors the alias map for the root name so that
+// `from datetime import datetime` followed by `datetime.now()` looks up
+// `datetime.datetime` rather than `datetime`.
+//
+// Returns ("", false) when the expression is not a stdlib path — for
+// instance when the receiver is an instance variable.
+func stdlibPathOf(e ir.Expr, aliases map[string]string) (string, bool) {
+	parts, ok := collectAttrChain(e)
+	if !ok {
+		return "", false
+	}
+	// Apply alias at the root, then split (an alias can resolve to a
+	// dotted path itself, e.g. datetime → datetime.datetime).
+	root := parts[0]
+	if v, ok := aliases[root]; ok {
+		root = v
+	}
+	full := root
+	for _, p := range parts[1:] {
+		full += "." + p
+	}
+	// Verify the path resolves under stdlibModules so unrelated chains
+	// like `self.user.name` don't accidentally match.
+	segs := splitDotted(full)
+	cur, ok := stdlibModules[segs[0]]
+	if !ok {
+		return "", false
+	}
+	for _, p := range segs[1:] {
+		sub, ok := cur.Subs[p]
+		if !ok {
+			// Could be a function or attr leaf; that's fine for callers
+			// who keep walking via Funcs map after we return.
+			return full, true
+		}
+		cur = sub
+	}
+	return full, true
+}
+
+// collectAttrChain unrolls Attribute(Attribute(Name, _), _) into a slice
+// [name, attr1, attr2, ...]. Anything else returns nil, false.
+func collectAttrChain(e ir.Expr) ([]string, bool) {
+	var parts []string
+	cur := e
+	for {
+		switch x := cur.(type) {
+		case *ir.Name:
+			parts = append([]string{x.N}, parts...)
+			return parts, true
+		case *ir.Attribute:
+			parts = append([]string{x.Name}, parts...)
+			cur = x.Recv
+		default:
+			return nil, false
+		}
+	}
 }
 
 // isSuperCall returns true when expr is a call to bare `super()`.

@@ -27,6 +27,7 @@ func main() {
 	pkg := flag.String("pkg", "main", "Go package name")
 	outDir := flag.String("o", "", "output directory (default: alongside sources)")
 	dumper := flag.String("dumper", "", "path to scripts/py_ast_dump.py (default: auto-locate)")
+	python := flag.String("python", "", "Python interpreter to use (default: ./.venv/bin/python3 if present, else python3)")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: gopy-build [-pkg name] [-o outdir] srcdir")
@@ -63,7 +64,11 @@ func main() {
 			continue
 		}
 		pyPath := filepath.Join(srcDir, e.Name())
-		root, err := parser.ParseFile(dumperPath, pyPath)
+		pyBin := *python
+		if pyBin == "" {
+			pyBin = parser.LocatePython(srcDir)
+		}
+		root, err := parser.ParseFileWith(pyBin, dumperPath, pyPath)
 		if err != nil {
 			die(fmt.Sprintf("%s: %v", pyPath, err))
 		}

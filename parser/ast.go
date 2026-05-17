@@ -67,13 +67,23 @@ func (n Node) Str(name string) string {
 }
 
 // ParseFile runs the Python dumper on path and returns the Module node.
+// It auto-locates the Python interpreter via LocatePython(srcPath), which
+// honors GOPY_PYTHON and a sibling .venv / venv directory before falling
+// back to the system `python3`.
 func ParseFile(dumperPath, srcPath string) (Node, error) {
-	cmd := exec.Command("python3", dumperPath, srcPath)
+	return ParseFileWith(LocatePython(srcPath), dumperPath, srcPath)
+}
+
+// ParseFileWith runs the Python dumper using a caller-supplied interpreter
+// path. Useful when the caller has already resolved a venv or wants to
+// override the default selection.
+func ParseFileWith(pythonPath, dumperPath, srcPath string) (Node, error) {
+	cmd := exec.Command(pythonPath, dumperPath, srcPath)
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("python AST dump failed: %v: %s", err, errBuf.String())
+		return nil, fmt.Errorf("python AST dump failed (interpreter=%s): %v: %s", pythonPath, err, errBuf.String())
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {

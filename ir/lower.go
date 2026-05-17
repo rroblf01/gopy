@@ -20,6 +20,25 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 			// so we drop the guarded block entirely.
 			continue
 		}
+		// Capture imports so transpile can resolve `from datetime import datetime`
+		// style aliases. Skip emitting them as decls.
+		if stmt.Type() == "Import" {
+			for _, alias := range stmt.Children("names") {
+				m.Imports = append(m.Imports, Import{
+					Names: []ImportName{{Name: alias.Str("name"), Alias: alias.Str("asname")}},
+				})
+			}
+			continue
+		}
+		if stmt.Type() == "ImportFrom" {
+			from := stmt.Str("module")
+			imp := Import{From: from}
+			for _, alias := range stmt.Children("names") {
+				imp.Names = append(imp.Names, ImportName{Name: alias.Str("name"), Alias: alias.Str("asname")})
+			}
+			m.Imports = append(m.Imports, imp)
+			continue
+		}
 		decls, err := lowerTopLevel(stmt)
 		if err != nil {
 			return nil, err
@@ -109,8 +128,21 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		if m.Type() != "FunctionDef" {
 			return nil, fmt.Errorf("line %d: class %s: only methods supported (F2)", m.Lineno(), name)
 		}
-		if len(m.Children("decorator_list")) > 0 {
-			return nil, fmt.Errorf("line %d: class %s: method decorators not supported (F4)", m.Lineno(), name)
+		// F5 accepts `@property` on methods (emitted as a regular method,
+		// call sites add the `()`); other decorators are still rejected.
+		isProperty := false
+		for _, d := range m.Children("decorator_list") {
+			if d.Type() == "Name" && d.Str("id") == "property" {
+				isProperty = true
+				continue
+			}
+			var dname string
+			if d.Type() == "Name" {
+				dname = d.Str("id")
+			} else {
+				dname = d.Type()
+			}
+			return nil, fmt.Errorf("line %d: class %s: method decorator %q not supported", m.Lineno(), name, dname)
 		}
 		methName := m.Str("name")
 		args := m.Child("args").Children("args")
@@ -189,6 +221,12 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		}
 		fn.Body = body
 		decls = append(decls, fn)
+		if isProperty {
+			if class.Properties == nil {
+				class.Properties = map[string]bool{}
+			}
+			class.Properties[methName] = true
+		}
 	}
 
 	// Class first, then methods, so codegen order is type → methods.
