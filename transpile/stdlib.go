@@ -39,6 +39,14 @@ var stdlibModules = map[string]stdlibModule{
 			"loads": {GoFunc: "__gopy_json_loads", GoImport: "encoding/json", Helper: helperJSONLoads},
 		},
 	},
+	"re": {
+		Funcs: map[string]stdlibFunc{
+			"findall": {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall},
+			"search":  {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch},
+			"match":   {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch},
+			"sub":     {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub},
+		},
+	},
 	"datetime": {
 		Subs: map[string]stdlibModule{
 			"datetime": {
@@ -130,6 +138,41 @@ const helperJSONLoads = `func __gopy_json_loads(s string) any {
 		panic(err)
 	}
 	return v
+}`
+
+// helperReFindall mirrors Python's re.findall(pattern, string): returns
+// every non-overlapping match as a []string. Go's regexp uses RE2 syntax
+// so user patterns relying on backrefs / lookarounds will fail at compile.
+const helperReFindall = `func __gopy_re_findall(pattern, s string) []string {
+	r := regexp.MustCompile(pattern)
+	out := r.FindAllString(s, -1)
+	if out == nil {
+		return []string{}
+	}
+	return out
+}`
+
+// helperReSearch returns the first match as a string, or empty string when
+// the pattern doesn't match. Truthy checks (` + "`if re.search(...):`" + `) work
+// because empty string is falsy under our convention; users wanting strict
+// None checks should be rewritten to inspect emptiness.
+const helperReSearch = `func __gopy_re_search(pattern, s string) string {
+	r := regexp.MustCompile(pattern)
+	m := r.FindString(s)
+	return m
+}`
+
+// helperReMatch anchors the pattern to the start of the string, matching
+// Python's re.match semantics.
+const helperReMatch = `func __gopy_re_match(pattern, s string) string {
+	r := regexp.MustCompile("^(?:" + pattern + ")")
+	return r.FindString(s)
+}`
+
+// helperReSub replaces every match of pattern with repl.
+const helperReSub = `func __gopy_re_sub(pattern, repl, s string) string {
+	r := regexp.MustCompile(pattern)
+	return r.ReplaceAllString(s, repl)
 }`
 
 // helperDatetimeNow returns Python's datetime.datetime.now() in a form

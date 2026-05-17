@@ -287,6 +287,14 @@ func (g *gen) class(c *ir.Class) error {
 	g.indent++
 	g.writeIndent()
 	g.writef("self := &%s{}\n", c.Name)
+	// Zero-initialize every embedded base. This keeps stateless mixin bases
+	// usable without an explicit `super().__init__()` call. The user's
+	// `super().__init__(args)` (which targets Bases[0]) will reassign the
+	// primary base later, overriding this stub.
+	for _, b := range c.Bases {
+		g.writeIndent()
+		g.writef("self.%s = &%s{}\n", b, b)
+	}
 	if err := g.stmts(c.InitBody); err != nil {
 		return err
 	}
@@ -863,10 +871,10 @@ func (g *gen) expr(e ir.Expr) error {
 			}
 		}
 		// @property: receiver is an instance of a user class that registers
-		// this attribute as a property. Emit `recv.x()` (method call) rather
-		// than `recv.x` (field load).
+		// this attribute as a property (in itself or in any base). Emit
+		// `recv.x()` (method call) rather than `recv.x` (field load).
 		if ty := x.Recv.TypeOf(); ty != nil && ty.Kind == ir.TyNamed {
-			if cls, ok := g.classes[ty.Name]; ok && cls.Properties[x.Name] {
+			if g.hasProperty(ty.Name, x.Name) {
 				if err := g.expr(x.Recv); err != nil {
 					return err
 				}
@@ -1205,6 +1213,43 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		g.writef(")")
 		return nil
 	}
+	// dict.get(k, default) — emit a small inline ternary so missing keys
+	// return the default rather than the zero value silently.
+	if m.Method == "get" {
+		if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyDict {
+			if len(m.Args) != 2 {
+				return fmt.Errorf("dict.get() requires (key, default) — F6 doesn't support single-arg form")
+			}
+			g.writef("func() %s {\n", g.goType(rt.Val))
+			g.indent++
+			g.writeIndent()
+			g.writef("if __v, __ok := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[")
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("]; __ok {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("return __v\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}\n")
+			g.writeIndent()
+			g.writef("return ")
+			if err := g.expr(m.Args[1]); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		}
+	}
 	// list.append(x) — Python mutates in place; Go's append returns a new slice
 	// and we must reassign. This is only safe when the receiver is an addressable
 	// expression like a Name or attribute; F2 enforces that.
@@ -1302,6 +1347,34 @@ func collectAttrChain(e ir.Expr) ([]string, bool) {
 			return nil, false
 		}
 	}
+}
+
+// hasProperty walks className and its base chain looking for a @property
+// method named attr. The class registry is keyed by Python class name and
+// bases are also Python names, so the lookup is uniform.
+func (g *gen) hasProperty(className, attr string) bool {
+	visited := map[string]bool{}
+	var walk func(string) bool
+	walk = func(n string) bool {
+		if visited[n] {
+			return false
+		}
+		visited[n] = true
+		cls, ok := g.classes[n]
+		if !ok {
+			return false
+		}
+		if cls.Properties[attr] {
+			return true
+		}
+		for _, b := range cls.Bases {
+			if walk(b) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(className)
 }
 
 // isSuperCall returns true when expr is a call to bare `super()`.

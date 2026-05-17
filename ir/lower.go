@@ -111,16 +111,13 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 	class := &Class{Name: name}
 	for _, b := range n.Children("bases") {
 		if b.Type() != "Name" {
-			return nil, fmt.Errorf("class %s: complex base expressions not supported (F3)", name)
+			return nil, fmt.Errorf("class %s: complex base expressions not supported", name)
 		}
 		bn := b.Str("id")
 		if bn == "object" {
 			continue // implicit base, ignore
 		}
 		class.Bases = append(class.Bases, bn)
-	}
-	if len(class.Bases) > 1 {
-		return nil, fmt.Errorf("class %s: multiple inheritance not supported (F3)", name)
 	}
 	var decls []Decl
 
