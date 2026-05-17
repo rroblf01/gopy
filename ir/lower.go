@@ -24,6 +24,9 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 		if err != nil {
 			return nil, err
 		}
+		if decls == nil {
+			continue
+		}
 		m.Decls = append(m.Decls, decls...)
 	}
 	return m, nil
@@ -69,6 +72,13 @@ func lowerTopLevel(n parser.Node) ([]Decl, error) {
 		return []Decl{f}, nil
 	case "ClassDef":
 		return lowerClass(n)
+	case "ImportFrom", "Import":
+		// F3: every transpiled .py in the same directory lands in the same
+		// Go package, so cross-module names resolve naturally without
+		// qualifiers. We drop the import statement here. Stdlib imports
+		// (re, json, etc.) are not yet supported and will produce
+		// undefined-name errors downstream.
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("line %d: unsupported top-level node %q", n.Lineno(), n.Type())
 	}

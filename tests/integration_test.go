@@ -82,6 +82,95 @@ func buildAndRunGo(t *testing.T, src []byte) string {
 	return out.String()
 }
 
+// TestMultiFile transpiles every .py in tests/fixtures_multi/<project>/ into
+// a shared Go package, builds the resulting program, and compares its stdout
+// to running the Python entry point via `python3 main.py` from inside the
+// fixture directory (so Python's own import resolution finds sibling modules).
+func TestMultiFile(t *testing.T) {
+	root := repoRoot(t)
+	multiDir := filepath.Join(root, "tests", "fixtures_multi")
+	projects, err := os.ReadDir(multiDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dumper := filepath.Join(root, "scripts", "py_ast_dump.py")
+	for _, p := range projects {
+		if !p.IsDir() {
+			continue
+		}
+		t.Run(p.Name(), func(t *testing.T) {
+			projDir := filepath.Join(multiDir, p.Name())
+			wantPy := runPythonInDir(t, projDir, "main.py")
+
+			outDir := t.TempDir()
+			// Drop a minimal go.mod so `go build .` works in an isolated tempdir.
+			if err := os.WriteFile(filepath.Join(outDir, "go.mod"),
+				[]byte("module gopytest\n\ngo 1.22\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// Transpile every .py in projDir → .go in outDir, package main.
+			entries, err := os.ReadDir(projDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".py") {
+					continue
+				}
+				pyPath := filepath.Join(projDir, e.Name())
+				node, err := parser.ParseFile(dumper, pyPath)
+				if err != nil {
+					t.Fatalf("parse %s: %v", pyPath, err)
+				}
+				mod, err := ir.Lower(e.Name(), node)
+				if err != nil {
+					t.Fatalf("lower %s: %v", pyPath, err)
+				}
+				src, err := transpile.Module(mod, transpile.Options{PackageName: "main"})
+				if err != nil {
+					t.Fatalf("transpile %s: %v\n%s", pyPath, err, src)
+				}
+				goFile := filepath.Join(outDir, strings.TrimSuffix(e.Name(), ".py")+".go")
+				if err := os.WriteFile(goFile, src, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bin := filepath.Join(outDir, "prog")
+			var errBuf bytes.Buffer
+			build := exec.Command("go", "build", "-o", bin, ".")
+			build.Dir = outDir
+			build.Stderr = &errBuf
+			if err := build.Run(); err != nil {
+				t.Fatalf("go build: %v\nstderr: %s", err, errBuf.String())
+			}
+			var out bytes.Buffer
+			run := exec.Command(bin)
+			run.Stdout = &out
+			if err := run.Run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := out.String(); got != wantPy {
+				t.Fatalf("output mismatch\n--- python ---\n%s--- go ---\n%s", wantPy, got)
+			}
+		})
+	}
+}
+
+// runPythonInDir runs `python3 <script>` from a working dir so sibling
+// modules import correctly without needing PYTHONPATH gymnastics.
+func runPythonInDir(t *testing.T, dir, script string) string {
+	t.Helper()
+	var out, errBuf bytes.Buffer
+	cmd := exec.Command("python3", script)
+	cmd.Dir = dir
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("python3 %s in %s: %v: %s", script, dir, err, errBuf.String())
+	}
+	return out.String()
+}
+
 // TestFixtures runs each fixture through Python and through the transpiler+Go
 // build, and asserts the stdout matches. This is the only conformance gate.
 func TestFixtures(t *testing.T) {
