@@ -23,7 +23,7 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}}
 	g.buildAliases(m)
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
@@ -36,10 +36,14 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 			if x.IsGenerator {
 				g.generators[x.Name] = true
 			}
-			// Only free functions are looked up for kwarg/default
-			// resolution; methods carry a Receiver.
 			if x.Receiver == nil {
 				g.funcs[x.Name] = x
+			} else {
+				cls := x.Receiver.Ty.Name
+				if g.methods[cls] == nil {
+					g.methods[cls] = map[string]*ir.Func{}
+				}
+				g.methods[cls][x.Name] = x
 			}
 		}
 	}
@@ -220,8 +224,9 @@ type gen struct {
 	body           strings.Builder
 	imports        map[string]bool
 	indent         int
-	classes        map[string]*ir.Class // class name → decl (for super() lookup)
-	funcs          map[string]*ir.Func  // free function name → decl (for kwarg/default resolution)
+	classes        map[string]*ir.Class            // class name → decl (for super() lookup)
+	funcs          map[string]*ir.Func             // free function name → decl (for kwarg/default resolution)
+	methods        map[string]map[string]*ir.Func  // class name → method name → method decl
 	needsException bool                 // module references the builtin Exception type
 	currentClass   *ir.Class            // set while emitting a method body, used for super()
 	helpers        map[string]string    // inline runtime helpers emitted once at module end
@@ -350,12 +355,33 @@ func (g *gen) fn(fn *ir.Func) error {
 		}
 		g.writef("%s %s", p.Name, g.goType(p.Ty))
 	}
+	if fn.Vararg != nil {
+		if len(fn.Params) > 0 {
+			g.writef(", ")
+		}
+		g.writef("%s []any", fn.Vararg.Name)
+	}
+	if fn.Kwarg != nil {
+		if len(fn.Params) > 0 || fn.Vararg != nil {
+			g.writef(", ")
+		}
+		g.writef("%s map[string]any", fn.Kwarg.Name)
+	}
 	g.writef(")")
 	if fn.Ret != nil && fn.Ret.Kind != ir.TyUnknown && fn.Ret.Kind != ir.TyNone {
 		g.writef(" %s", g.goType(fn.Ret))
 	}
 	g.writef(" {\n")
 	g.indent++
+	// `_ = args / _ = kwargs` keeps unused captures from breaking the build.
+	if fn.Vararg != nil {
+		g.writeIndent()
+		g.writef("_ = %s\n", fn.Vararg.Name)
+	}
+	if fn.Kwarg != nil {
+		g.writeIndent()
+		g.writef("_ = %s\n", fn.Kwarg.Name)
+	}
 	if err := g.stmts(fn.Body); err != nil {
 		return err
 	}
@@ -559,6 +585,51 @@ func (g *gen) stmt(s ir.Stmt) error {
 // It opens the file, defers Close, and tags the file variable so method
 // calls like fh.read() / fh.write(s) inside the body translate to the
 // right Go expressions.
+// helperGopyInt mirrors Python's int(x) for the common cases: numeric
+// types are truncated to int64, strings are parsed as base-10, bools
+// become 0/1. Used when the static type isn't known to be numeric
+// (e.g. values pulled out of **kwargs or json.loads).
+const helperGopyInt = `func __gopy_int(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case float64:
+		return int64(x)
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	case string:
+		n, err := strconv.ParseInt(x, 10, 64)
+		if err != nil {
+			panic(err)
+		}
+		return n
+	}
+	panic("int(): unsupported type")
+}`
+
+const helperGopyFloat = `func __gopy_float(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int64:
+		return float64(x)
+	case int:
+		return float64(x)
+	case string:
+		n, err := strconv.ParseFloat(x, 64)
+		if err != nil {
+			panic(err)
+		}
+		return n
+	}
+	panic("float(): unsupported type")
+}`
+
 // helperPyPrint imitates Python's print(): bools render as "True"/"False",
 // nil renders as "None", everything else falls through to fmt.Print.
 // Items are space-separated and the line is newline-terminated.
@@ -829,6 +900,24 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.Name:
 		g.writef("%s", x.N)
 	case *ir.BinOp:
+		// Operator overloading for the tagged datetime / timedelta types.
+		// Python uses + / - on these objects; Go can't, so we route to
+		// the helper methods defined on __Datetime.
+		lt := g.exprTag(x.L)
+		rt := g.exprTag(x.R)
+		switch {
+		case lt == "__Datetime" && rt == "__Timedelta":
+			if x.Op == "+" {
+				return g.emitMethodOp(x.L, "Add", x.R)
+			}
+			if x.Op == "-" {
+				return g.emitMethodOp(x.L, "SubTimedelta", x.R)
+			}
+		case lt == "__Datetime" && rt == "__Datetime":
+			if x.Op == "-" {
+				return g.emitMethodOp(x.L, "Sub", x.R)
+			}
+		}
 		op := x.Op
 		if op == "//" {
 			if x.L.TypeOf() != nil && x.L.TypeOf().Kind == ir.TyInt &&
@@ -1202,11 +1291,25 @@ func (g *gen) call(c *ir.Call) error {
 			g.writef(")")
 			return nil
 		case "int":
-			// F2 supports int(x) only for numeric truncation; full str→int parse comes later.
 			if len(c.Args) != 1 {
 				return fmt.Errorf("int() takes exactly 1 argument")
 			}
-			g.writef("int64(")
+			// If the arg's IR type is concretely numeric, the simple Go
+			// cast wins. Otherwise (any from **kwargs, a bare interface
+			// from json.loads, etc.) we route through a helper that
+			// type-switches over the common numeric/string forms.
+			if t := c.Args[0].TypeOf(); t != nil &&
+				(t.Kind == ir.TyInt || t.Kind == ir.TyFloat || t.Kind == ir.TyBool) {
+				g.writef("int64(")
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(")")
+				return nil
+			}
+			g.addImport("strconv")
+			g.helpers["__gopy_int"] = helperGopyInt
+			g.writef("__gopy_int(")
 			if err := g.expr(c.Args[0]); err != nil {
 				return err
 			}
@@ -1216,7 +1319,18 @@ func (g *gen) call(c *ir.Call) error {
 			if len(c.Args) != 1 {
 				return fmt.Errorf("float() takes exactly 1 argument")
 			}
-			g.writef("float64(")
+			if t := c.Args[0].TypeOf(); t != nil &&
+				(t.Kind == ir.TyInt || t.Kind == ir.TyFloat) {
+				g.writef("float64(")
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(")")
+				return nil
+			}
+			g.addImport("strconv")
+			g.helpers["__gopy_float"] = helperGopyFloat
+			g.writef("__gopy_float(")
 			if err := g.expr(c.Args[0]); err != nil {
 				return err
 			}
@@ -1251,10 +1365,11 @@ func (g *gen) call(c *ir.Call) error {
 
 // userFuncCall emits a call to a known free function, resolving the call's
 // positional arguments and keyword arguments against the function's
-// parameter list. Missing trailing arguments are filled from each
-// parameter's Default expression, evaluated at the call site.
+// parameter list. Excess positional args feed Vararg (*args); unmatched
+// keywords feed Kwarg (**kwargs). Missing trailing positionals are filled
+// from each parameter's Default, evaluated at the call site.
 func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
-	if len(c.Args) > len(fn.Params) {
+	if len(c.Args) > len(fn.Params) && fn.Vararg == nil {
 		return fmt.Errorf("%s: too many positional arguments (got %d, expected %d)", fn.Name, len(c.Args), len(fn.Params))
 	}
 	kwIdx := map[string]ir.Expr{}
@@ -1290,11 +1405,55 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 			return fmt.Errorf("%s: missing argument for %q", fn.Name, p.Name)
 		}
 	}
+	if fn.Vararg != nil {
+		if len(fn.Params) > 0 {
+			g.writef(", ")
+		}
+		extras := c.Args[min(len(c.Args), len(fn.Params)):]
+		g.writef("[]any{")
+		for i, a := range extras {
+			if i > 0 {
+				g.writef(", ")
+			}
+			if err := g.expr(a); err != nil {
+				return err
+			}
+		}
+		g.writef("}")
+	}
+	if fn.Kwarg != nil {
+		if len(fn.Params) > 0 || fn.Vararg != nil {
+			g.writef(", ")
+		}
+		g.writef("map[string]any{")
+		first := true
+		for k, v := range kwIdx {
+			if !first {
+				g.writef(", ")
+			}
+			first = false
+			g.writef("%q: ", k)
+			if err := g.expr(v); err != nil {
+				return err
+			}
+		}
+		g.writef("}")
+		// All remaining kwargs went into Kwarg; clear to skip the
+		// "unknown keyword" error below.
+		kwIdx = nil
+	}
 	for k := range kwIdx {
 		return fmt.Errorf("%s: unknown keyword %q", fn.Name, k)
 	}
 	g.writef(")")
 	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // taggedMethodRename maps Python-style method names on stdlib-wrapped
@@ -1311,6 +1470,15 @@ var taggedMethodRename = map[string]map[string]string{
 		"is_dir":     "IsDir",
 		"read_text":  "ReadText",
 		"write_text": "WriteText",
+	},
+	"__Datetime": {
+		"year":      "Year",
+		"month":     "Month",
+		"day":       "Day",
+		"hour":      "Hour",
+		"minute":    "Minute",
+		"second":    "Second",
+		"isoformat": "Isoformat",
 	},
 }
 
@@ -1551,6 +1719,17 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		g.writef(")")
 		return nil
 	}
+	// User-defined instance method with kwargs/defaults: resolve via class
+	// method registry. Triggers only when the receiver has a known
+	// user-class type AND the method is declared on that class (or a base).
+	if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyNamed {
+		if fn := g.lookupMethod(rt.Name, m.Method); fn != nil && (len(m.Keywords) > 0 || hasDefault(fn)) {
+			return g.userMethodCall(m, fn)
+		}
+	}
+	if len(m.Keywords) > 0 {
+		return fmt.Errorf("keyword arguments not supported on this call target (.%s)", m.Method)
+	}
 	// Default: emit as recv.Method(args). Works for user-defined class methods.
 	if err := g.expr(m.Recv); err != nil {
 		return err
@@ -1563,6 +1742,93 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		if err := g.expr(a); err != nil {
 			return err
 		}
+	}
+	g.writef(")")
+	return nil
+}
+
+// lookupMethod walks className and its bases for a method named meth.
+func (g *gen) lookupMethod(className, meth string) *ir.Func {
+	visited := map[string]bool{}
+	var walk func(string) *ir.Func
+	walk = func(n string) *ir.Func {
+		if visited[n] {
+			return nil
+		}
+		visited[n] = true
+		if mm, ok := g.methods[n]; ok {
+			if fn, ok := mm[meth]; ok {
+				return fn
+			}
+		}
+		cls, ok := g.classes[n]
+		if !ok {
+			return nil
+		}
+		for _, b := range cls.Bases {
+			if fn := walk(b); fn != nil {
+				return fn
+			}
+		}
+		return nil
+	}
+	return walk(className)
+}
+
+func hasDefault(fn *ir.Func) bool {
+	for _, p := range fn.Params {
+		if p.Default != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// userMethodCall emits a call to a known user-defined method, resolving
+// positional + keyword arguments against the method's parameter list and
+// filling missing trailing arguments from each parameter's Default.
+func (g *gen) userMethodCall(m *ir.MethodCall, fn *ir.Func) error {
+	if len(m.Args) > len(fn.Params) {
+		return fmt.Errorf("%s.%s: too many positional arguments (got %d, expected %d)", fn.Receiver.Ty.Name, fn.Name, len(m.Args), len(fn.Params))
+	}
+	kwIdx := map[string]ir.Expr{}
+	for _, kw := range m.Keywords {
+		if _, dup := kwIdx[kw.Name]; dup {
+			return fmt.Errorf("%s: duplicate keyword %q", fn.Name, kw.Name)
+		}
+		kwIdx[kw.Name] = kw.Value
+	}
+	if err := g.expr(m.Recv); err != nil {
+		return err
+	}
+	g.writef(".%s(", fn.Name)
+	for i, p := range fn.Params {
+		if i > 0 {
+			g.writef(", ")
+		}
+		switch {
+		case i < len(m.Args):
+			if _, dup := kwIdx[p.Name]; dup {
+				return fmt.Errorf("%s: keyword %q clashes with positional", fn.Name, p.Name)
+			}
+			if err := g.expr(m.Args[i]); err != nil {
+				return err
+			}
+		case kwIdx[p.Name] != nil:
+			if err := g.expr(kwIdx[p.Name]); err != nil {
+				return err
+			}
+			delete(kwIdx, p.Name)
+		case p.Default != nil:
+			if err := g.expr(p.Default); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("%s: missing argument for %q", fn.Name, p.Name)
+		}
+	}
+	for k := range kwIdx {
+		return fmt.Errorf("%s: unknown keyword %q", fn.Name, k)
 	}
 	g.writef(")")
 	return nil
@@ -1731,6 +1997,33 @@ func (g *gen) boolExpr(e ir.Expr) error {
 		}
 	}
 	return g.expr(e)
+}
+
+// emitMethodOp renders `recv.Method(arg)` — used by BinOp rewriting when
+// operator overloading on tagged stdlib types needs to delegate to a Go
+// method.
+func (g *gen) emitMethodOp(recv ir.Expr, method string, arg ir.Expr) error {
+	if err := g.expr(recv); err != nil {
+		return err
+	}
+	g.writef(".%s(", method)
+	if err := g.expr(arg); err != nil {
+		return err
+	}
+	g.writef(")")
+	return nil
+}
+
+// exprTag returns the type tag of an expression, or "" when none is known.
+// Looks through Name → varTypes and Call/MethodCall → stdlibCallRetTag.
+func (g *gen) exprTag(e ir.Expr) string {
+	switch x := e.(type) {
+	case *ir.Name:
+		return g.varTypes[x.N]
+	case *ir.Call, *ir.MethodCall:
+		return g.stdlibCallRetTag(e.(ir.Expr))
+	}
+	return ""
 }
 
 // stdlibCallRetTag returns the RetTag of a stdlib call expression, or "".

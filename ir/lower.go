@@ -219,6 +219,33 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			}
 			fn.Params = append(fn.Params, Param{Name: p.Str("arg"), Ty: ty})
 		}
+		// Method defaults live under m.args.defaults, aligned to the
+		// trailing params (Python excludes `self`/`cls` from defaults).
+		mArgs := m.Child("args")
+		if mArgs != nil {
+			mdefs := mArgs.Children("defaults")
+			if n := len(mdefs); n > 0 {
+				off := len(fn.Params) - n
+				dsc := newScope()
+				for _, p := range fn.Params[:off] {
+					dsc.declare(p.Name, p.Ty)
+				}
+				for i, dn := range mdefs {
+					d, err := lowerExpr(dn, dsc)
+					if err != nil {
+						return nil, fmt.Errorf("default for class %s.%s param %q: %w", name, methName, fn.Params[off+i].Name, err)
+					}
+					fn.Params[off+i].Default = d
+				}
+			}
+			// Method *args / **kwargs.
+			if va := mArgs.Child("vararg"); va != nil {
+				fn.Vararg = &Param{Name: va.Str("arg"), Ty: &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}}
+			}
+			if kw := mArgs.Child("kwarg"); kw != nil {
+				fn.Kwarg = &Param{Name: kw.Str("arg"), Ty: &Type{Kind: TyDict, Key: &Type{Kind: TyStr}, Val: &Type{Kind: TyAny}}}
+			}
+		}
 		ret, err := lowerAnnotation(m.Child("returns"))
 		if err != nil {
 			return nil, err
@@ -236,6 +263,12 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		}
 		for _, p := range fn.Params {
 			sc.declare(p.Name, p.Ty)
+		}
+		if fn.Vararg != nil {
+			sc.declare(fn.Vararg.Name, fn.Vararg.Ty)
+		}
+		if fn.Kwarg != nil {
+			sc.declare(fn.Kwarg.Name, fn.Kwarg.Ty)
 		}
 		body, err := lowerBody(m.Children("body"), sc)
 		if err != nil {
@@ -300,6 +333,14 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		}
 		f.Params = append(f.Params, Param{Name: a.Str("arg"), Ty: ty})
 	}
+	// *args (single python `arg` node under args.vararg) becomes a []any slice.
+	if va := args.Child("vararg"); va != nil {
+		f.Vararg = &Param{Name: va.Str("arg"), Ty: &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}}
+	}
+	// **kwargs (single python `arg` node under args.kwarg) becomes map[string]any.
+	if kw := args.Child("kwarg"); kw != nil {
+		f.Kwarg = &Param{Name: kw.Str("arg"), Ty: &Type{Kind: TyDict, Key: &Type{Kind: TyStr}, Val: &Type{Kind: TyAny}}}
+	}
 	// Python aligns `args.defaults` to the END of the positional params:
 	// for `def f(a, b, c=1, d=2)`, defaults == [1, 2] aligns to c, d.
 	defaults := args.Children("defaults")
@@ -329,6 +370,12 @@ func lowerFunc(n parser.Node) (*Func, error) {
 	scope := newScope()
 	for _, p := range f.Params {
 		scope.declare(p.Name, p.Ty)
+	}
+	if f.Vararg != nil {
+		scope.declare(f.Vararg.Name, f.Vararg.Ty)
+	}
+	if f.Kwarg != nil {
+		scope.declare(f.Kwarg.Name, f.Kwarg.Ty)
 	}
 	body, err := lowerBody(n.Children("body"), scope)
 	if err != nil {
@@ -840,7 +887,7 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			if err != nil {
 				return nil, err
 			}
-			return &MethodCall{Recv: recv, Method: fnNode.Str("attr"), Args: args, Ty: &Type{Kind: TyUnknown}}, nil
+			return &MethodCall{Recv: recv, Method: fnNode.Str("attr"), Args: args, Keywords: kws, Ty: &Type{Kind: TyUnknown}}, nil
 		}
 		callee, err := lowerExpr(n.Child("func"), sc)
 		if err != nil {

@@ -6,7 +6,7 @@ Python → Go transpiler written in Go. Reads a typed Python source file (or dir
 
 Early but real. Current language support covers a typed subset of Python sufficient for self-contained programs and small multi-file projects. The transpiler is exercised against a golden-file test suite that compares stdout of the original Python source (run under CPython) with stdout of the transpiled Go binary.
 
-### Supported (phases F1–F7)
+### Supported (phases F1–F8)
 
 - Functions, parameters, return values
 - Control flow: `if`/`elif`/`else`, `while`, `for ... in range(...)`, `for x in <iterable>`
@@ -18,11 +18,12 @@ Early but real. Current language support covers a typed subset of Python suffici
 - f-strings: `f"x = {x}"` → `fmt.Sprintf`
 - Builtins: `print`, `len`, `str`, `int`, `float`, `range`
 - Multi-file projects in a single directory (each `.py` → sibling `.go`, shared `package main`)
-- Stdlib shims: `sys.argv`, `sys.exit(n)`, `os.getenv(k)`, `time.time()`, `time.sleep(s)`, `json.dumps(x)`, `json.loads(s)`, `datetime.datetime.now()`, `datetime.timedelta(days)`, `pathlib.Path(...)` with `.exists()` / `.is_file()` / `.is_dir()` / `.read_text()` / `.write_text(s)`, `re.findall(p, s)`, `re.search(p, s)`, `re.match(p, s)`, `re.sub(p, repl, s)` — `search` and `match` return a Match object exposing `.group([n])` and `.groups()`; `x is None` / `x is not None` and truthy `if m:` checks work on these nullable returns; `csv.reader(lines)` parses a list of CSV lines into a `list[list[str]]`
+- Stdlib shims: `sys.argv`, `sys.exit(n)`, `os.getenv(k)`, `time.time()`, `time.sleep(s)`, `json.dumps(x)`, `json.loads(s)`, `datetime.datetime.now()` returns a Datetime supporting `.year/.month/.day/.hour/.minute/.second/.isoformat()` and `+ timedelta` / `- timedelta` / `dt - dt` arithmetic, `datetime.timedelta(days)`, `pathlib.Path(...)` with `.exists()` / `.is_file()` / `.is_dir()` / `.read_text()` / `.write_text(s)`, `re.findall(p, s)`, `re.search(p, s)`, `re.match(p, s)`, `re.sub(p, repl, s)` — `search` and `match` return a Match object exposing `.group([n])` and `.groups()`; `x is None` / `x is not None` and truthy `if m:` checks work on these nullable returns; `csv.reader(lines)` parses a list of CSV lines into a `list[list[str]]`
 - Context manager: `with open(path[, mode]) as fh:` — `fh.read()` and `fh.write(s)`
 - Decorators: `@staticmethod` on free functions (no-op), `@property` on class methods (call sites emit `instance.attr` as a method invocation; properties are inherited via base lookup), `@classmethod` (emits a free `<Class>_<method>` function; calls of the form `Class.method(...)` dispatch to it, and `cls(...)` inside the body routes through the class's constructor)
 - Default parameter values: `def f(a: int, b: int = 5)` — defaults are evaluated at every call site (so mutable defaults can't leak between calls)
-- Keyword arguments at call sites for free functions: `f(a, c=3, b=2)` reorders to match the function's parameter list and fills missing tail params from defaults
+- Keyword arguments at call sites for free functions **and instance methods**: `f(a, c=3, b=2)` or `obj.m(a, c=3, b=2)` reorders to match the parameter list and fills missing tail params from defaults
+- `*args` and `**kwargs` capture in function signatures (typed as `[]any` and `map[string]any`); extra positionals/keywords at call sites flow into them
 - List comprehensions `[expr for var in iter [if cond]]` and dict comprehensions `{k: v for var in iter [if cond]}` (single generator, optional filter)
 - Forward-reference annotations: `-> "MyClass"` resolves to the named type
 - Generators: functions with `yield` compile to a Go goroutine + receive-only channel; `for x in gen():` reads from the channel
@@ -32,15 +33,15 @@ Early but real. Current language support covers a typed subset of Python suffici
 
 ### Not yet supported
 
-- Richer stdlib (`csv.writer` as a stateful file-bound writer, full datetime arithmetic, `timedelta` kwargs, file iteration)
-- Method decorators with arguments, custom decorators
-- Keyword arguments on method calls (instance methods) — only free functions today
-- `*args` / `**kwargs` capture
+- Custom decorators (user-written `@my_wrapper`) and decorators with arguments — only built-in `@staticmethod` / `@classmethod` / `@property` are accepted
+- `csv.writer` as a stateful file-bound writer; today only `csv.reader(lines)` round-trips
+- `timedelta(seconds=..., minutes=...)` keyword constructors (only positional days)
+- Iterating a file handle line by line (no `for line in fh:` yet)
 - Metaclasses, `__getattr__` / descriptors
 - Dynamic features: `eval`, `exec`, monkey-patching, runtime `setattr`
-- Generator `send()` / `throw()`, async / `await`
+- Generator `send()` / `throw()`, async / `await` — these require a fundamentally different runtime model (coroutine state machine vs. plain goroutines) and are intentionally out of scope for v1
 - C extensions
-- Django itself (the long-term target, gated on ORM + templating shims)
+- Django itself (the long-term target, gated on a Django-compatible ORM + templating shim)
 
 ## Requirements for the input Python code
 
@@ -126,13 +127,13 @@ CPython 3.x vs. the `gopy`-transpiled Go binary, on identical CPU-bound workload
 
 <!-- BENCH_START -->
 
-_Generated by `scripts/update_bench.sh` on 2026-05-17T10:28:59Z._
+_Generated by `scripts/update_bench.sh` on 2026-05-17T10:39:56Z._
 
 | Benchmark | CPython (ms) | gopy Go (ms) | Speedup | Python RSS (MB) | gopy RSS (MB) | RSS save |
 |-----------|-------------:|-------------:|--------:|----------------:|--------------:|---------:|
-| bench_class | 47.97 | 1.58 | 30.4x | 12.92 | 4.08 | 3.17x |
-| bench_fib | 134.13 | 5.36 | 25.0x | 12.82 | 4.11 | 3.12x |
-| bench_loop | 109.01 | 1.87 | 58.3x | 12.86 | 4.09 | 3.14x |
+| bench_class | 48.12 | 1.50 | 32.1x | 12.88 | 4.23 | 3.04x |
+| bench_fib | 135.25 | 5.54 | 24.4x | 12.82 | 4.30 | 2.98x |
+| bench_loop | 108.80 | 1.81 | 60.1x | 12.86 | 4.45 | 2.89x |
 
 _Hardware: Linux 6.18.31-1-lts x86_64. Go: go1.26.3-X:nodwarf5. Python: 3.14.5._
 

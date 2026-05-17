@@ -50,7 +50,6 @@ var stdlibModules = map[string]stdlibModule{
 	"csv": {
 		Funcs: map[string]stdlibFunc{
 			"reader": {GoFunc: "__gopy_csv_reader", GoImport: "encoding/csv", Helper: helperCSVReader, HelperImports: []string{"strings"}},
-			"writer": {GoFunc: "__gopy_csv_writer", GoImport: "encoding/csv", Helper: helperCSVWriter, HelperImports: []string{"strings"}},
 		},
 	},
 	"pathlib": {
@@ -65,7 +64,10 @@ var stdlibModules = map[string]stdlibModule{
 		Subs: map[string]stdlibModule{
 			"datetime": {
 				Funcs: map[string]stdlibFunc{
-					"now": {GoFunc: "__gopy_datetime_now", GoImport: "time", Helper: helperDatetimeNow},
+					// __Datetime methods reference __Timedelta (for Add/Sub),
+					// so we always emit both types whenever datetime.now() is
+					// used; otherwise Go would error on the undefined type.
+					"now": {GoFunc: "__gopy_datetime_now", GoImport: "time", Helper: helperDatetimeNow, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType}, HelperImports: []string{"fmt"}},
 				},
 			},
 		},
@@ -327,11 +329,42 @@ const helperTimedeltaNew = `func __gopy_timedelta_new(days int64) *__Timedelta {
 	return &__Timedelta{d: time.Duration(days) * 24 * time.Hour}
 }`
 
-// helperDatetimeNow returns Python's datetime.datetime.now() in a form
-// that round-trips through CPython for ISO-format printing. The format
-// matches CPython's default `datetime.now()` __str__ output to one
-// microsecond precision.
-const helperDatetimeNow = `func __gopy_datetime_now() string { return time.Now().Format("2006-01-02 15:04:05.000000") }`
+// helperDatetimeType is the runtime Datetime struct used by
+// datetime.datetime.now(). String() matches CPython's default __str__
+// (microsecond precision), so f-strings and `str(dt)` round-trip across
+// runtimes. Add/Sub support timedelta arithmetic via BinOp rewriting.
+const helperDatetimeType = `type __Datetime struct{ t time.Time }
+
+func (d *__Datetime) String() string {
+	return d.t.Format("2006-01-02 15:04:05.000000")
+}
+
+func (d *__Datetime) Add(td *__Timedelta) *__Datetime {
+	return &__Datetime{t: d.t.Add(td.d)}
+}
+
+func (d *__Datetime) Sub(other *__Datetime) *__Timedelta {
+	return &__Timedelta{d: d.t.Sub(other.t)}
+}
+
+func (d *__Datetime) SubTimedelta(td *__Timedelta) *__Datetime {
+	return &__Datetime{t: d.t.Add(-td.d)}
+}
+
+func (d *__Datetime) Year() int64   { return int64(d.t.Year()) }
+func (d *__Datetime) Month() int64  { return int64(d.t.Month()) }
+func (d *__Datetime) Day() int64    { return int64(d.t.Day()) }
+func (d *__Datetime) Hour() int64   { return int64(d.t.Hour()) }
+func (d *__Datetime) Minute() int64 { return int64(d.t.Minute()) }
+func (d *__Datetime) Second() int64 { return int64(d.t.Second()) }
+
+func (d *__Datetime) Isoformat() string {
+	return d.t.Format("2006-01-02T15:04:05.000000")
+}`
+
+// helperDatetimeNow returns Python's datetime.datetime.now() as a
+// *__Datetime so it can take part in timedelta arithmetic.
+const helperDatetimeNow = `func __gopy_datetime_now() *__Datetime { return &__Datetime{t: time.Now()} }`
 
 // isStdlibModule reports whether name refers to a stdlib module we recognize.
 func isStdlibModule(name string) bool {

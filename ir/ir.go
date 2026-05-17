@@ -66,6 +66,14 @@ type Func struct {
 	// `<-chan YieldType` to the caller.
 	IsGenerator bool
 	YieldType   *Type
+	// Vararg captures `*args`. When non-nil, callers may pass extra
+	// positional arguments after Params; codegen exposes them as
+	// `<name> []any` inside the body.
+	Vararg *Param
+	// Kwarg captures `**kwargs`. When non-nil, callers may pass extra
+	// keyword arguments not matching any Param; codegen exposes them
+	// as `<name> map[string]any` inside the body.
+	Kwarg *Param
 }
 
 func (*Func) declNode() {}
@@ -272,10 +280,11 @@ type Keyword struct {
 // MethodCall is `recv.method(args)`. Kept distinct from Call to make
 // receiver-aware codegen straightforward (e.g. list.append → append()).
 type MethodCall struct {
-	Recv   Expr
-	Method string
-	Args   []Expr
-	Ty     *Type
+	Recv     Expr
+	Method   string
+	Args     []Expr
+	Keywords []Keyword
+	Ty       *Type
 }
 
 // Attribute is `recv.name` used as a value (not assignment target).
