@@ -1354,6 +1354,11 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		return &IfExpr{Cond: cond, Then: thenE, Else: elseE, Ty: ty}, nil
 	case "ListComp":
 		return lowerListComp(n, sc)
+	case "GeneratorExp":
+		// `(expr for var in iter [if cond])` — same shape as ListComp,
+		// just immutable in Python. We materialize eagerly to a slice
+		// since we don't have a lazy generator-of-expressions runtime.
+		return lowerListComp(n, sc)
 	case "DictComp":
 		return lowerDictComp(n, sc)
 	case "Starred":

@@ -967,10 +967,10 @@ const helperGopyFloat = `func __gopy_float(v any) float64 {
 // helperPyPrint imitates Python's print(): bools render as "True"/"False",
 // nil renders as "None", everything else falls through to fmt.Print.
 // Items are space-separated and the line is newline-terminated.
-const helperPyPrint = `func __gopy_print(args ...any) {
+const helperPyPrint = `func __gopy_print(sep string, end string, args ...any) {
 	for i, a := range args {
 		if i > 0 {
-			fmt.Print(" ")
+			fmt.Print(sep)
 		}
 		switch v := a.(type) {
 		case bool:
@@ -1002,7 +1002,7 @@ const helperPyPrint = `func __gopy_print(args ...any) {
 			fmt.Print(a)
 		}
 	}
-	fmt.Println()
+	fmt.Print(end)
 }`
 
 const helperFileReadAll = `func __gopy_fh_read(f *os.File) string {
@@ -1950,15 +1950,40 @@ func (g *gen) call(c *ir.Call) error {
 		case "print":
 			// Route through a small helper so bool prints as "True"/"False",
 			// None as "None", and floats keep their trailing `.0`.
+			// `sep=` / `end=` kwargs override the defaults.
 			g.addImport("fmt")
 			g.addImport("strconv")
 			g.helpers["__gopy_print"] = helperPyPrint
-			g.writef("__gopy_print(")
-			for i, a := range c.Args {
-				if i > 0 {
-					g.writef(", ")
+			var sepExpr, endExpr ir.Expr
+			for _, kw := range c.Keywords {
+				switch kw.Name {
+				case "sep":
+					sepExpr = kw.Value
+				case "end":
+					endExpr = kw.Value
+				default:
+					return fmt.Errorf("print(): unsupported kwarg %q", kw.Name)
 				}
-				if err := g.expr(a); err != nil {
+			}
+			g.writef("__gopy_print(")
+			if sepExpr != nil {
+				if err := g.expr(sepExpr); err != nil {
+					return err
+				}
+			} else {
+				g.writef("\" \"")
+			}
+			g.writef(", ")
+			if endExpr != nil {
+				if err := g.expr(endExpr); err != nil {
+					return err
+				}
+			} else {
+				g.writef("\"\\n\"")
+			}
+			for _, a := range c.Args {
+				g.writef(", ")
+				if err := g.boxedExpr(a); err != nil {
 					return err
 				}
 			}
@@ -4383,8 +4408,56 @@ func isInstanceClasses(e ir.Expr) ([]string, error) {
 // builtinReduce handles single-pass list reductions: any/all/sum/min/max.
 // All take exactly one list argument; the element type guides the
 // accumulator and comparator.
+// builtinMinMaxArgs handles `min(a, b, ...)` / `max(a, b, ...)`. All
+// args must share a numeric / string IR type so Go's `<` / `>` operators
+// work. Emits an IIFE that picks the first arg then iterates the rest.
+func (g *gen) builtinMinMaxArgs(c *ir.Call, kind string) error {
+	first := c.Args[0].TypeOf()
+	if first == nil || (first.Kind != ir.TyInt && first.Kind != ir.TyFloat && first.Kind != ir.TyStr) {
+		return fmt.Errorf("%s(): args must share a numeric or string type", kind)
+	}
+	elemGo := g.goType(first)
+	op := "<"
+	if kind == "max" {
+		op = ">"
+	}
+	g.writef("func() %s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("var __acc %s = ", elemGo)
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	for _, a := range c.Args[1:] {
+		g.writeIndent()
+		g.writef("if __v := %s(", elemGo)
+		if err := g.expr(a); err != nil {
+			return err
+		}
+		g.writef("); __v %s __acc { __acc = __v }\n", op)
+	}
+	g.writeIndent()
+	g.writef("return __acc\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 func (g *gen) builtinReduce(c *ir.Call, kind string) error {
-	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+	if len(c.Keywords) != 0 {
+		return fmt.Errorf("%s(): keyword arguments not supported", kind)
+	}
+	// Multi-arg form (min/max only): `min(a, b)` / `min(a, b, c)`.
+	// Reject for any / all / sum which only make sense over an iterable.
+	if len(c.Args) > 1 {
+		if kind != "min" && kind != "max" {
+			return fmt.Errorf("%s() takes one iterable; got %d arguments", kind, len(c.Args))
+		}
+		return g.builtinMinMaxArgs(c, kind)
+	}
+	if len(c.Args) != 1 {
 		return fmt.Errorf("%s() takes exactly one positional argument", kind)
 	}
 	elem, err := listElemTypeOf(c.Args[0])
@@ -4624,9 +4697,286 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef(")")
 		return true, nil
+	case "lstrip":
+		g.addImport("strings")
+		if len(m.Args) == 0 {
+			g.writef("strings.TrimLeft(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(", \" \\t\\n\\r\")")
+			return true, nil
+		}
+		g.writef("strings.TrimLeft(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "rstrip":
+		g.addImport("strings")
+		if len(m.Args) == 0 {
+			g.writef("strings.TrimRight(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(", \" \\t\\n\\r\")")
+			return true, nil
+		}
+		g.writef("strings.TrimRight(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "count":
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.count() takes one argument")
+		}
+		g.addImport("strings")
+		g.writef("int64(strings.Count(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef("))")
+		return true, nil
+	case "title":
+		// Go's strings.Title is deprecated; replicate the Python "Title
+		// Case" semantics with a tiny helper rather than pulling in
+		// golang.org/x/text/cases.
+		g.helpers["__gopy_str_title"] = helperStrTitle
+		g.writef("__gopy_str_title(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "capitalize":
+		g.helpers["__gopy_str_capitalize"] = helperStrCapitalize
+		g.writef("__gopy_str_capitalize(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "center":
+		if len(m.Args) < 1 || len(m.Args) > 2 {
+			return true, fmt.Errorf("str.center() takes (width[, fillchar])")
+		}
+		g.helpers["__gopy_str_center"] = helperStrCenter
+		g.writef("__gopy_str_center(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if len(m.Args) == 2 {
+			if err := g.expr(m.Args[1]); err != nil {
+				return true, err
+			}
+		} else {
+			g.writef("\" \"")
+		}
+		g.writef(")")
+		return true, nil
+	case "ljust":
+		if len(m.Args) < 1 || len(m.Args) > 2 {
+			return true, fmt.Errorf("str.ljust() takes (width[, fillchar])")
+		}
+		g.helpers["__gopy_str_ljust"] = helperStrLjust
+		g.writef("__gopy_str_ljust(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if len(m.Args) == 2 {
+			if err := g.expr(m.Args[1]); err != nil {
+				return true, err
+			}
+		} else {
+			g.writef("\" \"")
+		}
+		g.writef(")")
+		return true, nil
+	case "rjust":
+		if len(m.Args) < 1 || len(m.Args) > 2 {
+			return true, fmt.Errorf("str.rjust() takes (width[, fillchar])")
+		}
+		g.helpers["__gopy_str_rjust"] = helperStrRjust
+		g.writef("__gopy_str_rjust(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if len(m.Args) == 2 {
+			if err := g.expr(m.Args[1]); err != nil {
+				return true, err
+			}
+		} else {
+			g.writef("\" \"")
+		}
+		g.writef(")")
+		return true, nil
+	case "zfill":
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.zfill() takes (width)")
+		}
+		g.helpers["__gopy_str_zfill"] = helperStrZfill
+		g.writef("__gopy_str_zfill(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
 	}
 	return false, nil
 }
+
+const helperStrTitle = `func __gopy_str_title(s string) string {
+	var b []rune
+	upNext := true
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' {
+			b = append(b, r)
+			upNext = true
+			continue
+		}
+		if upNext && r >= 'a' && r <= 'z' {
+			b = append(b, r-32)
+		} else if !upNext && r >= 'A' && r <= 'Z' {
+			b = append(b, r+32)
+		} else {
+			b = append(b, r)
+		}
+		upNext = false
+	}
+	return string(b)
+}`
+
+const helperStrCapitalize = `func __gopy_str_capitalize(s string) string {
+	rs := []rune(s)
+	if len(rs) == 0 {
+		return s
+	}
+	if rs[0] >= 'a' && rs[0] <= 'z' {
+		rs[0] -= 32
+	}
+	for i := 1; i < len(rs); i++ {
+		if rs[i] >= 'A' && rs[i] <= 'Z' {
+			rs[i] += 32
+		}
+	}
+	return string(rs)
+}`
+
+const helperStrCenter = `func __gopy_str_center(s string, width int64, fill string) string {
+	n := int64(len([]rune(s)))
+	if n >= width {
+		return s
+	}
+	pad := width - n
+	// CPython 3 biases the extra char to the left when total pad is odd.
+	left := (pad + 1) / 2
+	right := pad - left
+	fr := []rune(fill)
+	if len(fr) == 0 {
+		fr = []rune(" ")
+	}
+	out := []rune{}
+	for i := int64(0); i < left; i++ {
+		out = append(out, fr[0])
+	}
+	out = append(out, []rune(s)...)
+	for i := int64(0); i < right; i++ {
+		out = append(out, fr[0])
+	}
+	return string(out)
+}`
+
+const helperStrLjust = `func __gopy_str_ljust(s string, width int64, fill string) string {
+	n := int64(len([]rune(s)))
+	if n >= width {
+		return s
+	}
+	fr := []rune(fill)
+	if len(fr) == 0 {
+		fr = []rune(" ")
+	}
+	out := []rune(s)
+	for i := n; i < width; i++ {
+		out = append(out, fr[0])
+	}
+	return string(out)
+}`
+
+const helperStrRjust = `func __gopy_str_rjust(s string, width int64, fill string) string {
+	n := int64(len([]rune(s)))
+	if n >= width {
+		return s
+	}
+	fr := []rune(fill)
+	if len(fr) == 0 {
+		fr = []rune(" ")
+	}
+	out := []rune{}
+	for i := n; i < width; i++ {
+		out = append(out, fr[0])
+	}
+	out = append(out, []rune(s)...)
+	return string(out)
+}`
+
+const helperStrZfill = `func __gopy_str_zfill(s string, width int64) string {
+	rs := []rune(s)
+	n := int64(len(rs))
+	if n >= width {
+		return s
+	}
+	prefix := ""
+	if len(rs) > 0 && (rs[0] == '+' || rs[0] == '-') {
+		prefix = string(rs[0])
+		rs = rs[1:]
+	}
+	// Target digit count: total width minus the optional sign char.
+	digits := width
+	if prefix != "" {
+		digits = width - 1
+	}
+	out := []rune(prefix)
+	have := int64(len(rs))
+	for i := have; i < digits; i++ {
+		out = append(out, '0')
+	}
+	out = append(out, rs...)
+	return string(out)
+}`
 
 const helperStrFormat = `func __gopy_str_format(s string, args ...any) string {
 	var b strings.Builder
