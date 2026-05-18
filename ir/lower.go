@@ -550,6 +550,12 @@ func lowerBody(stmts []parser.Node, sc *scope) ([]Stmt, error) {
 		if st == nil {
 			continue // e.g. `pass`
 		}
+		// Synthetic Block expansion: a single Python statement that
+		// lowered to multiple IR statements (e.g. `a = b = 0`).
+		if blk, ok := st.(*Block); ok {
+			out = append(out, blk.Body...)
+			continue
+		}
 		out = append(out, st)
 	}
 	return out, nil
@@ -589,8 +595,31 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		return &Return{X: x}, nil
 	case "Assign":
 		targets := n.Children("targets")
-		if len(targets) != 1 {
-			return nil, fmt.Errorf("line %d: multi-target assignment not supported", n.Lineno())
+		// Chained assignment: `a = b = 0`. Python parses this as a single
+		// Assign with multiple targets sharing one value. Lower to a
+		// sequence of standalone assigns; the value is re-emitted at each
+		// call site, so callers that pass side-effecting expressions
+		// should hoist them first.
+		if len(targets) > 1 {
+			val, err := lowerExpr(n.Child("value"), sc)
+			if err != nil {
+				return nil, err
+			}
+			var assigns []Stmt
+			for _, t := range targets {
+				if t.Type() != "Name" {
+					return nil, fmt.Errorf("line %d: chained assignment requires bare-name targets", n.Lineno())
+				}
+				name := t.Str("id")
+				decl := sc.declare(name, val.TypeOf())
+				assigns = append(assigns, &Assign{Target: name, Value: val, Decl: decl})
+			}
+			// Wrap multiple assigns in a synthetic Try-less block. We don't
+			// have a generic Block IR; emit them as separate statements
+			// through a small "fan-out" wrapper. Cheaper: return the
+			// first and rely on lowerBody flattening — but lowerBody
+			// expects single Stmt return. Use a ChainedAssign helper.
+			return &Block{Body: assigns}, nil
 		}
 		tgt := targets[0]
 		// Tuple unpacking: `a, b = x, y`. Requires the RHS to be a Tuple
@@ -1265,6 +1294,15 @@ func inferMethodRet(recv Expr, method string) *Type {
 		switch method {
 		case "get":
 			return rt.Val
+		case "keys":
+			return &Type{Kind: TyList, Elem: rt.Key}
+		case "values":
+			return &Type{Kind: TyList, Elem: rt.Val}
+		case "items":
+			// (k, v) pairs lowered to list-of-list-any; standalone use
+			// is rare and best paired with for-loop unpacking, which is
+			// special-cased earlier in lowerFor.
+			return &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}
 		}
 	}
 	return &Type{Kind: TyUnknown}
@@ -1668,6 +1706,12 @@ func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 			elemTy = t.Key // Python iterates dict keys
 		case TyStr:
 			elemTy = &Type{Kind: TyStr}
+		case TyNamed:
+			// File handles bound by `with open(...) as fh:` carry the
+			// synthetic __gopy_file type; iterating yields string lines.
+			if t.Name == "__gopy_file" {
+				elemTy = &Type{Kind: TyStr}
+			}
 		}
 	}
 	loopSc := &scope{vars: copyVars(sc.vars)}

@@ -39,6 +39,35 @@ var stdlibModules = map[string]stdlibModule{
 			"loads": {GoFunc: "__gopy_json_loads", GoImport: "encoding/json", Helper: helperJSONLoads},
 		},
 	},
+	"math": {
+		Attrs: map[string]stdlibAttr{
+			"pi": {GoExpr: "math.Pi", GoImport: "math"},
+			"e":  {GoExpr: "math.E", GoImport: "math"},
+			"inf": {GoExpr: "math.Inf(1)", GoImport: "math"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"sqrt":  {GoFunc: "math.Sqrt", GoImport: "math"},
+			"floor": {GoFunc: "__gopy_math_floor", GoImport: "math", Helper: helperMathFloor},
+			"ceil":  {GoFunc: "__gopy_math_ceil", GoImport: "math", Helper: helperMathCeil},
+			"log":   {GoFunc: "math.Log", GoImport: "math"},
+			"log2":  {GoFunc: "math.Log2", GoImport: "math"},
+			"log10": {GoFunc: "math.Log10", GoImport: "math"},
+			"exp":   {GoFunc: "math.Exp", GoImport: "math"},
+			"sin":   {GoFunc: "math.Sin", GoImport: "math"},
+			"cos":   {GoFunc: "math.Cos", GoImport: "math"},
+			"tan":   {GoFunc: "math.Tan", GoImport: "math"},
+			"atan":  {GoFunc: "math.Atan", GoImport: "math"},
+			"atan2": {GoFunc: "math.Atan2", GoImport: "math"},
+			"pow":   {GoFunc: "math.Pow", GoImport: "math"},
+		},
+	},
+	"random": {
+		Funcs: map[string]stdlibFunc{
+			"random":  {GoFunc: "__gopy_random", GoImport: "math/rand", Helper: helperRandomFloat},
+			"randint": {GoFunc: "__gopy_randint", GoImport: "math/rand", Helper: helperRandint},
+			"seed":    {GoFunc: "__gopy_random_seed", GoImport: "math/rand", Helper: helperRandomSeed},
+		},
+	},
 	"re": {
 		Funcs: map[string]stdlibFunc{
 			"findall": {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall},
@@ -264,6 +293,24 @@ const helperCSVWriter = `func __gopy_csv_writer(rows [][]string) string {
 	}
 	return b.String()
 }`
+
+// helperMathFloor / helperMathCeil match Python 3's math.floor / math.ceil
+// signature — they return an int (int64), not a float, even though the
+// underlying Go math package operates on float64.
+const helperMathFloor = `func __gopy_math_floor(x float64) int64 { return int64(math.Floor(x)) }`
+const helperMathCeil = `func __gopy_math_ceil(x float64) int64 { return int64(math.Ceil(x)) }`
+
+// helperRandomFloat / helperRandint / helperRandomSeed bridge Python's
+// random module to Go's math/rand. We use the package-level rand source
+// so callers can seed deterministically.
+const helperRandomFloat = `func __gopy_random() float64 { return rand.Float64() }`
+
+const helperRandint = `func __gopy_randint(a, b int64) int64 {
+	// Python's random.randint is inclusive on both ends.
+	return a + rand.Int63n(b-a+1)
+}`
+
+const helperRandomSeed = `func __gopy_random_seed(s int64) { rand.Seed(s) }`
 
 // helperPathType is the runtime Path struct used by pathlib.Path.
 // Mirrors a handful of Path methods sufficient for "open this, check

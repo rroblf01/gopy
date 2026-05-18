@@ -18,7 +18,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - Single **and multiple** inheritance, `super().__init__(...)`, `super().method(...)`; mixin bases are zero-initialized automatically. Diamond conflicts (same method inherited from two bases without override) are caught at transpile time with a clear error.
 - Exceptions: `try` / `except E as e` / `finally`, `raise E("msg")`, custom exception classes inheriting `Exception`
 - f-strings: `f"x = {x}"` → `fmt.Sprintf`
-- Builtins: `print`, `len`, `str`, `int`, `float`, `range`, `sorted`, `sum`, `min`, `max`, `any`, `all`, `reversed`, `abs`, `round`, `isinstance`, `pow`, `chr`, `ord`, `repr`
+- Builtins: `print`, `len`, `str`, `int`, `float`, `range`, `sorted`, `sum`, `min`, `max`, `any`, `all`, `reversed`, `abs`, `round`, `isinstance`, `pow`, `chr`, `ord`, `repr`, `divmod`
 - Slicing: `xs[a:b]`, `xs[a:]`, `xs[:b]`, `xs[:]`, `xs[a:b:step]`, and negative bounds (`xs[-3:]`, `xs[::-1]`) — routed through a runtime helper for non-trivial cases, fast path for simple bounds
 - Tuple literals as values (`pair = (1, 2)`) — lowered to a slice; iteration and indexing work
 - Augmented list concat (`xs += ys`) → `append(xs, ys...)`
@@ -28,8 +28,12 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - Ternary expression: `x if cond else y`
 - Chained comparisons: `lo <= n <= hi` desugars to `(lo <= n) and (n <= hi)`
 - Tuple unpacking on assignment (`a, b = 1, 2`, `a, b = b, a`) and in two-name `for` loops (`for i, x in enumerate(xs):`, `for k, v in d.items():`, `for x, y in zip(xs, ys):`)
+- Chained assignment: `a = b = c = 0` lowers to a sequence of single assigns
+- File iteration: `for line in fh:` over a handle opened with `with open(...)` — backed by `bufio.Scanner`, trailing newline stripped
+- `str.format("{} ...")` with positional `{}` placeholders
+- `dict.keys()` / `dict.values()` standalone return slices; `.items()` only via for-loop unpacking
 - Multi-file projects in a single directory (each `.py` → sibling `.go`, shared `package main`)
-- Stdlib shims: `sys.argv`, `sys.exit(n)`, `os.getenv(k)`, `time.time()`, `time.sleep(s)`, `json.dumps(x)`, `json.loads(s)`, `datetime.datetime.now()` returns a Datetime supporting `.year/.month/.day/.hour/.minute/.second/.isoformat()` and `+ timedelta` / `- timedelta` / `dt - dt` arithmetic, `datetime.timedelta(days)`, `pathlib.Path(...)` with `.exists()` / `.is_file()` / `.is_dir()` / `.read_text()` / `.write_text(s)`, `re.findall(p, s)`, `re.search(p, s)`, `re.match(p, s)`, `re.sub(p, repl, s)` — `search` and `match` return a Match object exposing `.group([n])` and `.groups()`; `x is None` / `x is not None` and truthy `if m:` checks work on these nullable returns; `csv.reader(lines)` parses a list of CSV lines into a `list[list[str]]`
+- Stdlib shims: `sys.argv`, `sys.exit(n)`, `os.getenv(k)`, `time.time()`, `time.sleep(s)`, `json.dumps(x)`, `json.loads(s)`, `datetime.datetime.now()` returns a Datetime supporting `.year/.month/.day/.hour/.minute/.second/.isoformat()` and `+ timedelta` / `- timedelta` / `dt - dt` arithmetic, `datetime.timedelta(days)`, `pathlib.Path(...)` with `.exists()` / `.is_file()` / `.is_dir()` / `.read_text()` / `.write_text(s)`, `re.findall(p, s)`, `re.search(p, s)`, `re.match(p, s)`, `re.sub(p, repl, s)` — `search` and `match` return a Match object exposing `.group([n])` and `.groups()`; `x is None` / `x is not None` and truthy `if m:` checks work on these nullable returns; `csv.reader(lines)` parses a list of CSV lines into a `list[list[str]]`; `math` (`pi`, `e`, `inf`, `sqrt`, `floor`, `ceil`, `log`, `log2`, `log10`, `exp`, `sin`, `cos`, `tan`, `atan`, `atan2`, `pow`); `random.random()` / `random.randint(a, b)` / `random.seed(n)` (CPython and Go use different PRNGs, so deterministic-output fixtures must compare ranges, not values)
 - Context manager: `with open(path[, mode]) as fh:` — `fh.read()` and `fh.write(s)`
 - Decorators: `@staticmethod` on free functions (no-op), `@property` on class methods (call sites emit `instance.attr` as a method invocation; properties are inherited via base lookup), `@classmethod` (emits a free `<Class>_<method>` function; calls of the form `Class.method(...)` dispatch to it, and `cls(...)` inside the body routes through the class's constructor)
 - Default parameter values: `def f(a: int, b: int = 5)` — defaults are evaluated at every call site (so mutable defaults can't leak between calls)
@@ -47,7 +51,6 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - Custom decorators (user-written `@my_wrapper`) and decorators with arguments — only built-in `@staticmethod` / `@classmethod` / `@property` are accepted
 - `csv.writer` as a stateful file-bound writer; today only `csv.reader(lines)` round-trips
 - `timedelta(seconds=..., minutes=...)` keyword constructors (only positional days)
-- Iterating a file handle line by line (no `for line in fh:` yet)
 - Metaclasses, `__getattr__` / descriptors
 - Dynamic features: `eval`, `exec`, monkey-patching, runtime `setattr`
 - Generator `send()` / `throw()`, async / `await` — these require a fundamentally different runtime model (coroutine state machine vs. plain goroutines) and are intentionally out of scope for v1
@@ -138,13 +141,13 @@ CPython 3.x vs. the `gopy`-transpiled Go binary, on identical CPU-bound workload
 
 <!-- BENCH_START -->
 
-_Generated by `scripts/update_bench.sh` on 2026-05-18T06:20:27Z._
+_Generated by `scripts/update_bench.sh` on 2026-05-18T06:29:15Z._
 
 | Benchmark | CPython (ms) | gopy Go (ms) | Speedup | Python RSS (MB) | gopy RSS (MB) | RSS save |
 |-----------|-------------:|-------------:|--------:|----------------:|--------------:|---------:|
-| bench_class | 48.37 | 1.56 | 31.0x | 12.71 | 4.25 | 2.99x |
-| bench_fib | 134.42 | 5.41 | 24.8x | 12.88 | 4.44 | 2.90x |
-| bench_loop | 107.07 | 1.82 | 58.8x | 12.92 | 4.57 | 2.83x |
+| bench_class | 47.58 | 1.65 | 28.8x | 12.90 | 4.25 | 3.04x |
+| bench_fib | 136.09 | 5.50 | 24.7x | 12.85 | 4.33 | 2.97x |
+| bench_loop | 106.84 | 1.85 | 57.8x | 12.92 | 4.21 | 3.07x |
 
 _Hardware: Linux 6.18.31-1-lts x86_64. Go: go1.26.3-X:nodwarf5. Python: 3.14.5._
 
@@ -180,7 +183,7 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] Slicing with explicit step and negative bounds
 - [x] Tuple unpacking on assignment + in `for` loops via `enumerate` / `zip` / `dict.items()`
 - [x] Tuple literal as a value (lowered to a slice — immutability not enforced)
-- [ ] Multiple-target chained assignment (`a = b = 0`)
+- [x] Multiple-target chained assignment (`a = b = 0`)
 - [x] `break` and `continue` statements
 - [x] Conditional expression (ternary): `x if cond else y`
 - [x] Chained comparisons (`a < b < c`)
@@ -224,7 +227,7 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [ ] `re.search` named groups (`m.group("name")`)
 - [ ] `csv.writer` as a stateful file-bound writer with `.writerow()` / `.writerows()`
 - [ ] `pathlib.Path` arithmetic (`p / "sub"`), iteration (`p.iterdir()`), and globbing
-- [ ] File iteration line by line (`for line in fh:`)
+- [x] File iteration line by line (`for line in fh:`)
 - [ ] `datetime.timedelta` keyword constructor and arithmetic with all units
 - [ ] `datetime.date` / `datetime.time` standalone types
 - [ ] `subprocess.run` returning a typed result
@@ -233,8 +236,10 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [ ] `collections.Counter` / `defaultdict` / `OrderedDict` / `deque`
 - [ ] `itertools` (`chain`, `groupby`, `accumulate`, `combinations`, `product`)
 - [ ] `functools.reduce`, `functools.lru_cache`, `functools.partial`
-- [ ] `math` (trig, log, sqrt, etc.) and `random`
-- [ ] `string` constants (`string.ascii_letters`, ...) and `s.format(...)`
+- [x] `math` (trig, log, sqrt, floor/ceil-as-int, constants)
+- [x] `random` (`random()`, `randint(a, b)`, `seed(n)`)
+- [ ] `string` constants (`string.ascii_letters`, ...)
+- [x] `s.format(...)` positional `{}` placeholders
 - [ ] `hashlib` (sha256/md5)
 - [ ] `base64` encode/decode
 - [ ] `urllib.parse` for URL handling
@@ -247,7 +252,7 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [ ] `zip` / `enumerate` returning standalone iterables
 - [x] `reversed(xs)`
 - [x] `abs`, `round`, `pow`
-- [ ] `divmod`
+- [x] `divmod`
 - [x] `chr`, `ord`
 - [x] `repr` (approximate — uses Go's `%#v` formatter)
 - [x] `isinstance` (single class, no tuple of classes)

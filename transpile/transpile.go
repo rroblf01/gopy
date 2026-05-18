@@ -779,6 +779,22 @@ const helperPyPrint = `func __gopy_print(args ...any) {
 		case nil:
 			fmt.Print("None")
 			_ = v
+		case float64:
+			s := strconv.FormatFloat(v, 'g', -1, 64)
+			// Python always renders whole-valued floats with a trailing
+			// .0; Go's default omits it. Add the suffix when neither a
+			// decimal point nor an exponent is present.
+			has := false
+			for j := 0; j < len(s); j++ {
+				if s[j] == '.' || s[j] == 'e' || s[j] == 'E' {
+					has = true
+					break
+				}
+			}
+			if !has {
+				s += ".0"
+			}
+			fmt.Print(s)
 		default:
 			fmt.Print(a)
 		}
@@ -1031,6 +1047,24 @@ func (g *gen) forEach(x *ir.ForEach) error {
 		g.writeIndent()
 		g.writef("_ = %s; _ = %s\n", x.Var, x.Var2)
 		g.indent--
+		return g.forEachBody(x)
+	}
+	// File-handle iteration: `for line in fh` over an *os.File bound by
+	// the enclosing `with open(...) as fh:` block. Uses bufio.Scanner so
+	// each iteration yields one stripped line as a string.
+	if n, ok := x.Iter.(*ir.Name); ok && g.fileVars[n.N] {
+		g.addImport("bufio")
+		g.writeIndent()
+		g.writef("__sc := bufio.NewScanner(%s)\n", n.N)
+		g.writeIndent()
+		g.writef("for __sc.Scan() {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("%s := __sc.Text()\n", x.Var)
+		g.writeIndent()
+		g.writef("_ = %s\n", x.Var)
+		g.indent--
+		// Fall through to forEachBody for the user body + closing brace.
 		return g.forEachBody(x)
 	}
 	// Default single-var range. Dict iterates keys (Python semantics);
@@ -1504,9 +1538,10 @@ func (g *gen) call(c *ir.Call) error {
 		// Builtins.
 		switch name.N {
 		case "print":
-			// Route through a small helper so bool prints as "True"/"False"
-			// and None as "None", matching Python's repr.
+			// Route through a small helper so bool prints as "True"/"False",
+			// None as "None", and floats keep their trailing `.0`.
 			g.addImport("fmt")
+			g.addImport("strconv")
 			g.helpers["__gopy_print"] = helperPyPrint
 			g.writef("__gopy_print(")
 			for i, a := range c.Args {
@@ -1604,6 +1639,8 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinOrd(c)
 		case "repr":
 			return g.builtinRepr(c)
+		case "divmod":
+			return g.builtinDivmod(c)
 		case "any":
 			return g.builtinReduce(c, "any")
 		case "all":
@@ -1946,6 +1983,55 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		}
 		g.writef(")")
 		return nil
+	}
+	// Dict view methods: keys() / values() materialize as IIFE-built
+	// slices; items() is only viable in for-loop tuple-unpack form,
+	// which is handled before we ever reach this branch.
+	if rt := g.effectiveType(m.Recv); rt != nil && rt.Kind == ir.TyDict {
+		switch m.Method {
+		case "keys":
+			g.writef("func() []%s {\n", g.goType(rt.Key))
+			g.indent++
+			g.writeIndent()
+			g.writef("__out := make([]%s, 0, len(", g.goType(rt.Key))
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("))\n")
+			g.writeIndent()
+			g.writef("for k := range ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(" { __out = append(__out, k) }\n")
+			g.writeIndent()
+			g.writef("return __out\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		case "values":
+			g.writef("func() []%s {\n", g.goType(rt.Val))
+			g.indent++
+			g.writeIndent()
+			g.writef("__out := make([]%s, 0, len(", g.goType(rt.Val))
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("))\n")
+			g.writeIndent()
+			g.writef("for _, v := range ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(" { __out = append(__out, v) }\n")
+			g.writeIndent()
+			g.writef("return __out\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		}
 	}
 	// dict.get(k, default) — emit a small inline ternary so missing keys
 	// return the default rather than the zero value silently.
@@ -2345,6 +2431,39 @@ func (g *gen) builtinSorted(c *ir.Call) error {
 	g.writef("sort.Slice(__out, func(i, j int) bool { return __out[i] < __out[j] })\n")
 	g.writeIndent()
 	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinDivmod returns Python's (quotient, remainder) pair as a
+// two-element slice. Both args must be int — float divmod yields
+// different semantics (floor-div semantics) and is not yet supported.
+func (g *gen) builtinDivmod(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("divmod() takes two positional arguments")
+	}
+	at, bt := c.Args[0].TypeOf(), c.Args[1].TypeOf()
+	if at == nil || bt == nil || at.Kind != ir.TyInt || bt.Kind != ir.TyInt {
+		return fmt.Errorf("divmod() requires (int, int) for now")
+	}
+	g.writef("func() []int64 {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("var __a int64 = ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("var __b int64 = ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("return []int64{__a / __b, __a %% __b}\n")
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
@@ -2971,9 +3090,44 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef("))")
 		return true, nil
+	case "format":
+		// Positional-only `{}` placeholder support. Indexed `{0}` and
+		// named `{name}` substitutions are not yet implemented.
+		g.addImport("strings")
+		g.addImport("fmt")
+		g.helpers["__gopy_str_format"] = helperStrFormat
+		g.writef("__gopy_str_format(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		for _, a := range m.Args {
+			g.writef(", ")
+			if err := g.boxedExpr(a); err != nil {
+				return true, err
+			}
+		}
+		g.writef(")")
+		return true, nil
 	}
 	return false, nil
 }
+
+const helperStrFormat = `func __gopy_str_format(s string, args ...any) string {
+	var b strings.Builder
+	argi := 0
+	for i := 0; i < len(s); i++ {
+		if i+1 < len(s) && s[i] == '{' && s[i+1] == '}' {
+			if argi < len(args) {
+				b.WriteString(fmt.Sprint(args[argi]))
+				argi++
+			}
+			i++
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}`
 
 // emitMethodOp renders `recv.Method(arg)` — used by BinOp rewriting when
 // operator overloading on tagged stdlib types needs to delegate to a Go

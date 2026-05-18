@@ -218,6 +218,13 @@ type Yield struct {
 type Break struct{}
 type Continue struct{}
 
+// Block is a synthetic statement carrying a sequence that should be
+// inlined into the enclosing body. Used when one Python statement
+// expands to several IR statements (e.g. chained assignment).
+type Block struct {
+	Body []Stmt
+}
+
 // WithFile is the lowered form of `with open(path, mode) as name: body`.
 // F4 only supports file context managers; arbitrary __enter__/__exit__
 // objects are rejected at lower time.
@@ -243,6 +250,7 @@ func (*WithFile) stmtNode()   {}
 func (*Yield) stmtNode()      {}
 func (*Break) stmtNode()      {}
 func (*Continue) stmtNode()   {}
+func (*Block) stmtNode()      {}
 func (*MultiAssign) stmtNode() {}
 
 // Expr is any value-producing node.
