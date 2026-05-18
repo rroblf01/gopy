@@ -600,6 +600,37 @@ func (g *gen) stmt(s ir.Stmt) error {
 		return g.raise(x)
 	case *ir.WithFile:
 		return g.withFile(x)
+	case *ir.Break:
+		g.writeIndent()
+		g.writef("break\n")
+		return nil
+	case *ir.Continue:
+		g.writeIndent()
+		g.writef("continue\n")
+		return nil
+	case *ir.MultiAssign:
+		g.writeIndent()
+		for i, t := range x.Targets {
+			if i > 0 {
+				g.writef(", ")
+			}
+			g.writef("%s", t)
+		}
+		if x.Decl {
+			g.writef(" := ")
+		} else {
+			g.writef(" = ")
+		}
+		for i, v := range x.Values {
+			if i > 0 {
+				g.writef(", ")
+			}
+			if err := g.expr(v); err != nil {
+				return err
+			}
+		}
+		g.writef("\n")
+		return nil
 	case *ir.Yield:
 		g.writeIndent()
 		g.writef("__yield <- ")
@@ -930,11 +961,64 @@ func (g *gen) forRange(x *ir.ForRange) error {
 }
 
 func (g *gen) forEach(x *ir.ForEach) error {
+	// Two-name forms emitted from tuple-target lowering. Each writes its
+	// own header + extra rebindings, then falls through to forEachBody to
+	// emit the user body + closing brace.
+	switch x.Kind {
+	case "dict":
+		g.writeIndent()
+		g.writef("for %s, %s := range ", x.Var, x.Var2)
+		if err := g.expr(x.Iter); err != nil {
+			return err
+		}
+		g.writef(" {\n")
+		return g.forEachBody(x)
+	case "enum":
+		g.writeIndent()
+		g.writef("for __i, %s := range ", x.Var2)
+		if err := g.expr(x.Iter); err != nil {
+			return err
+		}
+		g.writef(" {\n")
+		g.indent++
+		g.writeIndent()
+		// Promote Go's int index to int64 so downstream arithmetic
+		// matches Python's integer model.
+		g.writef("%s := int64(__i); _ = %s\n", x.Var, x.Var)
+		g.indent--
+		return g.forEachBody(x)
+	case "zip":
+		g.writeIndent()
+		g.writef("for __i := 0; __i < len(")
+		if err := g.expr(x.Iter); err != nil {
+			return err
+		}
+		g.writef(") && __i < len(")
+		if err := g.expr(x.Iter2); err != nil {
+			return err
+		}
+		g.writef("); __i++ {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("%s := ", x.Var)
+		if err := g.expr(x.Iter); err != nil {
+			return err
+		}
+		g.writef("[__i]\n")
+		g.writeIndent()
+		g.writef("%s := ", x.Var2)
+		if err := g.expr(x.Iter2); err != nil {
+			return err
+		}
+		g.writef("[__i]\n")
+		g.writeIndent()
+		g.writef("_ = %s; _ = %s\n", x.Var, x.Var2)
+		g.indent--
+		return g.forEachBody(x)
+	}
+	// Default single-var range. Dict iterates keys (Python semantics);
+	// channels (generators) take the value side.
 	g.writeIndent()
-	// Choose single- vs two-variable range form based on iterable kind:
-	//   - dict:      `for k := range m`           — Python iterates keys
-	//   - generator: `for v := range ch`          — channel receive
-	//   - list/str:  `for _, v := range slice`    — index discarded
 	iterTy := x.Iter.TypeOf()
 	single := false
 	if iterTy != nil && iterTy.Kind == ir.TyDict {
@@ -954,6 +1038,13 @@ func (g *gen) forEach(x *ir.ForEach) error {
 		return err
 	}
 	g.writef(" {\n")
+	return g.forEachBody(x)
+}
+
+// forEachBody renders the user body + closing brace shared by every
+// ForEach codegen path. Caller must already have written the `for ... {`
+// header line.
+func (g *gen) forEachBody(x *ir.ForEach) error {
 	g.indent++
 	if err := g.stmts(x.Body); err != nil {
 		return err
@@ -1148,6 +1239,41 @@ func (g *gen) expr(e ir.Expr) error {
 		g.writef("}")
 	case *ir.FStr:
 		return g.fstring(x)
+	case *ir.IfExpr:
+		// Go has no expression-level if; wrap both branches in an IIFE
+		// whose return type comes from the inferred IR type. Branches must
+		// share a static type (or `any`) for Go to compile the function.
+		ret := g.goType(x.Ty)
+		if ret == "" {
+			ret = "any"
+		}
+		g.writef("func() %s {\n", ret)
+		g.indent++
+		g.writeIndent()
+		g.writef("if ")
+		if err := g.boolExpr(x.Cond); err != nil {
+			return err
+		}
+		g.writef(" {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("return ")
+		if err := g.expr(x.Then); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+		g.writeIndent()
+		g.writef("return ")
+		if err := g.expr(x.Else); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()")
 	case *ir.ListComp:
 		return g.listComp(x)
 	case *ir.DictComp:
@@ -1441,6 +1567,14 @@ func (g *gen) call(c *ir.Call) error {
 			return nil
 		case "sorted":
 			return g.builtinSorted(c)
+		case "reversed":
+			return g.builtinReversed(c)
+		case "abs":
+			return g.builtinAbs(c)
+		case "round":
+			return g.builtinRound(c)
+		case "isinstance":
+			return g.builtinIsInstance(c)
 		case "any":
 			return g.builtinReduce(c, "any")
 		case "all":
@@ -2185,6 +2319,125 @@ func (g *gen) builtinSorted(c *ir.Call) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
+	return nil
+}
+
+// builtinReversed emits an IIFE that returns a reversed copy of the
+// input list. Slice element type comes from the static IR type.
+func (g *gen) builtinReversed(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("reversed() takes one positional argument")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("reversed(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := make([]%s, len(__src))\n", elemGo)
+	g.writeIndent()
+	g.writef("for __i, __v := range __src { __out[len(__src)-1-__i] = __v }\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinAbs maps to Go's math.Abs for floats or a sign-flip for ints.
+// Static IR type drives the dispatch.
+func (g *gen) builtinAbs(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("abs() takes one positional argument")
+	}
+	t := c.Args[0].TypeOf()
+	if t == nil || (t.Kind != ir.TyInt && t.Kind != ir.TyFloat) {
+		return fmt.Errorf("abs() requires int or float, got %s", g.goType(t))
+	}
+	if t.Kind == ir.TyFloat {
+		g.addImport("math")
+		g.writef("math.Abs(")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef(")")
+		return nil
+	}
+	// int: emit IIFE with sign flip. Wrap the value in int64 so an
+	// untyped literal like `-7` doesn't collapse to Go's plain int.
+	g.writef("func() int64 { var __v int64 = ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("; if __v < 0 { return -__v }; return __v }()")
+	return nil
+}
+
+// builtinRound emits math.Round semantics for floats; ints pass through.
+func (g *gen) builtinRound(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("round() in F11+ takes one positional argument (digits not supported)")
+	}
+	t := c.Args[0].TypeOf()
+	if t != nil && t.Kind == ir.TyInt {
+		return g.expr(c.Args[0])
+	}
+	g.addImport("math")
+	g.writef("int64(math.Round(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("))")
+	return nil
+}
+
+// builtinIsInstance compiles `isinstance(obj, Cls)` to a Go type
+// assertion. Only single-class checks are supported; class tuples (e.g.
+// `isinstance(x, (int, str))`) require richer lowering and are deferred.
+func (g *gen) builtinIsInstance(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("isinstance() takes (obj, Class)")
+	}
+	clsNode, ok := c.Args[1].(*ir.Name)
+	if !ok {
+		return fmt.Errorf("isinstance(): second argument must be a class name")
+	}
+	g.writef("func() bool { _, __ok := any(")
+	if err := g.boxedExpr(c.Args[0]); err != nil {
+		return err
+	}
+	// Match generated Go shape: user classes become `*ClassName`.
+	if _, declared := g.classes[clsNode.N]; declared {
+		g.writef(").(*%s); return __ok }()", clsNode.N)
+		return nil
+	}
+	// Builtins: map Python names → Go type assertions.
+	switch clsNode.N {
+	case "int":
+		g.writef(").(int64); return __ok }()")
+	case "float":
+		g.writef(").(float64); return __ok }()")
+	case "str":
+		g.writef(").(string); return __ok }()")
+	case "bool":
+		g.writef(").(bool); return __ok }()")
+	case "list":
+		g.writef(").([]any); _ = __ok; return false }()")
+		// Note: list type-assertion needs element-type awareness; F11+
+		// rejects the bare check.
+		return fmt.Errorf("isinstance(x, list) needs the element type to be useful; not supported yet")
+	default:
+		return fmt.Errorf("isinstance() against %q not supported", clsNode.N)
+	}
 	return nil
 }
 

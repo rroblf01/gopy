@@ -593,6 +593,41 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			return nil, fmt.Errorf("line %d: multi-target assignment not supported", n.Lineno())
 		}
 		tgt := targets[0]
+		// Tuple unpacking: `a, b = x, y`. Requires the RHS to be a Tuple
+		// literal of the same arity; arbitrary iterables would need
+		// per-call runtime help we don't emit yet.
+		if tgt.Type() == "Tuple" {
+			elts := tgt.Children("elts")
+			valNode := n.Child("value")
+			if valNode.Type() != "Tuple" {
+				return nil, fmt.Errorf("line %d: tuple unpacking from non-literal RHS not yet supported", n.Lineno())
+			}
+			rhs := valNode.Children("elts")
+			if len(rhs) != len(elts) {
+				return nil, fmt.Errorf("line %d: tuple unpack arity mismatch (%d vs %d)", n.Lineno(), len(elts), len(rhs))
+			}
+			var values []Expr
+			for _, e := range rhs {
+				ve, err := lowerExpr(e, sc)
+				if err != nil {
+					return nil, err
+				}
+				values = append(values, ve)
+			}
+			var names []string
+			declAll := true
+			for i, t := range elts {
+				if t.Type() != "Name" {
+					return nil, fmt.Errorf("line %d: tuple unpack target must be a Name", n.Lineno())
+				}
+				nm := t.Str("id")
+				names = append(names, nm)
+				if !sc.declare(nm, values[i].TypeOf()) {
+					declAll = false
+				}
+			}
+			return &MultiAssign{Targets: names, Values: values, Decl: declAll}, nil
+		}
 		val, err := lowerExpr(n.Child("value"), sc)
 		if err != nil {
 			return nil, err
@@ -766,6 +801,10 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		return &Raise{Exc: exc}, nil
 	case "Pass":
 		return nil, nil
+	case "Break":
+		return &Break{}, nil
+	case "Continue":
+		return &Continue{}, nil
 	case "With":
 		return lowerWith(n, sc)
 	default:
@@ -799,22 +838,49 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 	case "Compare":
 		ops := n.Children("ops")
 		comps := n.Children("comparators")
-		if len(ops) != 1 || len(comps) != 1 {
-			return nil, fmt.Errorf("line %d: chained comparisons not supported (F1)", n.Lineno())
+		if len(ops) == 0 || len(ops) != len(comps) {
+			return nil, fmt.Errorf("line %d: malformed Compare node", n.Lineno())
 		}
-		l, err := lowerExpr(n.Child("left"), sc)
+		// Single comparison — produce a plain CmpOp.
+		left, err := lowerExpr(n.Child("left"), sc)
 		if err != nil {
 			return nil, err
 		}
-		r, err := lowerExpr(comps[0], sc)
-		if err != nil {
-			return nil, err
+		if len(ops) == 1 {
+			r, err := lowerExpr(comps[0], sc)
+			if err != nil {
+				return nil, err
+			}
+			op, err := lowerCmpKind(ops[0].Type())
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", n.Lineno(), err)
+			}
+			return &CmpOp{Op: op, L: left, R: r, Ty: &Type{Kind: TyBool}}, nil
 		}
-		op, err := lowerCmpKind(ops[0].Type())
-		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", n.Lineno(), err)
+		// Chained comparison `a < b < c` → `(a < b) and (b < c)`, with the
+		// middle operand evaluated once. We approximate "once" by binding
+		// the rendered expression to a local in codegen; at the IR level
+		// we just fold to nested BoolOp(And).
+		var chain Expr
+		prev := left
+		for i, opNode := range ops {
+			r, err := lowerExpr(comps[i], sc)
+			if err != nil {
+				return nil, err
+			}
+			op, err := lowerCmpKind(opNode.Type())
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", n.Lineno(), err)
+			}
+			step := &CmpOp{Op: op, L: prev, R: r, Ty: &Type{Kind: TyBool}}
+			if chain == nil {
+				chain = step
+			} else {
+				chain = &BoolOp{Op: "and", L: chain, R: step, Ty: &Type{Kind: TyBool}}
+			}
+			prev = r
 		}
-		return &CmpOp{Op: op, L: l, R: r, Ty: &Type{Kind: TyBool}}, nil
+		return chain, nil
 	case "BoolOp":
 		vals := n.Children("values")
 		if len(vals) < 2 {
@@ -1031,6 +1097,24 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			vt = &Type{Kind: TyAny}
 		}
 		return &DictLit{Keys: ks, Vals: vs, KeyTy: kt, ValTy: vt, Ty: &Type{Kind: TyDict, Key: kt, Val: vt}}, nil
+	case "IfExp":
+		cond, err := lowerExpr(n.Child("test"), sc)
+		if err != nil {
+			return nil, err
+		}
+		thenE, err := lowerExpr(n.Child("body"), sc)
+		if err != nil {
+			return nil, err
+		}
+		elseE, err := lowerExpr(n.Child("orelse"), sc)
+		if err != nil {
+			return nil, err
+		}
+		ty := thenE.TypeOf()
+		if ty == nil || ty.Kind == TyUnknown {
+			ty = elseE.TypeOf()
+		}
+		return &IfExpr{Cond: cond, Then: thenE, Else: elseE, Ty: ty}, nil
 	case "ListComp":
 		return lowerListComp(n, sc)
 	case "DictComp":
@@ -1499,14 +1583,26 @@ func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 //   for x in <iterable>: ...   → ForEach (range over slice/map)
 func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 	tgt := n.Child("target")
-	if tgt.Type() != "Name" {
-		return nil, fmt.Errorf("line %d: only single Name loop variable supported", n.Lineno())
-	}
 	if len(n.Children("orelse")) > 0 {
 		return nil, fmt.Errorf("line %d: for-else not supported", n.Lineno())
 	}
-	varName := tgt.Str("id")
 	iter := n.Child("iter")
+	// Two-name target: `for k, v in pairs`. Three patterns supported:
+	//   `for k, v in d.items()`         — Go-native map range
+	//   `for i, x in enumerate(xs)`     — Go-native slice index+value range
+	//   `for a, b in zip(xs, ys)`       — paired iteration via parallel index
+	if tgt.Type() == "Tuple" {
+		elts := tgt.Children("elts")
+		if len(elts) != 2 || elts[0].Type() != "Name" || elts[1].Type() != "Name" {
+			return nil, fmt.Errorf("line %d: only two Name targets supported in for-loop unpacking", n.Lineno())
+		}
+		v1, v2 := elts[0].Str("id"), elts[1].Str("id")
+		return lowerForTuple(n, sc, v1, v2, iter)
+	}
+	if tgt.Type() != "Name" {
+		return nil, fmt.Errorf("line %d: only single Name loop variable supported", n.Lineno())
+	}
+	varName := tgt.Str("id")
 
 	// Recognize range(...) without evaluating it as a runtime call.
 	if iter.Type() == "Call" {
@@ -1577,6 +1673,87 @@ func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 		return nil, err
 	}
 	return &ForEach{Var: varName, Iter: iterE, ElemTy: elemTy, Body: body}, nil
+}
+
+// lowerForTuple lowers a two-name `for a, b in iter` form by recognizing
+// the three iter shapes we can emit Go-native code for.
+func lowerForTuple(n parser.Node, sc *scope, v1, v2 string, iter parser.Node) (Stmt, error) {
+	// Pattern: enumerate(xs)
+	if iter.Type() == "Call" {
+		fn := iter.Child("func")
+		if fn.Type() == "Name" && fn.Str("id") == "enumerate" {
+			args := iter.Children("args")
+			if len(args) != 1 {
+				return nil, fmt.Errorf("line %d: enumerate() takes 1 argument", n.Lineno())
+			}
+			seq, err := lowerExpr(args[0], sc)
+			if err != nil {
+				return nil, err
+			}
+			var elemTy *Type
+			if t := seq.TypeOf(); t != nil && t.Kind == TyList {
+				elemTy = t.Elem
+			}
+			loopSc := &scope{vars: copyVars(sc.vars)}
+			loopSc.declare(v1, &Type{Kind: TyInt})
+			loopSc.declare(v2, elemTy)
+			body, err := lowerBody(n.Children("body"), loopSc)
+			if err != nil {
+				return nil, err
+			}
+			return &ForEach{Var: v1, Var2: v2, Iter: seq, ElemTy: elemTy, Kind: "enum", Body: body}, nil
+		}
+		if fn.Type() == "Name" && fn.Str("id") == "zip" {
+			args := iter.Children("args")
+			if len(args) != 2 {
+				return nil, fmt.Errorf("line %d: zip() takes 2 arguments (F12)", n.Lineno())
+			}
+			a, err := lowerExpr(args[0], sc)
+			if err != nil {
+				return nil, err
+			}
+			b, err := lowerExpr(args[1], sc)
+			if err != nil {
+				return nil, err
+			}
+			var aElem, bElem *Type
+			if t := a.TypeOf(); t != nil && t.Kind == TyList {
+				aElem = t.Elem
+			}
+			if t := b.TypeOf(); t != nil && t.Kind == TyList {
+				bElem = t.Elem
+			}
+			loopSc := &scope{vars: copyVars(sc.vars)}
+			loopSc.declare(v1, aElem)
+			loopSc.declare(v2, bElem)
+			body, err := lowerBody(n.Children("body"), loopSc)
+			if err != nil {
+				return nil, err
+			}
+			return &ForEach{Var: v1, Var2: v2, Iter: a, Iter2: b, Kind: "zip", Body: body}, nil
+		}
+		// .items() on a dict — recognized when the call's func is
+		// Attribute(value, "items") with value typed as dict.
+		if fn.Type() == "Attribute" && fn.Str("attr") == "items" {
+			d, err := lowerExpr(fn.Child("value"), sc)
+			if err != nil {
+				return nil, err
+			}
+			dt := d.TypeOf()
+			if dt == nil || dt.Kind != TyDict {
+				return nil, fmt.Errorf("line %d: .items() must be called on a typed dict", n.Lineno())
+			}
+			loopSc := &scope{vars: copyVars(sc.vars)}
+			loopSc.declare(v1, dt.Key)
+			loopSc.declare(v2, dt.Val)
+			body, err := lowerBody(n.Children("body"), loopSc)
+			if err != nil {
+				return nil, err
+			}
+			return &ForEach{Var: v1, Var2: v2, Iter: d, Kind: "dict", Body: body}, nil
+		}
+	}
+	return nil, fmt.Errorf("line %d: two-name for-loop requires enumerate(xs), zip(a, b), or dict.items()", n.Lineno())
 }
 
 func copyVars(in map[string]*Type) map[string]*Type {

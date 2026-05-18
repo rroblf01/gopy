@@ -145,11 +145,31 @@ type ForRange struct {
 }
 
 // ForEach iterates a list/dict/string. ElemTy is the inferred element type.
+// For tuple-targeted loops the IR carries Var2 (second name) and an
+// optional Kind hint to drive codegen:
+//
+//	""        — single-var iteration (default)
+//	"dict"    — iterate (key, value) pairs of a map
+//	"enum"    — iterate (index, value) pairs of a slice; Iter is the slice
+//	"zip"     — iterate paired (a, b) from two slices; Iter is __ZipIter holder
 type ForEach struct {
 	Var    string
+	Var2   string
 	Iter   Expr
+	Iter2  Expr // second iterable for zip
 	ElemTy *Type
+	Kind   string
 	Body   []Stmt
+}
+
+// MultiAssign is `a, b = x, y` where both sides have matching arity.
+// Codegen emits Go parallel assignment (`a, b := x, y` for first
+// declaration, `a, b = x, y` for reassignment). Mixed decl is detected
+// at lower time and rejected.
+type MultiAssign struct {
+	Targets []string
+	Values  []Expr
+	Decl    bool
 }
 
 // AssignSub assigns to an indexed expression: `target[index] = value`.
@@ -193,6 +213,11 @@ type Yield struct {
 	X Expr
 }
 
+// Break and Continue map directly to Go's break / continue inside the
+// nearest enclosing loop. No payload needed.
+type Break struct{}
+type Continue struct{}
+
 // WithFile is the lowered form of `with open(path, mode) as name: body`.
 // F4 only supports file context managers; arbitrary __enter__/__exit__
 // objects are rejected at lower time.
@@ -216,6 +241,9 @@ func (*Try) stmtNode()        {}
 func (*Raise) stmtNode()      {}
 func (*WithFile) stmtNode()   {}
 func (*Yield) stmtNode()      {}
+func (*Break) stmtNode()      {}
+func (*Continue) stmtNode()   {}
+func (*MultiAssign) stmtNode() {}
 
 // Expr is any value-producing node.
 type Expr interface {
@@ -351,6 +379,15 @@ type DictComp struct {
 	Ty    *Type
 }
 
+// IfExpr is the ternary `then if cond else else_`. Codegen emits an IIFE
+// that picks between the two branches; Go has no expression-level if.
+type IfExpr struct {
+	Cond Expr
+	Then Expr
+	Else Expr
+	Ty   *Type
+}
+
 // FStr is a Python f-string lowered to a list of literal / expression parts.
 // Codegen emits fmt.Sprintf with %v for each expression part.
 type FStr struct {
@@ -384,6 +421,7 @@ func (*DictLit) exprNode()    {}
 func (*FStr) exprNode()       {}
 func (*ListComp) exprNode()   {}
 func (*DictComp) exprNode()   {}
+func (*IfExpr) exprNode()     {}
 
 func (e *IntLit) TypeOf() *Type     { return e.Ty }
 func (e *FloatLit) TypeOf() *Type   { return e.Ty }
@@ -405,3 +443,4 @@ func (e *DictLit) TypeOf() *Type    { return e.Ty }
 func (e *FStr) TypeOf() *Type       { return e.Ty }
 func (e *ListComp) TypeOf() *Type   { return e.Ty }
 func (e *DictComp) TypeOf() *Type   { return e.Ty }
+func (e *IfExpr) TypeOf() *Type     { return e.Ty }
