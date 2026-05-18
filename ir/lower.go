@@ -1043,6 +1043,10 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			}
 		}
 		return &Subscript{Value: val, Index: idx, Ty: elemTy}, nil
+	case "Tuple":
+		// Lowered as a list literal: same Go shape (slice), same access
+		// pattern. Trade-off: we lose Python's immutability semantics.
+		fallthrough
 	case "List":
 		elts := n.Children("elts")
 		var elems []Expr

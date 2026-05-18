@@ -473,6 +473,23 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("\n")
 		return nil
 	case *ir.Assign:
+		// Augmented list-concat: `lst += other` lowered to `lst = lst + other`
+		// where both sides have TyList. Python extends in place; Go has no
+		// `+` for slices, so rewrite as `lst = append(lst, other...)`.
+		if !x.Decl {
+			if bin, ok := x.Value.(*ir.BinOp); ok && bin.Op == "+" {
+				lt, rt := bin.L.TypeOf(), bin.R.TypeOf()
+				if lt != nil && rt != nil && lt.Kind == ir.TyList && rt.Kind == ir.TyList {
+					g.writeIndent()
+					g.writef("%s = append(%s, ", x.Target, x.Target)
+					if err := g.expr(bin.R); err != nil {
+						return err
+					}
+					g.writef("...)\n")
+					return nil
+				}
+			}
+		}
 		// Track stdlib-call return tags so later method dispatch and
 		// truthy checks see the right type. We do this regardless of
 		// whether the declaration carries an explicit annotation.
@@ -1192,25 +1209,29 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		g.writef("]")
 	case *ir.Slice:
-		if x.Step != nil {
-			return fmt.Errorf("slice with explicit step is not supported yet")
-		}
-		if err := g.expr(x.Value); err != nil {
-			return err
-		}
-		g.writef("[")
-		if x.Low != nil {
-			if err := g.expr(x.Low); err != nil {
+		// Fast path: bounds are non-negative literal ints and no step.
+		// Anything fancier (negative bound, step, runtime expression we
+		// can't statically check) routes through the generic helper.
+		if x.Step == nil && sliceBoundSafe(x.Low) && sliceBoundSafe(x.High) {
+			if err := g.expr(x.Value); err != nil {
 				return err
 			}
-		}
-		g.writef(":")
-		if x.High != nil {
-			if err := g.expr(x.High); err != nil {
-				return err
+			g.writef("[")
+			if x.Low != nil {
+				if err := g.expr(x.Low); err != nil {
+					return err
+				}
 			}
+			g.writef(":")
+			if x.High != nil {
+				if err := g.expr(x.High); err != nil {
+					return err
+				}
+			}
+			g.writef("]")
+			return nil
 		}
-		g.writef("]")
+		return g.sliceWithHelper(x)
 	case *ir.ListLit:
 		g.writef("[]%s{", g.goType(x.ElemTy))
 		for i, e := range x.Elems {
@@ -1575,6 +1596,14 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinRound(c)
 		case "isinstance":
 			return g.builtinIsInstance(c)
+		case "pow":
+			return g.builtinPow(c)
+		case "chr":
+			return g.builtinChr(c)
+		case "ord":
+			return g.builtinOrd(c)
+		case "repr":
+			return g.builtinRepr(c)
 		case "any":
 			return g.builtinReduce(c, "any")
 		case "all":
@@ -2320,6 +2349,289 @@ func (g *gen) builtinSorted(c *ir.Call) error {
 	g.writeIndent()
 	g.writef("}()")
 	return nil
+}
+
+// builtinPow lowers `pow(a, b)` to integer/float exponentiation. Float
+// arguments route through math.Pow; integer arguments use a loop that
+// keeps the result as int64 (matching Python's int**int → int).
+func (g *gen) builtinPow(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("pow() takes two positional arguments")
+	}
+	at := c.Args[0].TypeOf()
+	bt := c.Args[1].TypeOf()
+	floatish := (at != nil && at.Kind == ir.TyFloat) || (bt != nil && bt.Kind == ir.TyFloat)
+	if floatish {
+		g.addImport("math")
+		g.writef("math.Pow(float64(")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("), float64(")
+		if err := g.expr(c.Args[1]); err != nil {
+			return err
+		}
+		g.writef("))")
+		return nil
+	}
+	g.writef("func() int64 {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("var __r int64 = 1\n")
+	g.writeIndent()
+	g.writef("var __b int64 = ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("var __e int64 = ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("for __i := int64(0); __i < __e; __i++ { __r *= __b }\n")
+	g.writeIndent()
+	g.writef("return __r\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinChr lowers `chr(n)` to a single-rune string. Matches Python's
+// codepoint-based behavior for the BMP and beyond.
+func (g *gen) builtinChr(c *ir.Call) error {
+	if len(c.Args) != 1 {
+		return fmt.Errorf("chr() takes one positional argument")
+	}
+	g.writef("string(rune(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("))")
+	return nil
+}
+
+// builtinOrd lowers `ord(s)` to the first rune's codepoint as int64.
+func (g *gen) builtinOrd(c *ir.Call) error {
+	if len(c.Args) != 1 {
+		return fmt.Errorf("ord() takes one positional argument")
+	}
+	g.writef("int64([]rune(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")[0])")
+	return nil
+}
+
+// builtinRepr lowers `repr(x)` to fmt.Sprintf with the %#v verb. This is
+// only an approximation of Python's repr — string quotes match, but
+// container shapes (`[1, 2]` vs Go's `[]int64{1, 2}`) diverge. Documented
+// limitation.
+func (g *gen) builtinRepr(c *ir.Call) error {
+	if len(c.Args) != 1 {
+		return fmt.Errorf("repr() takes one positional argument")
+	}
+	g.addImport("fmt")
+	g.writef("fmt.Sprintf(%q, ", "%#v")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")")
+	return nil
+}
+
+// sliceBoundSafe reports whether a slice bound expression is safe to
+// emit as a Go-native index — i.e. it's nil (omitted) or a non-negative
+// integer literal. Anything else (variables, negative literals,
+// arithmetic) needs the helper that wraps negative indices and clamps
+// out-of-range values like Python does.
+func sliceBoundSafe(e ir.Expr) bool {
+	if e == nil {
+		return true
+	}
+	if lit, ok := e.(*ir.IntLit); ok {
+		return lit.V >= 0
+	}
+	return false
+}
+
+// sliceWithHelper emits a call to the generic __gopy_slice_T helper for
+// the value's element type, threading the (low, high, step) tuple as
+// nullable int64 pointers so the helper can apply Python's semantics
+// (negative indices, omitted bounds, signed step).
+func (g *gen) sliceWithHelper(x *ir.Slice) error {
+	containerTy := x.Value.TypeOf()
+	if containerTy == nil {
+		return fmt.Errorf("slicing: receiver type unknown; add an annotation")
+	}
+	switch containerTy.Kind {
+	case ir.TyList:
+		elemGo := g.goType(containerTy.Elem)
+		helperKey := "__gopy_slice_" + sanitizeHelper(elemGo)
+		g.helpers[helperKey] = sliceHelperFor(elemGo, helperKey)
+		g.writef("%s(", helperKey)
+	case ir.TyStr:
+		g.helpers["__gopy_slice_str"] = sliceStrHelper
+		g.writef("__gopy_slice_str(")
+	default:
+		return fmt.Errorf("slicing: unsupported container type %s", g.goType(containerTy))
+	}
+	if err := g.expr(x.Value); err != nil {
+		return err
+	}
+	g.writef(", ")
+	if err := g.sliceBoundArg(x.Low); err != nil {
+		return err
+	}
+	g.writef(", ")
+	if err := g.sliceBoundArg(x.High); err != nil {
+		return err
+	}
+	g.writef(", ")
+	if x.Step == nil {
+		g.writef("1")
+	} else {
+		g.writef("int64(")
+		if err := g.expr(x.Step); err != nil {
+			return err
+		}
+		g.writef(")")
+	}
+	g.writef(")")
+	return nil
+}
+
+func (g *gen) sliceBoundArg(e ir.Expr) error {
+	g.helpers["__gopy_slice_some"] = sliceSomeHelper
+	if e == nil {
+		g.writef("__gopy_slice_none")
+		g.helpers["__gopy_slice_none"] = sliceNoneHelper
+		return nil
+	}
+	g.writef("__gopy_slice_some(int64(")
+	if err := g.expr(e); err != nil {
+		return err
+	}
+	g.writef("))")
+	return nil
+}
+
+// sliceHelperFor returns the source of a slice helper specialized for
+// the given Go element type. Generated once per element type in use.
+func sliceHelperFor(elemGo, helperKey string) string {
+	return "func " + helperKey + "(xs []" + elemGo + ", low, high *int64, step int64) []" + elemGo + ` {
+	n := int64(len(xs))
+	resolve := func(b *int64, fallback int64) int64 {
+		if b == nil {
+			return fallback
+		}
+		if *b < 0 {
+			r := *b + n
+			if r < 0 {
+				r = 0
+			}
+			return r
+		}
+		if *b > n {
+			return n
+		}
+		return *b
+	}
+	if step == 0 {
+		step = 1
+	}
+	var lo, hi int64
+	if step > 0 {
+		lo = resolve(low, 0)
+		hi = resolve(high, n)
+	} else {
+		lo = resolve(low, n-1)
+		hi = resolve(high, -1)
+	}
+	var out []` + elemGo + `
+	if step > 0 {
+		for i := lo; i < hi; i += step {
+			out = append(out, xs[i])
+		}
+	} else {
+		for i := lo; i > hi; i += step {
+			if i >= 0 && i < n {
+				out = append(out, xs[i])
+			}
+		}
+	}
+	if out == nil {
+		out = []` + elemGo + `{}
+	}
+	return out
+}`
+}
+
+const sliceStrHelper = `func __gopy_slice_str(s string, low, high *int64, step int64) string {
+	rs := []rune(s)
+	n := int64(len(rs))
+	resolve := func(b *int64, fallback int64) int64 {
+		if b == nil {
+			return fallback
+		}
+		if *b < 0 {
+			r := *b + n
+			if r < 0 {
+				r = 0
+			}
+			return r
+		}
+		if *b > n {
+			return n
+		}
+		return *b
+	}
+	if step == 0 {
+		step = 1
+	}
+	var lo, hi int64
+	if step > 0 {
+		lo = resolve(low, 0)
+		hi = resolve(high, n)
+	} else {
+		lo = resolve(low, n-1)
+		hi = resolve(high, -1)
+	}
+	var out []rune
+	if step > 0 {
+		for i := lo; i < hi; i += step {
+			out = append(out, rs[i])
+		}
+	} else {
+		for i := lo; i > hi; i += step {
+			if i >= 0 && i < n {
+				out = append(out, rs[i])
+			}
+		}
+	}
+	return string(out)
+}`
+
+const sliceSomeHelper = `func __gopy_slice_some(v int64) *int64 { return &v }`
+const sliceNoneHelper = "var __gopy_slice_none *int64 = nil"
+
+// sanitizeHelper turns a Go type expression like `[]int64` or `*Foo`
+// into a name fragment safe to splice into an identifier.
+func sanitizeHelper(s string) string {
+	var b []rune
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_':
+			b = append(b, r)
+		default:
+			b = append(b, '_')
+		}
+	}
+	return string(b)
 }
 
 // builtinReversed emits an IIFE that returns a reversed copy of the
