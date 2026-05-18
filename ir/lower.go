@@ -1130,6 +1130,25 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			vt = &Type{Kind: TyAny}
 		}
 		return &DictLit{Keys: ks, Vals: vs, KeyTy: kt, ValTy: vt, Ty: &Type{Kind: TyDict, Key: kt, Val: vt}}, nil
+	case "Lambda":
+		args := n.Child("args")
+		var params []Param
+		for _, a := range args.Children("args") {
+			params = append(params, Param{Name: a.Str("arg"), Ty: &Type{Kind: TyAny}})
+		}
+		// Lower body once with TyAny-typed params for the fallback path
+		// (lambda used as a value). Specialized call sites re-lower
+		// through LowerLambdaBody to inject concrete types.
+		bodySc := newScope()
+		for _, p := range params {
+			bodySc.declare(p.Name, p.Ty)
+		}
+		bodyNode := n.Child("body")
+		body, err := lowerExpr(bodyNode, bodySc)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: lambda body: %w", n.Lineno(), err)
+		}
+		return &Lambda{Params: params, Body: body, BodyAST: bodyNode, Ty: &Type{Kind: TyUnknown}}, nil
 	case "IfExp":
 		cond, err := lowerExpr(n.Child("test"), sc)
 		if err != nil {
@@ -1802,6 +1821,25 @@ func lowerForTuple(n parser.Node, sc *scope, v1, v2 string, iter parser.Node) (S
 		}
 	}
 	return nil, fmt.Errorf("line %d: two-name for-loop requires enumerate(xs), zip(a, b), or dict.items()", n.Lineno())
+}
+
+// LowerLambdaBody rebuilds a lambda's body with the supplied parameter
+// types, replacing the TyAny fallback the lambda was lowered with at
+// definition time. Used by call-site specialization (map / filter /
+// sorted with key=) where the iterable's element type is known.
+//
+// paramTypes must be the same length as l.Params; nil entries leave
+// that parameter as TyAny.
+func LowerLambdaBody(l *Lambda, paramTypes []*Type) (Expr, error) {
+	sc := newScope()
+	for i, p := range l.Params {
+		ty := p.Ty
+		if i < len(paramTypes) && paramTypes[i] != nil {
+			ty = paramTypes[i]
+		}
+		sc.declare(p.Name, ty)
+	}
+	return lowerExpr(l.BodyAST, sc)
 }
 
 func copyVars(in map[string]*Type) map[string]*Type {

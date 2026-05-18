@@ -1330,6 +1330,24 @@ func (g *gen) expr(e ir.Expr) error {
 		g.writef("}")
 	case *ir.FStr:
 		return g.fstring(x)
+	case *ir.Lambda:
+		// Standalone-lambda fallback: emit `func(p any) any { return body }`
+		// using the IR Body lowered with TyAny params. Body operations
+		// that rely on concrete types will fail to compile — that's a
+		// known limitation; specialized call sites (map / filter /
+		// sorted with key=) re-lower with proper types.
+		g.writef("func(")
+		for i, p := range x.Params {
+			if i > 0 {
+				g.writef(", ")
+			}
+			g.writef("%s any", p.Name)
+		}
+		g.writef(") any { return ")
+		if err := g.expr(x.Body); err != nil {
+			return err
+		}
+		g.writef(" }")
 	case *ir.IfExpr:
 		// Go has no expression-level if; wrap both branches in an IIFE
 		// whose return type comes from the inferred IR type. Branches must
@@ -1675,6 +1693,10 @@ func (g *gen) call(c *ir.Call) error {
 			return nil
 		case "sorted":
 			return g.builtinSorted(c)
+		case "map":
+			return g.builtinMap(c)
+		case "filter":
+			return g.builtinFilter(c)
 		case "reversed":
 			return g.builtinReversed(c)
 		case "abs":
@@ -2487,13 +2509,35 @@ func (g *gen) boxedExpr(e ir.Expr) error {
 	return g.expr(e)
 }
 
-// builtinSorted emits an IIFE that copies the input slice and sorts it
-// in place. The element type is taken from the static IR type of the
-// argument; non-list inputs are rejected at codegen time. `key` and
-// `reverse` are not yet supported.
+// builtinSorted emits an IIFE that returns a sorted copy of the input
+// slice. Supports an optional `key=` lambda (re-lowered with the
+// element type) and an optional `reverse=` bool.
 func (g *gen) builtinSorted(c *ir.Call) error {
-	if len(c.Args) != 1 || len(c.Keywords) != 0 {
-		return fmt.Errorf("sorted() takes one positional argument (key/reverse not yet supported)")
+	if len(c.Args) != 1 {
+		return fmt.Errorf("sorted() takes one positional argument")
+	}
+	var keyLambda *ir.Lambda
+	reverse := false
+	for _, kw := range c.Keywords {
+		switch kw.Name {
+		case "key":
+			lam, ok := kw.Value.(*ir.Lambda)
+			if !ok {
+				return fmt.Errorf("sorted(key=...): only inline lambda supported")
+			}
+			if len(lam.Params) != 1 {
+				return fmt.Errorf("sorted(key=...): lambda must take one argument")
+			}
+			keyLambda = lam
+		case "reverse":
+			b, ok := kw.Value.(*ir.BoolLit)
+			if !ok {
+				return fmt.Errorf("sorted(reverse=...): must be a bool literal")
+			}
+			reverse = b.V
+		default:
+			return fmt.Errorf("sorted(): unknown keyword %q", kw.Name)
+		}
 	}
 	elem, err := listElemTypeOf(c.Args[0])
 	if err != nil {
@@ -2514,7 +2558,157 @@ func (g *gen) builtinSorted(c *ir.Call) error {
 	g.writeIndent()
 	g.writef("copy(__out, __src)\n")
 	g.writeIndent()
-	g.writef("sort.Slice(__out, func(i, j int) bool { return __out[i] < __out[j] })\n")
+	op := "<"
+	if reverse {
+		op = ">"
+	}
+	if keyLambda == nil {
+		g.writef("sort.Slice(__out, func(i, j int) bool { return __out[i] %s __out[j] })\n", op)
+	} else {
+		// Re-lower the lambda body with the element type so arithmetic
+		// and field access in the key expression typecheck.
+		body, err := ir.LowerLambdaBody(keyLambda, []*ir.Type{elem})
+		if err != nil {
+			return fmt.Errorf("sorted(key=...): %w", err)
+		}
+		paramName := keyLambda.Params[0].Name
+		g.writef("sort.Slice(__out, func(__i, __j int) bool {\n")
+		g.indent++
+		// Bind the lambda's parameter to out[i], compute keyI; then to
+		// out[j], compute keyJ. We rebind (`=`) rather than redeclare.
+		g.writeIndent()
+		g.writef("%s := __out[__i]\n", paramName)
+		g.writeIndent()
+		g.writef("__ki := ")
+		if err := g.expr(body); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("%s = __out[__j]\n", paramName)
+		g.writeIndent()
+		g.writef("__kj := ")
+		if err := g.expr(body); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("_ = %s\n", paramName)
+		g.writeIndent()
+		g.writef("return __ki %s __kj\n", op)
+		g.indent--
+		g.writeIndent()
+		g.writef("})\n")
+	}
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinMap emits an IIFE that walks the iterable and applies the
+// lambda to each element, materializing the result as a typed slice.
+// First argument must be an inline lambda — function-value passing
+// without lambdas is not yet supported.
+func (g *gen) builtinMap(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("map() takes (fn, iterable)")
+	}
+	lam, ok := c.Args[0].(*ir.Lambda)
+	if !ok {
+		return fmt.Errorf("map(): first argument must be an inline lambda")
+	}
+	if len(lam.Params) != 1 {
+		return fmt.Errorf("map(): lambda must take one argument")
+	}
+	elem, err := listElemTypeOf(c.Args[1])
+	if err != nil {
+		return fmt.Errorf("map(): %w", err)
+	}
+	body, err := ir.LowerLambdaBody(lam, []*ir.Type{elem})
+	if err != nil {
+		return fmt.Errorf("map(): %w", err)
+	}
+	resTy := body.TypeOf()
+	if resTy == nil || resTy.Kind == ir.TyUnknown {
+		resTy = &ir.Type{Kind: ir.TyAny}
+	}
+	resGo := g.goType(resTy)
+	paramName := lam.Params[0].Name
+	g.writef("func() []%s {\n", resGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__out := []%s{}\n", resGo)
+	g.writeIndent()
+	g.writef("for _, %s := range ", paramName)
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(" {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__out = append(__out, ")
+	if err := g.expr(body); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinFilter emits an IIFE that walks the iterable and keeps every
+// element for which the lambda predicate returns true. Element type
+// comes from the iterable; the lambda body must yield a bool.
+func (g *gen) builtinFilter(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("filter() takes (fn, iterable)")
+	}
+	lam, ok := c.Args[0].(*ir.Lambda)
+	if !ok {
+		return fmt.Errorf("filter(): first argument must be an inline lambda")
+	}
+	if len(lam.Params) != 1 {
+		return fmt.Errorf("filter(): lambda must take one argument")
+	}
+	elem, err := listElemTypeOf(c.Args[1])
+	if err != nil {
+		return fmt.Errorf("filter(): %w", err)
+	}
+	body, err := ir.LowerLambdaBody(lam, []*ir.Type{elem})
+	if err != nil {
+		return fmt.Errorf("filter(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	paramName := lam.Params[0].Name
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__out := []%s{}\n", elemGo)
+	g.writeIndent()
+	g.writef("for _, %s := range ", paramName)
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(" {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("if ")
+	if err := g.expr(body); err != nil {
+		return err
+	}
+	g.writef(" { __out = append(__out, %s) }\n", paramName)
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
 	g.writeIndent()
 	g.writef("return __out\n")
 	g.indent--

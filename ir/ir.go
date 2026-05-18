@@ -3,6 +3,8 @@
 // is the single place where Python semantics are made explicit.
 package ir
 
+import "github.com/rroblf01/gopy/parser"
+
 // Type is the resolved type of an expression or variable. F1 only models a
 // small set; richer kinds (generics, structs, interfaces) land in later phases.
 type Type struct {
@@ -396,6 +398,18 @@ type IfExpr struct {
 	Ty   *Type
 }
 
+// Lambda is `lambda x, y: body`. Body is lowered against a scope where
+// the params carry TyAny so the IR alone compiles to an `any`-typed Go
+// closure as fallback. Sites with stronger type knowledge (map / filter
+// / sorted's key=) re-lower BodyAST through LowerLambdaBody with the
+// concrete param types they can infer.
+type Lambda struct {
+	Params  []Param
+	Body    Expr        // body lowered with TyAny params (fallback)
+	BodyAST parser.Node // raw AST for re-lowering at specialized call sites
+	Ty      *Type
+}
+
 // FStr is a Python f-string lowered to a list of literal / expression parts.
 // Codegen emits fmt.Sprintf with %v for each expression part.
 type FStr struct {
@@ -430,6 +444,7 @@ func (*FStr) exprNode()       {}
 func (*ListComp) exprNode()   {}
 func (*DictComp) exprNode()   {}
 func (*IfExpr) exprNode()     {}
+func (*Lambda) exprNode()     {}
 
 func (e *IntLit) TypeOf() *Type     { return e.Ty }
 func (e *FloatLit) TypeOf() *Type   { return e.Ty }
@@ -452,3 +467,4 @@ func (e *FStr) TypeOf() *Type       { return e.Ty }
 func (e *ListComp) TypeOf() *Type   { return e.Ty }
 func (e *DictComp) TypeOf() *Type   { return e.Ty }
 func (e *IfExpr) TypeOf() *Type     { return e.Ty }
+func (e *Lambda) TypeOf() *Type     { return e.Ty }
