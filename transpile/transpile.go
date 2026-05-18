@@ -2146,6 +2146,23 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 		if p.Ty != nil && p.Ty.Kind == ir.TyAny {
 			emit = g.boxedExpr
 		}
+		// Empty list / dict literals carry TyAny element types. When
+		// the parameter is a typed collection, emit the empty literal
+		// with the target type so Go accepts it without a conversion.
+		if p.Ty != nil && (p.Ty.Kind == ir.TyList || p.Ty.Kind == ir.TyDict) {
+			tgt := p.Ty
+			emit = func(e ir.Expr) error {
+				if ll, ok := e.(*ir.ListLit); ok && len(ll.Elems) == 0 && tgt.Kind == ir.TyList {
+					g.writef("%s{}", g.goType(tgt))
+					return nil
+				}
+				if dl, ok := e.(*ir.DictLit); ok && len(dl.Keys) == 0 && tgt.Kind == ir.TyDict {
+					g.writef("%s{}", g.goType(tgt))
+					return nil
+				}
+				return g.expr(e)
+			}
+		}
 		switch {
 		case i < len(c.Args):
 			if _, dup := kwIdx[p.Name]; dup {

@@ -427,6 +427,17 @@ type IfExpr struct {
 	Ty   *Type
 }
 
+// NamedExpr is Python's walrus `(name := value)`. The lower pass hoists
+// occurrences inside `if` / `while` conditions into a preceding Assign
+// (so the binding survives into the body), and substitutes a plain
+// Name in the condition expression. Standalone use outside a control-
+// flow header is not yet supported.
+type NamedExpr struct {
+	Name  string
+	Value Expr
+	Ty    *Type
+}
+
 // Starred marks `*xs` in a call's positional-args list. The wrapped
 // value is the list to splat; codegen forwards it as a Go variadic
 // spread when the target function has a Vararg.
@@ -483,6 +494,7 @@ func (*DictComp) exprNode()   {}
 func (*IfExpr) exprNode()     {}
 func (*Lambda) exprNode()     {}
 func (*Starred) exprNode()    {}
+func (*NamedExpr) exprNode()  {}
 
 func (e *IntLit) TypeOf() *Type     { return e.Ty }
 func (e *FloatLit) TypeOf() *Type   { return e.Ty }
@@ -507,3 +519,4 @@ func (e *DictComp) TypeOf() *Type   { return e.Ty }
 func (e *IfExpr) TypeOf() *Type     { return e.Ty }
 func (e *Lambda) TypeOf() *Type     { return e.Ty }
 func (e *Starred) TypeOf() *Type    { return e.Ty }
+func (e *NamedExpr) TypeOf() *Type  { return e.Ty }

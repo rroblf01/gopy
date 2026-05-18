@@ -519,12 +519,45 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 		}
 		return nil, fmt.Errorf("unsupported annotation BinOp %q", op.Type())
 	case "Subscript":
-		// list[T] / dict[K, V] / tuple[...]
+		// list[T] / dict[K, V] / tuple[...] / Optional[T] / Union[...]
 		base := n.Child("value")
 		if base.Type() != "Name" {
 			return nil, fmt.Errorf("generic annotation: base must be Name, got %q", base.Type())
 		}
 		switch base.Str("id") {
+		case "Optional":
+			// typing.Optional[T] — lowered to `any`. The wrapped type
+			// is recorded as the elem in case a future pass wants to
+			// narrow it, but for now we accept None alongside T values.
+			return &Type{Kind: TyAny}, nil
+		case "Union":
+			// typing.Union[...] — same lowering as the `|` operator
+			// form: collapse to any. Components are not tracked.
+			return &Type{Kind: TyAny}, nil
+		case "List":
+			elem, err := lowerAnnotation(n.Child("slice"))
+			if err != nil {
+				return nil, err
+			}
+			return &Type{Kind: TyList, Elem: elem}, nil
+		case "Dict":
+			sl := n.Child("slice")
+			if sl.Type() != "Tuple" {
+				return nil, fmt.Errorf("Dict annotation requires two type args")
+			}
+			elts := sl.Children("elts")
+			if len(elts) != 2 {
+				return nil, fmt.Errorf("Dict annotation requires 2 args")
+			}
+			kt, err := lowerAnnotation(elts[0])
+			if err != nil {
+				return nil, err
+			}
+			vt, err := lowerAnnotation(elts[1])
+			if err != nil {
+				return nil, err
+			}
+			return &Type{Kind: TyDict, Key: kt, Val: vt}, nil
 		case "list":
 			elem, err := lowerAnnotation(n.Child("slice"))
 			if err != nil {
@@ -831,6 +864,10 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Walrus hoist: any `name := value` inside the condition is
+		// peeled off into a preceding Assign so the binding survives
+		// into the if body (and Go's expression-level constraints).
+		pre, condExpr := hoistNamedExprs(cond)
 		thenS, err := lowerBody(n.Children("body"), sc)
 		if err != nil {
 			return nil, err
@@ -839,7 +876,11 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &If{Cond: cond, Then: thenS, Else: elseS}, nil
+		ifStmt := &If{Cond: condExpr, Then: thenS, Else: elseS}
+		if len(pre) == 0 {
+			return ifStmt, nil
+		}
+		return &Block{Body: append(pre, ifStmt)}, nil
 	case "While":
 		cond, err := lowerExpr(n.Child("test"), sc)
 		if err != nil {
@@ -852,7 +893,25 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		if len(n.Children("orelse")) > 0 {
 			return nil, fmt.Errorf("line %d: while-else not supported", n.Lineno())
 		}
-		return &While{Cond: cond, Body: body}, nil
+		// Same walrus hoist as `if`. Note: the assigned name is
+		// re-bound every iteration because the hoisted Assign sits
+		// before the loop header in the IR — we replicate it back
+		// into the body's tail to maintain Python semantics.
+		pre, condExpr := hoistNamedExprs(cond)
+		whileStmt := &While{Cond: condExpr, Body: body}
+		if len(pre) == 0 {
+			return whileStmt, nil
+		}
+		// Re-evaluate the hoisted assignment at the end of each
+		// iteration so subsequent condition checks see fresh values.
+		// The re-evaluation is a reassignment, never a re-declaration,
+		// to avoid shadowing the outer binding.
+		for _, s := range pre {
+			if a, ok := s.(*Assign); ok {
+				whileStmt.Body = append(whileStmt.Body, &Assign{Target: a.Target, Value: a.Value, Decl: false, Ty: a.Ty})
+			}
+		}
+		return &Block{Body: append(pre, whileStmt)}, nil
 	case "For":
 		return lowerFor(n, sc)
 	case "Try":
@@ -1242,6 +1301,21 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			return nil, fmt.Errorf("line %d: lambda body: %w", n.Lineno(), err)
 		}
 		return &Lambda{Params: params, Body: body, BodyAST: bodyNode, Ty: &Type{Kind: TyUnknown}}, nil
+	case "NamedExpr":
+		// Walrus assignment. The lower pass only generates this node;
+		// surrounding statement-level lowering hoists it into a
+		// preceding Assign. Direct use outside a hoist context is not
+		// supported and errors at codegen.
+		tgt := n.Child("target")
+		if tgt.Type() != "Name" {
+			return nil, fmt.Errorf("walrus target must be a Name")
+		}
+		v, err := lowerExpr(n.Child("value"), sc)
+		if err != nil {
+			return nil, err
+		}
+		sc.declare(tgt.Str("id"), v.TypeOf())
+		return &NamedExpr{Name: tgt.Str("id"), Value: v, Ty: v.TypeOf()}, nil
 	case "IfExp":
 		cond, err := lowerExpr(n.Child("test"), sc)
 		if err != nil {
@@ -1377,6 +1451,39 @@ func lowerCmpKind(s string) (string, error) {
 		return "!=", nil
 	}
 	return "", fmt.Errorf("unsupported Compare op %q", s)
+}
+
+// hoistNamedExprs walks an expression looking for top-level NamedExpr
+// nodes (walrus assignments). Each is peeled off into a preceding
+// Assign statement; the returned expression substitutes a plain Name
+// where the walrus stood. Only handles NamedExpr appearances at the
+// top of common operator trees — deeper nestings (lambda bodies,
+// function call args, comprehensions) fall through unchanged and rely
+// on the codegen-level error path.
+func hoistNamedExprs(e Expr) ([]Stmt, Expr) {
+	var pre []Stmt
+	var visit func(Expr) Expr
+	visit = func(x Expr) Expr {
+		switch n := x.(type) {
+		case *NamedExpr:
+			pre = append(pre, &Assign{Target: n.Name, Value: n.Value, Decl: true, Ty: n.Ty})
+			return &Name{N: n.Name, Ty: n.Ty}
+		case *BinOp:
+			n.L = visit(n.L)
+			n.R = visit(n.R)
+		case *CmpOp:
+			n.L = visit(n.L)
+			n.R = visit(n.R)
+		case *BoolOp:
+			n.L = visit(n.L)
+			n.R = visit(n.R)
+		case *UnaryOp:
+			n.X = visit(n.X)
+		}
+		return x
+	}
+	out := visit(e)
+	return pre, out
 }
 
 // inferMethodRet returns the static return type of a method call when
