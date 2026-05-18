@@ -54,11 +54,10 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if err := g.detectDiamondConflicts(); err != nil {
 		return nil, err
 	}
-	// Scan for usage of the builtin `Exception` type so we know whether to
-	// emit the embedded definition (keeps generated programs self-contained
-	// without forcing a runtime import).
+	// Scan for usage of the builtin `Exception` type so we know whether
+	// to emit the inline definition (multi-file builds would otherwise
+	// duplicate the type across each .go file in the same package).
 	g.detectExceptionUsage(m)
-
 	if g.needsException {
 		g.emitExceptionBase()
 		g.writef("\n")
@@ -197,14 +196,90 @@ func (g *gen) scanStmtsForException(ss []ir.Stmt) {
 				}
 			}
 		case *ir.If:
+			g.scanExprForException(x.Cond)
 			g.scanStmtsForException(x.Then)
 			g.scanStmtsForException(x.Else)
 		case *ir.While:
+			g.scanExprForException(x.Cond)
 			g.scanStmtsForException(x.Body)
 		case *ir.ForRange:
 			g.scanStmtsForException(x.Body)
 		case *ir.ForEach:
 			g.scanStmtsForException(x.Body)
+		case *ir.ExprStmt:
+			g.scanExprForException(x.X)
+		case *ir.Assign:
+			g.scanExprForException(x.Value)
+		case *ir.Return:
+			g.scanExprForException(x.X)
+		}
+	}
+}
+
+// scanExprForException walks an expression tree looking for constructs
+// that need the inline Exception base — currently the two-arg
+// `getattr(obj, name)` form, which panics with `NewException(...)` when
+// the attribute is missing.
+func (g *gen) scanExprForException(e ir.Expr) {
+	if e == nil {
+		return
+	}
+	switch x := e.(type) {
+	case *ir.Call:
+		if n, ok := x.Func.(*ir.Name); ok && n.N == "getattr" && len(x.Args) == 2 {
+			g.needsException = true
+		}
+		g.scanExprForException(x.Func)
+		for _, a := range x.Args {
+			g.scanExprForException(a)
+		}
+		for _, kw := range x.Keywords {
+			g.scanExprForException(kw.Value)
+		}
+	case *ir.MethodCall:
+		g.scanExprForException(x.Recv)
+		for _, a := range x.Args {
+			g.scanExprForException(a)
+		}
+	case *ir.BinOp:
+		g.scanExprForException(x.L)
+		g.scanExprForException(x.R)
+	case *ir.CmpOp:
+		g.scanExprForException(x.L)
+		g.scanExprForException(x.R)
+	case *ir.BoolOp:
+		g.scanExprForException(x.L)
+		g.scanExprForException(x.R)
+	case *ir.UnaryOp:
+		g.scanExprForException(x.X)
+	case *ir.Attribute:
+		g.scanExprForException(x.Recv)
+	case *ir.Subscript:
+		g.scanExprForException(x.Value)
+		g.scanExprForException(x.Index)
+	case *ir.Slice:
+		g.scanExprForException(x.Value)
+		g.scanExprForException(x.Low)
+		g.scanExprForException(x.High)
+		g.scanExprForException(x.Step)
+	case *ir.IfExpr:
+		g.scanExprForException(x.Cond)
+		g.scanExprForException(x.Then)
+		g.scanExprForException(x.Else)
+	case *ir.ListLit:
+		for _, el := range x.Elems {
+			g.scanExprForException(el)
+		}
+	case *ir.DictLit:
+		for i := range x.Keys {
+			g.scanExprForException(x.Keys[i])
+			g.scanExprForException(x.Vals[i])
+		}
+	case *ir.FStr:
+		for _, p := range x.Parts {
+			if p.Expr != nil {
+				g.scanExprForException(p.Expr)
+			}
 		}
 	}
 }
@@ -310,6 +385,13 @@ func (g *gen) class(c *ir.Class) error {
 	}
 	g.indent--
 	g.writef("}\n\n")
+
+	// Per-class accessor helpers used by setattr / getattr / hasattr.
+	// Emitting these unconditionally is cheap and keeps the dynamic
+	// builtins type-safe without falling back to runtime reflection.
+	if err := g.emitClassAccessors(c); err != nil {
+		return err
+	}
 
 	// Emit constructor: New<Class>(args...) *<Class>
 	g.writef("func New%s(", c.Name)
@@ -1712,6 +1794,12 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinRound(c)
 		case "isinstance":
 			return g.builtinIsInstance(c)
+		case "getattr":
+			return g.builtinGetattr(c)
+		case "setattr":
+			return g.builtinSetattr(c)
+		case "hasattr":
+			return g.builtinHasattr(c)
 		case "pow":
 			return g.builtinPow(c)
 		case "chr":
@@ -1894,6 +1982,14 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 		"returncode": {GoName: "Returncode", Ty: &ir.Type{Kind: ir.TyInt}},
 		"stdout":     {GoName: "Stdout", Ty: &ir.Type{Kind: ir.TyStr}},
 		"stderr":     {GoName: "Stderr", Ty: &ir.Type{Kind: ir.TyStr}},
+	},
+	"__URLParseResult": {
+		"scheme":   {GoName: "Scheme", Ty: &ir.Type{Kind: ir.TyStr}},
+		"netloc":   {GoName: "Netloc", Ty: &ir.Type{Kind: ir.TyStr}},
+		"path":     {GoName: "Path", Ty: &ir.Type{Kind: ir.TyStr}},
+		"params":   {GoName: "Params", Ty: &ir.Type{Kind: ir.TyStr}},
+		"query":    {GoName: "Query", Ty: &ir.Type{Kind: ir.TyStr}},
+		"fragment": {GoName: "Fragment", Ty: &ir.Type{Kind: ir.TyStr}},
 	},
 }
 
@@ -2434,6 +2530,57 @@ func (g *gen) collectInheritedMethods(cls *ir.Class) []string {
 	}
 	walk(cls)
 	return out
+}
+
+// emitClassAccessors writes the per-class getter / setter / has helpers
+// used by getattr / setattr / hasattr. Each helper switches over the
+// declared field name and routes to the actual Go field; unknown names
+// return the supplied default (getter), succeed silently (setter), or
+// report false (has).
+func (g *gen) emitClassAccessors(c *ir.Class) error {
+	// Getter: returns (any, bool). False ok means "no such field".
+	g.writef("func __%s_get(self *%s, name string) (any, bool) {\n", c.Name, c.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("switch name {\n")
+	for _, f := range c.Fields {
+		g.writeIndent()
+		g.writef("case %q:\n", f.Name)
+		g.indent++
+		g.writeIndent()
+		g.writef("return self.%s, true\n", f.Name)
+		g.indent--
+	}
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return nil, false\n")
+	g.indent--
+	g.writef("}\n\n")
+
+	// Setter: returns bool indicating whether the field was found.
+	g.writef("func __%s_set(self *%s, name string, value any) bool {\n", c.Name, c.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("switch name {\n")
+	for _, f := range c.Fields {
+		g.writeIndent()
+		g.writef("case %q:\n", f.Name)
+		g.indent++
+		g.writeIndent()
+		g.writef("self.%s = value.(%s)\n", f.Name, g.goType(f.Ty))
+		g.writeIndent()
+		g.writef("return true\n")
+		g.indent--
+	}
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return false\n")
+	g.indent--
+	g.writef("}\n\n")
+
+	return nil
 }
 
 // hasProperty walks className and its base chain looking for a @property
@@ -3038,6 +3185,117 @@ func sanitizeHelper(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// builtinGetattr emits `__<Class>_get(obj, name)` with an optional
+// default value when the field doesn't exist. The class is taken from
+// the first argument's effective IR type; getattr on objects with
+// unknown class type is rejected at transpile time.
+func (g *gen) builtinGetattr(c *ir.Call) error {
+	if len(c.Args) < 2 || len(c.Args) > 3 {
+		return fmt.Errorf("getattr() takes (obj, name[, default])")
+	}
+	cls, err := g.lookupUserClass(c.Args[0])
+	if err != nil {
+		return err
+	}
+	g.writef("func() any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__v, __ok := __%s_get(", cls.Name)
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(", ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("if __ok { return __v }\n")
+	g.writeIndent()
+	if len(c.Args) == 3 {
+		g.writef("return ")
+		if err := g.expr(c.Args[2]); err != nil {
+			return err
+		}
+		g.writef("\n")
+	} else {
+		g.helpers["__gopy_attr_err"] = `func __gopy_attr_err(name string) { panic(NewException("AttributeError: " + name)) }`
+		g.needsException = true
+		g.writef("__gopy_attr_err(")
+		if err := g.expr(c.Args[1]); err != nil {
+			return err
+		}
+		g.writef("); return nil\n")
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinSetattr emits a call to the class's setter helper. The value
+// is wrapped in any to match the helper's signature.
+func (g *gen) builtinSetattr(c *ir.Call) error {
+	if len(c.Args) != 3 {
+		return fmt.Errorf("setattr() takes (obj, name, value)")
+	}
+	cls, err := g.lookupUserClass(c.Args[0])
+	if err != nil {
+		return err
+	}
+	g.writef("__%s_set(", cls.Name)
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(", ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(", ")
+	if err := g.boxedExpr(c.Args[2]); err != nil {
+		return err
+	}
+	g.writef(")")
+	return nil
+}
+
+// builtinHasattr returns true when the class's getter helper reports
+// success — the field's value is discarded.
+func (g *gen) builtinHasattr(c *ir.Call) error {
+	if len(c.Args) != 2 {
+		return fmt.Errorf("hasattr() takes (obj, name)")
+	}
+	cls, err := g.lookupUserClass(c.Args[0])
+	if err != nil {
+		return err
+	}
+	g.writef("func() bool { _, __ok := __%s_get(", cls.Name)
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(", ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("); return __ok }()")
+	return nil
+}
+
+// lookupUserClass returns the class declaration whose instance is
+// the given expression. Resolves through effectiveType so locals and
+// chained calls work alongside annotated parameters.
+func (g *gen) lookupUserClass(e ir.Expr) (*ir.Class, error) {
+	ty := g.effectiveType(e)
+	if ty == nil || ty.Kind != ir.TyNamed {
+		return nil, fmt.Errorf("dynamic-attribute builtin: receiver type must be a known user class")
+	}
+	cls, ok := g.classes[ty.Name]
+	if !ok {
+		return nil, fmt.Errorf("dynamic-attribute builtin: %s is not a user class", ty.Name)
+	}
+	return cls, nil
 }
 
 // builtinReduceFn emits a left-fold over the iterable using the inline
@@ -3775,16 +4033,17 @@ func (g *gen) stdlibCallRetTag(e ir.Expr) string {
 		if !hit {
 			return ""
 		}
+		// Path may be 2-seg (e.g. "os.getenv") or longer (e.g.
+		// "urllib.parse.urlparse"). Split last segment as method,
+		// resolve through Subs.
 		segs := splitDotted(path)
-		if len(segs) != 2 {
+		if len(segs) < 2 {
 			return ""
 		}
-		mod, ok := stdlibModules[segs[0]]
-		if !ok {
-			return ""
-		}
-		fn, ok := mod.Funcs[segs[1]]
-		if !ok {
+		modPath := strings.Join(segs[:len(segs)-1], ".")
+		method := segs[len(segs)-1]
+		fn := lookupStdlibFunc(modPath, method)
+		if fn == nil {
 			return ""
 		}
 		return fn.RetTag

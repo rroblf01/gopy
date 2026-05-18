@@ -80,6 +80,7 @@ var stdlibModules = map[string]stdlibModule{
 					"quote":     {GoFunc: "__gopy_url_quote", GoImport: "net/url", Helper: helperURLQuote, HelperImports: []string{"strings", "fmt"}, RetKind: "str"},
 					"unquote":   {GoFunc: "__gopy_url_unquote", GoImport: "net/url", Helper: helperURLUnquote, RetKind: "str"},
 					"urlencode": {GoFunc: "__gopy_url_urlencode", GoImport: "net/url", Helper: helperURLUrlencode, HelperImports: []string{"strings"}, RetKind: "str"},
+					"urlparse":  {GoFunc: "__gopy_url_urlparse", GoImport: "net/url", Helper: helperURLUrlparse, RetTag: "__URLParseResult", ExtraHelpers: map[string]string{"__URLParseResult": helperURLParseResultType}},
 				},
 			},
 		},
@@ -461,6 +462,33 @@ const helperURLUrlencode = `func __gopy_url_urlencode(d map[string]string) strin
 		b.WriteString(url.QueryEscape(d[k]))
 	}
 	return b.String()
+}`
+
+// helperURLParseResultType + helperURLUrlparse mirror CPython's
+// ParseResult shape for the fields most fixtures care about. The
+// `params` slot is always empty since Go's url.URL doesn't expose
+// the RFC 3986 path-parameter component separately.
+const helperURLParseResultType = `type __URLParseResult struct {
+	Scheme   string
+	Netloc   string
+	Path     string
+	Params   string
+	Query    string
+	Fragment string
+}`
+
+const helperURLUrlparse = `func __gopy_url_urlparse(s string) *__URLParseResult {
+	u, err := url.Parse(s)
+	if err != nil {
+		return &__URLParseResult{}
+	}
+	return &__URLParseResult{
+		Scheme:   u.Scheme,
+		Netloc:   u.Host,
+		Path:     u.Path,
+		Query:    u.RawQuery,
+		Fragment: u.Fragment,
+	}
 }`
 
 // helperURLUnquote uses url.PathUnescape because Python's unquote
