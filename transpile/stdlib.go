@@ -132,10 +132,12 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"itertools": {
 		Funcs: map[string]stdlibFunc{
-			"chain":      {GoFunc: "__gopy_chain_unused"},
-			"accumulate": {GoFunc: "__gopy_accumulate_unused"},
-			"takewhile":  {GoFunc: "__gopy_takewhile_unused"},
-			"dropwhile":  {GoFunc: "__gopy_dropwhile_unused"},
+			"chain":        {GoFunc: "__gopy_chain_unused"},
+			"accumulate":   {GoFunc: "__gopy_accumulate_unused"},
+			"takewhile":    {GoFunc: "__gopy_takewhile_unused"},
+			"dropwhile":    {GoFunc: "__gopy_dropwhile_unused"},
+			"combinations": {GoFunc: "__gopy_combinations_unused"},
+			"product":      {GoFunc: "__gopy_product_unused"},
 		},
 	},
 	"random": {

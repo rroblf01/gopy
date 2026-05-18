@@ -832,6 +832,22 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		return nil, nil
 	case "Match":
 		return lowerMatch(n, sc)
+	case "FunctionDef":
+		// Nested function inside another body: lower it as a regular
+		// Func and wrap in a LocalFunc statement so codegen can emit
+		// `name := func(...) ret { ... }`.
+		fn, err := lowerFunc(n)
+		if err != nil {
+			return nil, err
+		}
+		if fn.IsGenerator {
+			return nil, fmt.Errorf("line %d: nested generators are not yet supported", n.Lineno())
+		}
+		// Make the nested name visible to subsequent statements so
+		// recursive references and post-decl uses see it. Type is
+		// loose (TyUnknown) — Go infers from the closure literal.
+		sc.declare(fn.Name, &Type{Kind: TyUnknown})
+		return &LocalFunc{Fn: fn}, nil
 	case "Break":
 		return &Break{}, nil
 	case "Continue":
@@ -1173,6 +1189,12 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		return lowerListComp(n, sc)
 	case "DictComp":
 		return lowerDictComp(n, sc)
+	case "Starred":
+		inner, err := lowerExpr(n.Child("value"), sc)
+		if err != nil {
+			return nil, err
+		}
+		return &Starred{Value: inner, Ty: inner.TypeOf()}, nil
 	case "JoinedStr":
 		// f"..." — list of Constant(str) and FormattedValue.
 		var parts []FStrPart

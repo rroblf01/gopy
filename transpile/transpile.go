@@ -725,6 +725,8 @@ func (g *gen) stmt(s ir.Stmt) error {
 		return g.withFile(x)
 	case *ir.Match:
 		return g.matchStmt(x)
+	case *ir.LocalFunc:
+		return g.localFunc(x)
 	case *ir.Break:
 		g.writeIndent()
 		g.writef("break\n")
@@ -968,6 +970,77 @@ func (g *gen) withFile(w *ir.WithFile) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()\n")
+	return nil
+}
+
+// localFunc emits a nested function definition as a function-typed
+// local: `name := func(p T) U { body }`. Closures over enclosing scope
+// work because Go function literals capture surrounding names by
+// reference, matching Python's late-binding semantics.
+func (g *gen) localFunc(lf *ir.LocalFunc) error {
+	fn := lf.Fn
+	// Reset varTypes / localVarTypes inside the nested body so it
+	// doesn't accidentally inherit shadowing assumptions; capture the
+	// outer maps for restoration.
+	prevVars := g.varTypes
+	g.varTypes = map[string]string{}
+	prevLocal := g.localVarTypes
+	g.localVarTypes = map[string]*ir.Type{}
+	for _, p := range fn.Params {
+		if p.Ty != nil {
+			g.localVarTypes[p.Name] = p.Ty
+		}
+	}
+	defer func() {
+		g.varTypes = prevVars
+		g.localVarTypes = prevLocal
+	}()
+
+	g.writeIndent()
+	g.writef("%s := func(", fn.Name)
+	for i, p := range fn.Params {
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("%s %s", p.Name, g.goType(p.Ty))
+	}
+	if fn.Vararg != nil {
+		if len(fn.Params) > 0 {
+			g.writef(", ")
+		}
+		g.writef("%s []any", fn.Vararg.Name)
+	}
+	if fn.Kwarg != nil {
+		if len(fn.Params) > 0 || fn.Vararg != nil {
+			g.writef(", ")
+		}
+		g.writef("%s map[string]any", fn.Kwarg.Name)
+	}
+	g.writef(")")
+	if fn.Ret != nil && fn.Ret.Kind != ir.TyUnknown && fn.Ret.Kind != ir.TyNone {
+		g.writef(" %s", g.goType(fn.Ret))
+	}
+	g.writef(" {\n")
+	g.indent++
+	if fn.Vararg != nil {
+		g.writeIndent()
+		g.writef("_ = %s\n", fn.Vararg.Name)
+	}
+	if fn.Kwarg != nil {
+		g.writeIndent()
+		g.writef("_ = %s\n", fn.Kwarg.Name)
+	}
+	if err := g.stmts(fn.Body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	// Silence unused-warning when the closure is defined but never
+	// referenced in the rest of the body (rare but lets the file
+	// compile under the same `_ = ...` convention used elsewhere).
+	g.writeIndent()
+	g.writef("_ = %s\n", fn.Name)
 	return nil
 }
 
@@ -1710,6 +1783,10 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinTakeWhile(c)
 			case "itertools.dropwhile":
 				return g.builtinDropWhile(c)
+			case "itertools.combinations":
+				return g.builtinCombinations(c)
+			case "itertools.product":
+				return g.builtinProduct(c)
 			case "subprocess.run":
 				return g.builtinSubprocessRun(c)
 			case "functools.reduce":
@@ -1881,6 +1958,15 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinHasattr(c)
 		case "issubclass":
 			return g.builtinIsSubclass(c)
+		case "list":
+			// `list(iter)` materializes an iterator. In the gopy shim,
+			// iterables that map to slices already are slices, so this
+			// is a pass-through. Strings could feasibly be supported by
+			// splitting into runes, but we punt for now.
+			if len(c.Args) != 1 {
+				return fmt.Errorf("list() takes 1 argument")
+			}
+			return g.expr(c.Args[0])
 		case "pow":
 			return g.builtinPow(c)
 		case "chr":
@@ -1975,6 +2061,20 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 			g.writef(", ")
 		}
 		extras := c.Args[min(len(c.Args), len(fn.Params)):]
+		// Splat: `f(*xs)` for a Vararg-accepting function. Convert the
+		// typed input slice to `[]any` (the Vararg's actual Go type) so
+		// the assignment typechecks regardless of the inner element
+		// type.
+		if len(extras) == 1 {
+			if st, ok := extras[0].(*ir.Starred); ok {
+				g.writef("func() []any { __r := []any{}; for _, __v := range ")
+				if err := g.expr(st.Value); err != nil {
+					return err
+				}
+				g.writef(" { __r = append(__r, __v) }; return __r }()")
+				goto kwargsBlock
+			}
+		}
 		g.writef("[]any{")
 		for i, a := range extras {
 			if i > 0 {
@@ -1986,6 +2086,7 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 		}
 		g.writef("}")
 	}
+kwargsBlock:
 	if fn.Kwarg != nil {
 		if len(fn.Params) > 0 || fn.Vararg != nil {
 			g.writef(", ")
@@ -3455,6 +3556,103 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	g.writef("}\n")
 	g.writeIndent()
 	g.writef("return %s\n", accName)
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinCombinations emits an IIFE producing every 2-element subset
+// (i < j) of the input slice. Only r=2 is supported — variable-r
+// combinations need recursion that adds little user-facing value.
+func (g *gen) builtinCombinations(c *ir.Call) error {
+	if len(c.Args) != 2 {
+		return fmt.Errorf("combinations() takes (iterable, r); F+ accepts r=2 only")
+	}
+	rLit, ok := c.Args[1].(*ir.IntLit)
+	if !ok || rLit.V != 2 {
+		return fmt.Errorf("combinations(): r must be the literal 2")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("combinations(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() [][]%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := [][]%s{}\n", elemGo)
+	g.writeIndent()
+	g.writef("for __i := 0; __i < len(__src); __i++ {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("for __j := __i + 1; __j < len(__src); __j++ {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__out = append(__out, []%s{__src[__i], __src[__j]})\n", elemGo)
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinProduct emits the cartesian product of two same-typed slices.
+// Only the 2-iterable form is supported in F+.
+func (g *gen) builtinProduct(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("product() takes two iterables (F+: 2-way product only)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("product(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() [][]%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__a := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__b := ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := [][]%s{}\n", elemGo)
+	g.writeIndent()
+	g.writef("for _, __x := range __a {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("for _, __y := range __b {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__out = append(__out, []%s{__x, __y})\n", elemGo)
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")

@@ -245,6 +245,14 @@ type Block struct {
 	Body []Stmt
 }
 
+// LocalFunc is a `def name(...):` declared inside another function. The
+// transpiler emits it as a function-typed local assigned to `name`,
+// so the closure can be referenced from later statements in the same
+// scope. Generators / methods are rejected at lower time.
+type LocalFunc struct {
+	Fn *Func
+}
+
 // WithFile is the lowered form of `with open(path, mode) as name: body`.
 // F4 only supports file context managers; arbitrary __enter__/__exit__
 // objects are rejected at lower time.
@@ -272,6 +280,7 @@ func (*Break) stmtNode()      {}
 func (*Continue) stmtNode()   {}
 func (*Block) stmtNode()      {}
 func (*Match) stmtNode()      {}
+func (*LocalFunc) stmtNode()  {}
 func (*MultiAssign) stmtNode() {}
 
 // Expr is any value-producing node.
@@ -417,6 +426,14 @@ type IfExpr struct {
 	Ty   *Type
 }
 
+// Starred marks `*xs` in a call's positional-args list. The wrapped
+// value is the list to splat; codegen forwards it as a Go variadic
+// spread when the target function has a Vararg.
+type Starred struct {
+	Value Expr
+	Ty    *Type
+}
+
 // Lambda is `lambda x, y: body`. Body is lowered against a scope where
 // the params carry TyAny so the IR alone compiles to an `any`-typed Go
 // closure as fallback. Sites with stronger type knowledge (map / filter
@@ -464,6 +481,7 @@ func (*ListComp) exprNode()   {}
 func (*DictComp) exprNode()   {}
 func (*IfExpr) exprNode()     {}
 func (*Lambda) exprNode()     {}
+func (*Starred) exprNode()    {}
 
 func (e *IntLit) TypeOf() *Type     { return e.Ty }
 func (e *FloatLit) TypeOf() *Type   { return e.Ty }
@@ -487,3 +505,4 @@ func (e *ListComp) TypeOf() *Type   { return e.Ty }
 func (e *DictComp) TypeOf() *Type   { return e.Ty }
 func (e *IfExpr) TypeOf() *Type     { return e.Ty }
 func (e *Lambda) TypeOf() *Type     { return e.Ty }
+func (e *Starred) TypeOf() *Type    { return e.Ty }
