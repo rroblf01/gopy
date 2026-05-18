@@ -106,22 +106,30 @@ func (g *gen) buildAliases(m *ir.Module) {
 			}
 			continue
 		}
-		mod, ok := stdlibModules[imp.From]
+		// Walk dotted import paths: `from urllib.parse import quote` needs
+		// urllib → parse → quote. Resolve segment by segment through Subs.
+		segs := splitDotted(imp.From)
+		mod, ok := stdlibModules[segs[0]]
 		if !ok {
-			continue // unknown module; let downstream produce the error
+			continue
+		}
+		for _, p := range segs[1:] {
+			sub, ok := mod.Subs[p]
+			if !ok {
+				mod = stdlibModule{}
+				break
+			}
+			mod = sub
 		}
 		for _, n := range imp.Names {
 			local := n.Alias
 			if local == "" {
 				local = n.Name
 			}
-			// If the imported name is a submodule/class registered under
-			// stdlibModules[<from>].Subs, the alias resolves to the dotted path.
 			if _, ok := mod.Subs[n.Name]; ok {
 				g.aliases[local] = imp.From + "." + n.Name
 				continue
 			}
-			// Otherwise it's a function imported directly (e.g. from os import getenv).
 			if _, ok := mod.Funcs[n.Name]; ok {
 				g.aliases[local] = imp.From + "." + n.Name
 				continue
@@ -1484,9 +1492,23 @@ func (g *gen) call(c *ir.Call) error {
 		// Alias from `from X import Y` — e.g. `getenv("PATH")` after
 		// `from os import getenv` resolves to os.Getenv.
 		if path, hit := g.aliases[name.N]; hit {
+			// Specials that need per-arg-type code generation rather than
+			// a static helper call: collections.Counter / itertools.chain /
+			// itertools.accumulate. Each emits an IIFE specialized to the
+			// argument's static element type.
+			switch path {
+			case "collections.Counter":
+				return g.builtinCounter(c)
+			case "itertools.chain":
+				return g.builtinChain(c)
+			case "itertools.accumulate":
+				return g.builtinAccumulate(c)
+			}
 			segs := splitDotted(path)
-			if mod, ok := stdlibModules[segs[0]]; ok && len(segs) == 2 {
-				if fn, ok := mod.Funcs[segs[1]]; ok {
+			if len(segs) >= 2 {
+				modPath := strings.Join(segs[:len(segs)-1], ".")
+				method := segs[len(segs)-1]
+				if fn := lookupStdlibFunc(modPath, method); fn != nil {
 					if fn.GoImport != "" {
 						g.addImport(fn.GoImport)
 					}
@@ -1795,30 +1817,34 @@ var taggedMethodRename = map[string]map[string]string{
 		"second":    "Second",
 		"isoformat": "Isoformat",
 	},
+	"__Hasher": {
+		"hexdigest": "Hexdigest",
+	},
 }
 
 func (g *gen) methodCall(m *ir.MethodCall) error {
-	// Tagged-variable method dispatch (Match.group, Path.exists, ...).
-	// Tag is recorded in g.varTypes when the variable was assigned the
-	// result of a typed stdlib call.
-	if n, ok := m.Recv.(*ir.Name); ok {
-		if tag := g.varTypes[n.N]; tag != "" {
-			if rename, ok := taggedMethodRename[tag]; ok {
-				if goName, ok := rename[m.Method]; ok {
-					g.writef("%s.%s(", n.N, goName)
-					for i, a := range m.Args {
-						if i > 0 {
-							g.writef(", ")
-						}
-						if err := g.expr(a); err != nil {
-							return err
-						}
-					}
-					g.writef(")")
-					return nil
+	// Tagged-receiver method dispatch (Match.group, Path.exists, ...).
+	// Tag may come from a Name (varTypes) or from a Call / MethodCall
+	// whose declared stdlib return tag is recorded in the registry.
+	if tag := g.exprTag(m.Recv); tag != "" {
+		if rename, ok := taggedMethodRename[tag]; ok {
+			if goName, ok := rename[m.Method]; ok {
+				if err := g.expr(m.Recv); err != nil {
+					return err
 				}
-				return fmt.Errorf("method %s.%s not supported on %s-tagged value", n.N, m.Method, tag)
+				g.writef(".%s(", goName)
+				for i, a := range m.Args {
+					if i > 0 {
+						g.writef(", ")
+					}
+					if err := g.expr(a); err != nil {
+						return err
+					}
+				}
+				g.writef(")")
+				return nil
 			}
+			return fmt.Errorf("method .%s not supported on %s-tagged value", m.Method, tag)
 		}
 	}
 	// Stdlib resolution that crosses module aliases or nested submodules
@@ -1861,10 +1887,10 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return nil
 		}
 	}
-	// String methods: dispatched whenever the receiver carries a TyStr.
-	// Each Python str method maps to a Go strings.* function (or a tiny
-	// shim where the signature shapes differ).
-	if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyStr {
+	// String methods: dispatched whenever the receiver resolves to a
+	// TyStr — covers bare-Name strings, chained stdlib calls that return
+	// a string (base64, urllib), and previously-typed locals.
+	if rt := g.effectiveType(m.Recv); rt != nil && rt.Kind == ir.TyStr {
 		if handled, err := g.stringMethod(m); handled || err != nil {
 			return err
 		}
@@ -2753,6 +2779,115 @@ func sanitizeHelper(s string) string {
 	return string(b)
 }
 
+// builtinCounter emits an IIFE that walks the input list and tallies
+// occurrences into a typed map. Element type comes from the static IR
+// type of the argument, so the resulting `dict[T, int]` can be indexed
+// directly without `any`-assertions.
+func (g *gen) builtinCounter(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("Counter() takes one positional iterable")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("Counter(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() map[%s]int64 {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__out := map[%s]int64{}\n", elemGo)
+	g.writeIndent()
+	g.writef("for _, __v := range ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(" { __out[__v]++ }\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinChain concatenates two lists of the same element type.
+func (g *gen) builtinChain(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("chain() takes two list arguments (F+: only 2-way chain)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("chain(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__a := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__b := ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := make([]%s, 0, len(__a)+len(__b))\n", elemGo)
+	g.writeIndent()
+	g.writef("__out = append(__out, __a...)\n")
+	g.writeIndent()
+	g.writef("__out = append(__out, __b...)\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinAccumulate emits running totals of a numeric list. Matches
+// Python's itertools.accumulate default (operator.add).
+func (g *gen) builtinAccumulate(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("accumulate() takes one positional argument (key/func not supported)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("accumulate(): %w", err)
+	}
+	if elem.Kind != ir.TyInt && elem.Kind != ir.TyFloat {
+		return fmt.Errorf("accumulate(): only int / float elements supported")
+	}
+	elemGo := g.goType(elem)
+	zero := "0"
+	if elem.Kind == ir.TyFloat {
+		zero = "0.0"
+	}
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := make([]%s, 0, len(__src))\n", elemGo)
+	g.writeIndent()
+	g.writef("var __acc %s = %s\n", elemGo, zero)
+	g.writeIndent()
+	g.writef("for __i, __v := range __src { _ = __i; __acc += __v; __out = append(__out, __acc) }\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 // builtinReversed emits an IIFE that returns a reversed copy of the
 // input list. Slice element type comes from the static IR type.
 func (g *gen) builtinReversed(c *ir.Call) error {
@@ -3090,6 +3225,14 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef("))")
 		return true, nil
+	case "encode", "decode":
+		// In Python these toggle between str and bytes. The gopy shim
+		// treats both ends as `string`, so the call is a no-op — just
+		// pass the receiver through.
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		return true, nil
 	case "format":
 		// Positional-only `{}` placeholder support. Indexed `{0}` and
 		// named `{name}` substitutions are not yet implemented.
@@ -3156,9 +3299,10 @@ func (g *gen) exprTag(e ir.Expr) string {
 	return ""
 }
 
-// effectiveType returns the strongest type known for an expression:
-// first the static IR type, then — for bare Names — the local-var
-// inference map populated from earlier assignments / parameters.
+// effectiveType returns the strongest type known for an expression.
+// Resolution order: static IR type, local-var inference (for bare Names),
+// stdlib return-type registry (for Call / MethodCall whose target maps
+// to a stdlibFunc.RetKind). Returns nil only when no signal exists.
 func (g *gen) effectiveType(e ir.Expr) *ir.Type {
 	if t := e.TypeOf(); t != nil && t.Kind != ir.TyUnknown {
 		return t
@@ -3168,7 +3312,58 @@ func (g *gen) effectiveType(e ir.Expr) *ir.Type {
 			return t
 		}
 	}
+	if t := g.stdlibCallRetType(e); t != nil {
+		return t
+	}
 	return e.TypeOf()
+}
+
+// stdlibCallRetType looks up a Call / MethodCall against the stdlib
+// registry and returns the IR type derived from stdlibFunc.RetKind (for
+// primitives) — TaggedTypes are not handled here; see exprTag for those.
+func (g *gen) stdlibCallRetType(e ir.Expr) *ir.Type {
+	var path, method string
+	switch x := e.(type) {
+	case *ir.Call:
+		n, ok := x.Func.(*ir.Name)
+		if !ok {
+			return nil
+		}
+		p, hit := g.aliases[n.N]
+		if !hit {
+			return nil
+		}
+		segs := splitDotted(p)
+		if len(segs) < 2 {
+			return nil
+		}
+		path = strings.Join(segs[:len(segs)-1], ".")
+		method = segs[len(segs)-1]
+	case *ir.MethodCall:
+		p, ok := stdlibPathOf(x.Recv, g.aliases)
+		if !ok {
+			return nil
+		}
+		path = p
+		method = x.Method
+	default:
+		return nil
+	}
+	fn := lookupStdlibFunc(path, method)
+	if fn == nil {
+		return nil
+	}
+	switch fn.RetKind {
+	case "str":
+		return &ir.Type{Kind: ir.TyStr}
+	case "int":
+		return &ir.Type{Kind: ir.TyInt}
+	case "float":
+		return &ir.Type{Kind: ir.TyFloat}
+	case "bool":
+		return &ir.Type{Kind: ir.TyBool}
+	}
+	return nil
 }
 
 // userCallRetType returns the declared return type of a user-defined

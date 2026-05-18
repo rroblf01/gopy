@@ -61,6 +61,41 @@ var stdlibModules = map[string]stdlibModule{
 			"pow":   {GoFunc: "math.Pow", GoImport: "math"},
 		},
 	},
+	"hashlib": {
+		Funcs: map[string]stdlibFunc{
+			"sha256": {GoFunc: "__gopy_hashlib_sha256", GoImport: "crypto/sha256", Helper: helperHashlibSha256, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5"}},
+			"md5":    {GoFunc: "__gopy_hashlib_md5", GoImport: "crypto/md5", Helper: helperHashlibMd5, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/sha256"}},
+		},
+	},
+	"base64": {
+		Funcs: map[string]stdlibFunc{
+			"b64encode": {GoFunc: "__gopy_b64encode", GoImport: "encoding/base64", Helper: helperB64Encode, RetKind: "str"},
+			"b64decode": {GoFunc: "__gopy_b64decode", GoImport: "encoding/base64", Helper: helperB64Decode, RetKind: "str"},
+		},
+	},
+	"urllib": {
+		Subs: map[string]stdlibModule{
+			"parse": {
+				Funcs: map[string]stdlibFunc{
+					"quote":   {GoFunc: "__gopy_url_quote", GoImport: "net/url", Helper: helperURLQuote, HelperImports: []string{"strings", "fmt"}, RetKind: "str"},
+					"unquote": {GoFunc: "__gopy_url_unquote", GoImport: "net/url", Helper: helperURLUnquote, RetKind: "str"},
+				},
+			},
+		},
+	},
+	"collections": {
+		// Counter is handled by a per-arg-type builder in transpile.go;
+		// the entry below is a stub so alias resolution succeeds.
+		Funcs: map[string]stdlibFunc{
+			"Counter": {GoFunc: "__gopy_counter_unused"},
+		},
+	},
+	"itertools": {
+		Funcs: map[string]stdlibFunc{
+			"chain":      {GoFunc: "__gopy_chain_unused"},
+			"accumulate": {GoFunc: "__gopy_accumulate_unused"},
+		},
+	},
 	"random": {
 		Funcs: map[string]stdlibFunc{
 			"random":  {GoFunc: "__gopy_random", GoImport: "math/rand", Helper: helperRandomFloat},
@@ -117,6 +152,10 @@ type stdlibAttr struct {
 type stdlibFunc struct {
 	GoFunc   string
 	GoImport string
+	// RetKind is the IR type kind returned by this stdlib function for
+	// primitives (str / int / float / bool). Tagged types use RetTag
+	// instead. Empty means unknown / no special handling.
+	RetKind string
 	// IntArg0, if set, wraps the first arg in int(...) — useful for things
 	// like sys.exit(n) where the Python n is int64 but os.Exit expects int.
 	IntArg0 bool
@@ -292,6 +331,79 @@ const helperCSVWriter = `func __gopy_csv_writer(rows [][]string) string {
 		panic(err)
 	}
 	return b.String()
+}`
+
+// helperHasherType bridges hashlib's hash objects. Both sha256 and md5
+// build the same shape; the algo string drives Hexdigest's dispatch so
+// fixtures can compare hex strings across CPython and Go.
+const helperHasherType = `type __Hasher struct {
+	data []byte
+	algo string
+}
+
+func (h *__Hasher) Hexdigest() string {
+	switch h.algo {
+	case "sha256":
+		sum := sha256.Sum256(h.data)
+		return hex.EncodeToString(sum[:])
+	case "md5":
+		sum := md5.Sum(h.data)
+		return hex.EncodeToString(sum[:])
+	}
+	return ""
+}`
+
+const helperHashlibSha256 = `func __gopy_hashlib_sha256(data string) *__Hasher {
+	return &__Hasher{data: []byte(data), algo: "sha256"}
+}`
+
+const helperHashlibMd5 = `func __gopy_hashlib_md5(data string) *__Hasher {
+	return &__Hasher{data: []byte(data), algo: "md5"}
+}`
+
+// helperB64Encode / helperB64Decode mirror Python's base64.b64encode /
+// b64decode for str inputs. Python's API returns/accepts bytes; the
+// gopy shim treats both ends as str so fixtures don't need a bytes type.
+const helperB64Encode = `func __gopy_b64encode(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
+}`
+
+const helperB64Decode = `func __gopy_b64decode(s string) string {
+	out, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(out)
+}`
+
+// helperURLQuote mirrors CPython's urllib.parse.quote default safe=/:
+// only ASCII letters, digits, and `_.-~/` pass through unescaped; every
+// other byte renders as %XX. Go's net/url functions either turn space
+// into `+` (QueryEscape) or leave `&` unescaped (PathEscape), so we
+// roll our own.
+const helperURLQuote = `func __gopy_url_quote(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		safe := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '_' || c == '.' || c == '-' || c == '~' || c == '/'
+		if safe {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}`
+
+// helperURLUnquote uses url.PathUnescape because Python's unquote
+// preserves `+` (only QueryUnescape converts `+` to space).
+const helperURLUnquote = `func __gopy_url_unquote(s string) string {
+	v, err := url.PathUnescape(s)
+	if err != nil {
+		panic(err)
+	}
+	return v
 }`
 
 // helperMathFloor / helperMathCeil match Python 3's math.floor / math.ceil
