@@ -1246,6 +1246,11 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		// Lowered as a list literal: same Go shape (slice), same access
 		// pattern. Trade-off: we lose Python's immutability semantics.
 		fallthrough
+	case "Set":
+		// `{1, 2, 3}` lowers to the same slice shape. Membership via
+		// `in` works because we walk the slice; uniqueness is not
+		// enforced — users that need that should call list(set(...)).
+		fallthrough
 	case "List":
 		elts := n.Children("elts")
 		var elems []Expr
@@ -1472,6 +1477,12 @@ func lowerCmpKind(s string) (string, error) {
 		return "==", nil
 	case "IsNot":
 		return "!=", nil
+	// `in` / `not in` need runtime-shape knowledge (str/list/dict/set);
+	// codegen looks at the right operand's type to pick the right form.
+	case "In":
+		return "in", nil
+	case "NotIn":
+		return "notin", nil
 	}
 	return "", fmt.Errorf("unsupported Compare op %q", s)
 }

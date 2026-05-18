@@ -923,6 +923,27 @@ const helperNoDefault = "panic(NewException(\"StopIteration\"))"
 // types are truncated to int64, strings are parsed as base-10, bools
 // become 0/1. Used when the static type isn't known to be numeric
 // (e.g. values pulled out of **kwargs or json.loads).
+// helperGopyBool mirrors Python's truthiness rules for runtime-typed
+// values: nil / 0 / "" / empty containers / false → false; everything
+// else → true.
+const helperGopyBool = `func __gopy_bool(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case nil:
+		return false
+	case int64:
+		return x != 0
+	case int:
+		return x != 0
+	case float64:
+		return x != 0
+	case string:
+		return len(x) > 0
+	}
+	return true
+}`
+
 const helperGopyInt = `func __gopy_int(v any) int64 {
 	switch x := v.(type) {
 	case int64:
@@ -1509,6 +1530,9 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		g.writef(")")
 	case *ir.CmpOp:
+		if x.Op == "in" || x.Op == "notin" {
+			return g.emitInOp(x)
+		}
 		g.writef("(")
 		if err := g.expr(x.L); err != nil {
 			return err
@@ -2031,6 +2055,47 @@ func (g *gen) call(c *ir.Call) error {
 			g.helpers["__gopy_int"] = helperGopyInt
 			g.writef("__gopy_int(")
 			if err := g.expr(c.Args[0]); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
+		case "bool":
+			if len(c.Args) != 1 {
+				return fmt.Errorf("bool() takes exactly 1 argument")
+			}
+			t := c.Args[0].TypeOf()
+			if t != nil && t.Kind == ir.TyBool {
+				return g.expr(c.Args[0])
+			}
+			// Numeric / string truthy: emit a small inline check.
+			if t != nil && (t.Kind == ir.TyInt || t.Kind == ir.TyFloat) {
+				g.writef("(")
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(" != 0)")
+				return nil
+			}
+			if t != nil && t.Kind == ir.TyStr {
+				g.writef("(len(")
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(") > 0)")
+				return nil
+			}
+			if t != nil && t.Kind == ir.TyList {
+				g.writef("(len(")
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(") > 0)")
+				return nil
+			}
+			// Fallback: route through a helper.
+			g.helpers["__gopy_bool"] = helperGopyBool
+			g.writef("__gopy_bool(")
+			if err := g.boxedExpr(c.Args[0]); err != nil {
 				return err
 			}
 			g.writef(")")
@@ -4994,6 +5059,88 @@ const helperStrFormat = `func __gopy_str_format(s string, args ...any) string {
 	}
 	return b.String()
 }`
+
+// emitInOp emits Python's `in` / `not in` operators. The right operand's
+// IR type drives the shape: strings → strings.Contains, dicts → map
+// lookup with comma-ok, lists/sets → slice / map presence helper.
+func (g *gen) emitInOp(x *ir.CmpOp) error {
+	rt := g.effectiveType(x.R)
+	negate := x.Op == "notin"
+	if rt != nil {
+		switch rt.Kind {
+		case ir.TyStr:
+			g.addImport("strings")
+			if negate {
+				g.writef("(!strings.Contains(")
+			} else {
+				g.writef("strings.Contains(")
+			}
+			if err := g.expr(x.R); err != nil {
+				return err
+			}
+			g.writef(", ")
+			if err := g.expr(x.L); err != nil {
+				return err
+			}
+			if negate {
+				g.writef("))")
+			} else {
+				g.writef(")")
+			}
+			return nil
+		case ir.TyDict:
+			g.writef("func() bool { _, __ok := ")
+			if err := g.expr(x.R); err != nil {
+				return err
+			}
+			g.writef("[")
+			if err := g.expr(x.L); err != nil {
+				return err
+			}
+			if negate {
+				g.writef("]; return !__ok }()")
+			} else {
+				g.writef("]; return __ok }()")
+			}
+			return nil
+		case ir.TyList:
+			// Inline membership scan keyed on the slice's static
+			// element type. Avoids helpers that would need generics.
+			if negate {
+				g.writef("(!func() bool {\n")
+			} else {
+				g.writef("func() bool {\n")
+			}
+			g.indent++
+			g.writeIndent()
+			// Cast the target to the element type so untyped literals
+			// don't trip the comparison.
+			elemGo := g.goType(rt.Elem)
+			g.writef("var __target %s = ", elemGo)
+			if err := g.expr(x.L); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("for _, __v := range ")
+			if err := g.expr(x.R); err != nil {
+				return err
+			}
+			g.writef(" { if __v == __target { return true } }\n")
+			g.writeIndent()
+			g.writef("return false\n")
+			g.indent--
+			g.writeIndent()
+			if negate {
+				g.writef("}())")
+			} else {
+				g.writef("}()")
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("`in` / `not in` requires receiver with known str / dict / list type")
+}
 
 // emitMethodOp renders `recv.Method(arg)` — used by BinOp rewriting when
 // operator overloading on tagged stdlib types needs to delegate to a Go
