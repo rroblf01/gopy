@@ -216,6 +216,13 @@ type Yield struct {
 	X Expr
 }
 
+// YieldFrom delegates yielding to an inner iterable (channel from another
+// generator, or a slice). Lowered as a `for __v := range expr` that
+// forwards each value to the outer channel.
+type YieldFrom struct {
+	Iter Expr
+}
+
 // Match is Python's structural-match. F+ supports only literal patterns
 // (MatchValue / MatchSingleton) plus a wildcard catch-all; richer
 // destructuring patterns (sequence / mapping / class) are rejected at
@@ -277,6 +284,7 @@ func (*Try) stmtNode()        {}
 func (*Raise) stmtNode()      {}
 func (*WithFile) stmtNode()   {}
 func (*Yield) stmtNode()      {}
+func (*YieldFrom) stmtNode()  {}
 func (*Break) stmtNode()      {}
 func (*Continue) stmtNode()   {}
 func (*Block) stmtNode()      {}

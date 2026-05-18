@@ -54,14 +54,11 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if err := g.detectDiamondConflicts(); err != nil {
 		return nil, err
 	}
-	// Scan for usage of the builtin `Exception` type so we know whether
-	// to emit the inline definition (multi-file builds would otherwise
-	// duplicate the type across each .go file in the same package).
+	// Up-front scan for `Exception` usage. Anything we miss here gets
+	// caught after codegen too — see the final pass below that promotes
+	// the base type into the helpers map when any emitted helper
+	// references NewException.
 	g.detectExceptionUsage(m)
-	if g.needsException {
-		g.emitExceptionBase()
-		g.writef("\n")
-	}
 	for _, d := range m.Decls {
 		switch x := d.(type) {
 		case *ir.Func:
@@ -76,6 +73,21 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 			return nil, fmt.Errorf("transpile: unsupported decl %T", d)
 		}
 		g.writef("\n")
+	}
+	// Post-codegen Exception promotion: any helper that calls
+	// NewException pulls in the inline base type. This catches the
+	// shims we don't explicitly track at scan time (deque, hashlib's
+	// Get, ...).
+	if !g.needsException {
+		for _, src := range g.helpers {
+			if strings.Contains(src, "NewException(") {
+				g.needsException = true
+				break
+			}
+		}
+	}
+	if g.needsException {
+		g.helpers["__Exception"] = exceptionBaseSource
 	}
 	// Emit any inline runtime helpers (e.g. time.time shim) once at module end.
 	for _, names := range sortedKeys(g.helpers) {
@@ -146,15 +158,19 @@ func (g *gen) resolveAlias(name string) string {
 	return name
 }
 
-// emitExceptionBase writes the inline Exception base type used by raised /
-// caught exceptions. Kept inline rather than imported from the runtime
-// package so transpiled binaries have no module-path dependency.
-func (g *gen) emitExceptionBase() {
-	g.writef("type Exception struct {\n\tMsg string\n}\n\n")
-	g.writef("func NewException(msg string) *Exception { return &Exception{Msg: msg} }\n\n")
-	g.writef("func (e *Exception) Error() string { return e.Msg }\n\n")
-	g.writef("func (e *Exception) String() string { return e.Msg }\n")
+// exceptionBaseSource is the inline Exception base emitted via the
+// helpers map. Keeping it as a helper (rather than a hand-rolled top-
+// of-file emit) lets late discovery during codegen still pull the type
+// in, and matches the existing helper-import dedup semantics.
+const exceptionBaseSource = `type Exception struct {
+	Msg string
 }
+
+func NewException(msg string) *Exception { return &Exception{Msg: msg} }
+
+func (e *Exception) Error() string { return e.Msg }
+
+func (e *Exception) String() string { return e.Msg }`
 
 // detectExceptionUsage walks the IR looking for any place where the bare
 // builtin `Exception` is referenced (as a class base, an except clause, or
@@ -805,6 +821,14 @@ func (g *gen) stmt(s ir.Stmt) error {
 			}
 		}
 		g.writef("\n")
+		return nil
+	case *ir.YieldFrom:
+		g.writeIndent()
+		g.writef("for __v := range ")
+		if err := g.expr(x.Iter); err != nil {
+			return err
+		}
+		g.writef(" { __yield <- __v }\n")
 		return nil
 	case *ir.Yield:
 		g.writeIndent()
@@ -1858,6 +1882,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinProduct(c)
 			case "subprocess.run":
 				return g.builtinSubprocessRun(c)
+			case "collections.deque":
+				return g.builtinDeque(c)
 			case "functools.reduce":
 				return g.builtinReduceFn(c)
 			case "logging.basicConfig":
@@ -2310,6 +2336,12 @@ var taggedMethodRename = map[string]map[string]string{
 	},
 	"__Hasher": {
 		"hexdigest": "Hexdigest",
+	},
+	"__Deque": {
+		"append":     "Append",
+		"appendleft": "Appendleft",
+		"pop":        "Pop",
+		"popleft":    "Popleft",
 	},
 }
 
@@ -3955,6 +3987,83 @@ func (g *gen) builtinWhile(c *ir.Call, take bool) error {
 	g.writef("}()")
 	return nil
 }
+
+// builtinDeque emits `deque()` / `deque([1,2,3])` as a new typed
+// __Deque[T] backed by a slice. Element type is inferred from the
+// argument's element type, defaulting to int64 when called without
+// arguments (rare but harmless — the user can re-annotate).
+func (g *gen) builtinDeque(c *ir.Call) error {
+	if len(c.Args) > 1 {
+		return fmt.Errorf("deque() takes at most one iterable")
+	}
+	var elem *ir.Type
+	if len(c.Args) == 1 {
+		e, err := listElemTypeOf(c.Args[0])
+		if err != nil {
+			return fmt.Errorf("deque(): %w", err)
+		}
+		elem = e
+	} else {
+		elem = &ir.Type{Kind: ir.TyAny}
+	}
+	g.helpers["__Deque"] = helperDequeType
+	elemGo := g.goType(elem)
+	g.writef("func() *__Deque {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__d := &__Deque{items: []any{}}\n")
+	if len(c.Args) == 1 {
+		g.writeIndent()
+		g.writef("for _, __v := range ")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef(" { __d.items = append(__d.items, __v) }\n")
+	}
+	_ = elemGo
+	g.writeIndent()
+	g.writef("return __d\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// helperDequeType is the runtime Deque struct. Element type is `any`
+// to keep the helper generic — the user's type info would have to be
+// threaded through every method otherwise. The cost is a runtime cast
+// at each `popleft` / `pop` site that wants a specific Go type.
+const helperDequeType = `type __Deque struct {
+	items []any
+}
+
+func (d *__Deque) Append(v any) {
+	d.items = append(d.items, v)
+}
+
+func (d *__Deque) Appendleft(v any) {
+	d.items = append([]any{v}, d.items...)
+}
+
+func (d *__Deque) Pop() any {
+	if len(d.items) == 0 {
+		panic(NewException("IndexError: pop from empty deque"))
+	}
+	v := d.items[len(d.items)-1]
+	d.items = d.items[:len(d.items)-1]
+	return v
+}
+
+func (d *__Deque) Popleft() any {
+	if len(d.items) == 0 {
+		panic(NewException("IndexError: popleft from empty deque"))
+	}
+	v := d.items[0]
+	d.items = d.items[1:]
+	return v
+}
+
+func (d *__Deque) Len() int64 { return int64(len(d.items)) }`
 
 // builtinSubprocessRun emits a call to the inline __gopy_subprocess_run
 // helper. The first positional argument is the command list; any kwargs

@@ -440,6 +440,16 @@ func yieldTypeStmt(s Stmt) *Type {
 			return x.X.TypeOf()
 		}
 		return &Type{Kind: TyUnknown}
+	case *YieldFrom:
+		// The forwarded iterable's element type drives the outer
+		// generator's yield type.
+		if t := x.Iter.TypeOf(); t != nil {
+			if t.Kind == TyList {
+				return t.Elem
+			}
+			return t
+		}
+		return &Type{Kind: TyUnknown}
 	case *If:
 		if t := findYieldType(x.Then); t != nil {
 			return t
@@ -668,6 +678,14 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 				x = e
 			}
 			return &Yield{X: x}, nil
+		}
+		// `yield from X` parses as Expr(value=YieldFrom(value=X)).
+		if v := n.Child("value"); v != nil && v.Type() == "YieldFrom" {
+			inner, err := lowerExpr(v.Child("value"), sc)
+			if err != nil {
+				return nil, err
+			}
+			return &YieldFrom{Iter: inner}, nil
 		}
 		x, err := lowerExpr(n.Child("value"), sc)
 		if err != nil {
