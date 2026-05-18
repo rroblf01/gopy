@@ -123,11 +123,106 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		}
 		rawBases = append(rawBases, bn)
 	}
+	// Enum detection: collapse `class Color(Enum):` into a typed
+	// integer-aliased constant set. The base name is consumed, not
+	// embedded.
+	for i, b := range rawBases {
+		if b == "Enum" || b == "IntEnum" {
+			class.IsEnum = true
+			rawBases = append(rawBases[:i], rawBases[i+1:]...)
+			break
+		}
+	}
 	class.Bases = append(class.Bases, rawBases...)
+	if class.IsEnum {
+		for _, m := range n.Children("body") {
+			if m.Type() != "Assign" {
+				return nil, fmt.Errorf("enum %s: body must contain only `NAME = int` declarations", name)
+			}
+			tgts := m.Children("targets")
+			if len(tgts) != 1 || tgts[0].Type() != "Name" {
+				return nil, fmt.Errorf("enum %s: each member needs a single Name target", name)
+			}
+			val := m.Child("value")
+			if val.Type() != "Constant" {
+				return nil, fmt.Errorf("enum %s.%s: value must be an integer literal", name, tgts[0].Str("id"))
+			}
+			fv, ok := val["value"].(float64)
+			if !ok {
+				return nil, fmt.Errorf("enum %s.%s: value must be an integer literal", name, tgts[0].Str("id"))
+			}
+			class.EnumMembers = append(class.EnumMembers, EnumMember{Name: tgts[0].Str("id"), Value: int64(fv)})
+		}
+		return []Decl{class}, nil
+	}
+	// @dataclass / @dataclasses.dataclass synthesizes __init__ from
+	// class-level annotated fields. Detect the decorator(s) here so the
+	// body walk can pick up the AnnAssign nodes that would otherwise
+	// trip the "only methods supported" rule.
+	isDataclass := false
+	for _, d := range n.Children("decorator_list") {
+		if d.Type() == "Name" && d.Str("id") == "dataclass" {
+			isDataclass = true
+		}
+		if d.Type() == "Attribute" {
+			recv := d.Child("value")
+			if recv != nil && recv.Type() == "Name" && recv.Str("id") == "dataclasses" && d.Str("attr") == "dataclass" {
+				isDataclass = true
+			}
+		}
+		if d.Type() == "Call" {
+			fn := d.Child("func")
+			if fn != nil && fn.Type() == "Name" && fn.Str("id") == "dataclass" {
+				isDataclass = true
+			}
+		}
+	}
 	bodyNodes := n.Children("body")
 	var decls []Decl
+	// Synthesized __init__ state used by the dataclass path. We append
+	// to class.InitArgs / InitBody / Fields directly so the existing
+	// class-codegen pipeline emits the constructor.
+	dataclassDone := false
+	if isDataclass {
+		class.HasInit = true
+		dcSc := newScope()
+		dcSc.declare("self", &Type{Kind: TyNamed, Name: name})
+		for _, m := range bodyNodes {
+			if m.Type() == "AnnAssign" {
+				tgt := m.Child("target")
+				if tgt.Type() != "Name" {
+					return nil, fmt.Errorf("@dataclass %s: field decl needs a single Name target", name)
+				}
+				ty, err := lowerAnnotation(m.Child("annotation"))
+				if err != nil {
+					return nil, fmt.Errorf("@dataclass %s.%s: %w", name, tgt.Str("id"), err)
+				}
+				fieldName := tgt.Str("id")
+				class.Fields = append(class.Fields, Param{Name: fieldName, Ty: ty})
+				p := Param{Name: fieldName, Ty: ty}
+				if def := m.Child("value"); def != nil {
+					dv, err := lowerExpr(def, dcSc)
+					if err != nil {
+						return nil, err
+					}
+					p.Default = dv
+				}
+				class.InitArgs = append(class.InitArgs, p)
+				dcSc.declare(fieldName, ty)
+				class.InitBody = append(class.InitBody, &AssignAttr{
+					Target: &Name{N: "self", Ty: &Type{Kind: TyNamed, Name: name}},
+					Name:   fieldName,
+					Value:  &Name{N: fieldName, Ty: ty},
+				})
+			}
+		}
+		dataclassDone = true
+	}
 
 	for _, m := range bodyNodes {
+		if dataclassDone && m.Type() == "AnnAssign" {
+			continue // already consumed above
+		}
 		if m.Type() != "FunctionDef" {
 			return nil, fmt.Errorf("line %d: class %s: only methods supported (F2)", m.Lineno(), name)
 		}
@@ -1182,6 +1277,14 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 				retTy = &Type{Kind: TyStr}
 			case "bool":
 				retTy = &Type{Kind: TyBool}
+			case "set", "frozenset", "list", "sorted", "reversed":
+				// Pass through the input list's element type so later
+				// `sorted(set(xs))` keeps a typed slice rather than `any`.
+				if len(args) > 0 {
+					if t := args[0].TypeOf(); t != nil && t.Kind == TyList {
+						retTy = &Type{Kind: TyList, Elem: t.Elem}
+					}
+				}
 			}
 		}
 		return &Call{Func: callee, Args: args, Keywords: kws, Ty: retTy}, nil
@@ -2115,6 +2218,47 @@ func lowerForTuple(n parser.Node, sc *scope, v1, v2 string, iter parser.Node) (S
 				return nil, err
 			}
 			return &ForEach{Var: v1, Var2: v2, Iter: a, Iter2: b, Kind: "zip", Body: body}, nil
+		}
+		if fn.Type() == "Name" && fn.Str("id") == "groupby" {
+			args := iter.Children("args")
+			if len(args) != 1 {
+				return nil, fmt.Errorf("line %d: groupby() takes 1 positional argument", n.Lineno())
+			}
+			src, err := lowerExpr(args[0], sc)
+			if err != nil {
+				return nil, err
+			}
+			var elemTy *Type
+			if t := src.TypeOf(); t != nil && t.Kind == TyList {
+				elemTy = t.Elem
+			}
+			keyTy := elemTy
+			fullIter, err := lowerExpr(iter, sc)
+			if err != nil {
+				return nil, err
+			}
+			if call, ok := fullIter.(*Call); ok {
+				for _, kw := range call.Keywords {
+					if kw.Name == "key" {
+						if lam, ok := kw.Value.(*Lambda); ok && len(lam.Params) == 1 {
+							body, lerr := LowerLambdaBody(lam, []*Type{elemTy})
+							if lerr == nil {
+								if t := body.TypeOf(); t != nil && t.Kind != TyUnknown {
+									keyTy = t
+								}
+							}
+						}
+					}
+				}
+			}
+			loopSc := &scope{vars: copyVars(sc.vars)}
+			loopSc.declare(v1, keyTy)
+			loopSc.declare(v2, &Type{Kind: TyList, Elem: elemTy})
+			body, err := lowerBody(n.Children("body"), loopSc)
+			if err != nil {
+				return nil, err
+			}
+			return &ForEach{Var: v1, Var2: v2, Iter: fullIter, ElemTy: elemTy, Kind: "groupby", Body: body}, nil
 		}
 		// .items() on a dict — recognized when the call's func is
 		// Attribute(value, "items") with value typed as dict.

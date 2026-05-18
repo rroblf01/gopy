@@ -392,6 +392,22 @@ func (g *gen) class(c *ir.Class) error {
 	g.currentClass = c
 	defer func() { g.currentClass = prev }()
 
+	// Enum classes get a typed-int alias + one constant per declared
+	// member. No struct, no methods. Member access through
+	// `Color.RED` is rewritten elsewhere to `ColorRED`.
+	if c.IsEnum {
+		g.writef("type %s int64\n", c.Name)
+		g.writef("const (\n")
+		g.indent++
+		for _, m := range c.EnumMembers {
+			g.writeIndent()
+			g.writef("%s%s %s = %d\n", c.Name, m.Name, c.Name, m.Value)
+		}
+		g.indent--
+		g.writef(")\n")
+		return nil
+	}
+
 	// Emit struct type.
 	g.writef("type %s struct {\n", c.Name)
 	g.indent++
@@ -1416,6 +1432,20 @@ func (g *gen) forEach(x *ir.ForEach) error {
 		g.writef("_ = %s; _ = %s\n", x.Var, x.Var2)
 		g.indent--
 		return g.forEachBody(x)
+	case "groupby":
+		g.writeIndent()
+		g.writef("for _, __gb := range ")
+		if err := g.expr(x.Iter); err != nil {
+			return err
+		}
+		g.writef(" {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("%s := __gb.Key; _ = %s\n", x.Var, x.Var)
+		g.writeIndent()
+		g.writef("%s := __gb.Group; _ = %s\n", x.Var2, x.Var2)
+		g.indent--
+		return g.forEachBody(x)
 	}
 	// File-handle iteration: `for line in fh` over an *os.File bound by
 	// the enclosing `with open(...) as fh:` block. Uses bufio.Scanner so
@@ -1448,9 +1478,12 @@ func (g *gen) forEach(x *ir.ForEach) error {
 			single = true
 		}
 	}
-	if single {
+	switch {
+	case x.Var == "_":
+		g.writef("for range ")
+	case single:
 		g.writef("for %s := range ", x.Var)
-	} else {
+	default:
 		g.writef("for _, %s := range ", x.Var)
 	}
 	if err := g.expr(x.Iter); err != nil {
@@ -1574,6 +1607,18 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.MethodCall:
 		return g.methodCall(x)
 	case *ir.Attribute:
+		// Enum member access: `Color.RED` → `ColorRED`.
+		if n, ok := x.Recv.(*ir.Name); ok {
+			if cls, ok := g.classes[n.N]; ok && cls.IsEnum {
+				for _, m := range cls.EnumMembers {
+					if m.Name == x.Name {
+						g.writef("%s%s", cls.Name, m.Name)
+						return nil
+					}
+				}
+				return fmt.Errorf("enum %s has no member %q", cls.Name, x.Name)
+			}
+		}
 		// Stdlib module attribute: sys.argv, etc.
 		if n, ok := x.Recv.(*ir.Name); ok {
 			if mod, ok := stdlibModules[n.N]; ok {
@@ -1910,6 +1955,10 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinDeque(c)
 			case "functools.reduce":
 				return g.builtinReduceFn(c)
+			case "functools.partial":
+				return g.builtinPartial(c)
+			case "itertools.groupby":
+				return g.builtinGroupBy(c)
 			case "logging.basicConfig":
 				// kwargs accepted and ignored.
 				g.helpers["__gopy_log_basicConfig"] = helperLogBasicConfig
@@ -1955,15 +2004,36 @@ func (g *gen) call(c *ir.Call) error {
 				}
 			}
 		}
-		// Class constructor: rewrite Foo(...) → NewFoo(...).
-		if _, ok := g.classes[name.N]; ok {
+		// Class constructor: rewrite Foo(...) → NewFoo(...). Defaults
+		// declared on the class's __init__ params (typically via
+		// @dataclass) fill in missing trailing args.
+		if cls, ok := g.classes[name.N]; ok {
+			// Keyword arguments → match against InitArgs by name.
+			kwIdx := map[string]ir.Expr{}
+			for _, kw := range c.Keywords {
+				kwIdx[kw.Name] = kw.Value
+			}
 			g.writef("New%s(", name.N)
-			for i, a := range c.Args {
+			for i, p := range cls.InitArgs {
 				if i > 0 {
 					g.writef(", ")
 				}
-				if err := g.expr(a); err != nil {
-					return err
+				switch {
+				case i < len(c.Args):
+					if err := g.expr(c.Args[i]); err != nil {
+						return err
+					}
+				case kwIdx[p.Name] != nil:
+					if err := g.expr(kwIdx[p.Name]); err != nil {
+						return err
+					}
+					delete(kwIdx, p.Name)
+				case p.Default != nil:
+					if err := g.expr(p.Default); err != nil {
+						return err
+					}
+				default:
+					return fmt.Errorf("New%s: missing argument for %q", name.N, p.Name)
 				}
 			}
 			g.writef(")")
@@ -2207,6 +2277,8 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinReduce(c, "min")
 		case "max":
 			return g.builtinReduce(c, "max")
+		case "set", "frozenset":
+			return g.builtinSet(c)
 		}
 	}
 	// User-defined free function: resolve kwargs/defaults if any.
@@ -3846,6 +3918,209 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	return nil
 }
 
+// builtinSet handles both `set(iter)` and `frozenset(iter)`. Returns a
+// deduplicated slice preserving insertion order. Python sets are unordered
+// but most fixtures sort the result before printing, so this is a safe
+// approximation that lets `in` / iteration work over the value.
+func (g *gen) builtinSet(c *ir.Call) error {
+	if len(c.Keywords) != 0 {
+		return fmt.Errorf("set()/frozenset() take no keyword arguments")
+	}
+	if len(c.Args) == 0 {
+		// `set()` with no args: caller needs an explicit target type.
+		// Without one we can't pick an element type — fall back to []any.
+		g.writef("[]any{}")
+		return nil
+	}
+	if len(c.Args) != 1 {
+		return fmt.Errorf("set()/frozenset() take at most 1 argument")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("set(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__seen := map[%s]bool{}\n", elemGo)
+	g.writeIndent()
+	g.writef("__out := []%s{}\n", elemGo)
+	g.writeIndent()
+	g.writef("for _, __v := range __src { if !__seen[__v] { __seen[__v] = true; __out = append(__out, __v) } }\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinPartial emits a closure that binds the first N positional
+// arguments of a known user function. The remaining params keep their
+// declared types so Go infers the closure's signature correctly. Only
+// free functions are supported; partial(method) would require capturing
+// a bound receiver which the IR doesn't expose at this site.
+func (g *gen) builtinPartial(c *ir.Call) error {
+	if len(c.Args) < 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("partial() takes a function followed by positional prefilled args")
+	}
+	fnName, ok := c.Args[0].(*ir.Name)
+	if !ok {
+		return fmt.Errorf("partial(): first argument must be a function name")
+	}
+	fn, ok := g.funcs[fnName.N]
+	if !ok {
+		return fmt.Errorf("partial(): unknown function %q", fnName.N)
+	}
+	if fn.Receiver != nil {
+		return fmt.Errorf("partial(): methods not supported (free functions only)")
+	}
+	pre := c.Args[1:]
+	if len(pre) > len(fn.Params) {
+		return fmt.Errorf("partial(%s): too many prefilled args (got %d, max %d)", fn.Name, len(pre), len(fn.Params))
+	}
+	rest := fn.Params[len(pre):]
+	hasRet := fn.Ret != nil && fn.Ret.Kind != ir.TyUnknown && fn.Ret.Kind != ir.TyNone
+	g.writef("func(")
+	for i, p := range rest {
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("%s %s", p.Name, g.goType(p.Ty))
+	}
+	if hasRet {
+		g.writef(") %s { return %s(", g.goType(fn.Ret), fn.Name)
+	} else {
+		g.writef(") { %s(", fn.Name)
+	}
+	for i, a := range pre {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if err := g.expr(a); err != nil {
+			return err
+		}
+	}
+	for i, p := range rest {
+		if i > 0 || len(pre) > 0 {
+			g.writef(", ")
+		}
+		g.writef("%s", p.Name)
+	}
+	g.writef(") }")
+	return nil
+}
+
+// builtinGroupBy emits a slice of {Key, Group} pairs grouping consecutive
+// elements of the iterable that share the same key. Supports an optional
+// `key=` lambda; absent it, the element itself is the key. Mirrors
+// CPython's itertools.groupby semantics (groups only run-length, not
+// global) so callers should sort the input first if they want one bucket
+// per distinct key.
+func (g *gen) builtinGroupBy(c *ir.Call) error {
+	if len(c.Args) != 1 {
+		return fmt.Errorf("groupby() takes (iterable[, key=lambda])")
+	}
+	var keyLam *ir.Lambda
+	for _, kw := range c.Keywords {
+		if kw.Name != "key" {
+			return fmt.Errorf("groupby(): unknown keyword %q", kw.Name)
+		}
+		lam, ok := kw.Value.(*ir.Lambda)
+		if !ok {
+			return fmt.Errorf("groupby(key=...): only inline lambda supported")
+		}
+		if len(lam.Params) != 1 {
+			return fmt.Errorf("groupby(key=...): lambda must take one argument")
+		}
+		keyLam = lam
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("groupby(): %w", err)
+	}
+	keyTy := elem
+	var keyBody ir.Expr
+	if keyLam != nil {
+		keyBody, err = ir.LowerLambdaBody(keyLam, []*ir.Type{elem})
+		if err != nil {
+			return fmt.Errorf("groupby(): %w", err)
+		}
+		if t := keyBody.TypeOf(); t != nil && t.Kind != ir.TyUnknown {
+			keyTy = t
+		}
+	}
+	elemGo := g.goType(elem)
+	keyGo := g.goType(keyTy)
+	g.writef("func() []struct{ Key %s; Group []%s } {\n", keyGo, elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := []struct{ Key %s; Group []%s }{}\n", keyGo, elemGo)
+	g.writeIndent()
+	g.writef("var __k %s\n", keyGo)
+	g.writeIndent()
+	g.writef("var __cur []%s\n", elemGo)
+	g.writeIndent()
+	g.writef("__started := false\n")
+	g.writeIndent()
+	elemName := "__v"
+	if keyLam != nil {
+		elemName = keyLam.Params[0].Name
+	}
+	g.writef("for _, %s := range __src {\n", elemName)
+	g.indent++
+	g.writeIndent()
+	g.writef("__nk := ")
+	if keyLam != nil {
+		if err := g.expr(keyBody); err != nil {
+			return err
+		}
+	} else {
+		g.writef("%s", elemName)
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("if !__started || __nk != __k {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("if __started { __out = append(__out, struct{ Key %s; Group []%s }{Key: __k, Group: __cur}) }\n", keyGo, elemGo)
+	g.writeIndent()
+	g.writef("__k = __nk\n")
+	g.writeIndent()
+	g.writef("__cur = []%s{}\n", elemGo)
+	g.writeIndent()
+	g.writef("__started = true\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("__cur = append(__cur, %s)\n", elemName)
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("if __started { __out = append(__out, struct{ Key %s; Group []%s }{Key: __k, Group: __cur}) }\n", keyGo, elemGo)
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 // builtinNext receives the next value off an iterator. For Python
 // generator channels (function-call expressions referencing a known
 // generator) we emit `<-ch` directly. With a default, the receive form
@@ -5344,8 +5619,12 @@ func (g *gen) goType(t *ir.Type) string {
 	case ir.TyDict:
 		return "map[" + g.goType(t.Key) + "]" + g.goType(t.Val)
 	case ir.TyNamed:
-		// User-defined classes are referenced by pointer.
-		if _, ok := g.classes[t.Name]; ok {
+		// User-defined classes are referenced by pointer — except enums,
+		// which the codegen aliases to int64 directly.
+		if cls, ok := g.classes[t.Name]; ok {
+			if cls.IsEnum {
+				return t.Name
+			}
 			return "*" + t.Name
 		}
 		if t.Name == "Exception" {

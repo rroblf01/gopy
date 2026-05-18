@@ -118,7 +118,8 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			// reduce uses an inline lambda for the binary op; dispatch
 			// lives in transpile.go's call() builder.
-			"reduce": {GoFunc: "__gopy_reduce_unused"},
+			"reduce":  {GoFunc: "__gopy_reduce_unused"},
+			"partial": {GoFunc: "__gopy_partial_unused"},
 		},
 	},
 	"logging": {
@@ -139,6 +140,7 @@ var stdlibModules = map[string]stdlibModule{
 			"dropwhile":    {GoFunc: "__gopy_dropwhile_unused"},
 			"combinations": {GoFunc: "__gopy_combinations_unused"},
 			"product":      {GoFunc: "__gopy_product_unused"},
+			"groupby":      {GoFunc: "__gopy_groupby_unused"},
 		},
 	},
 	"random": {

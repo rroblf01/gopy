@@ -102,6 +102,17 @@ type Class struct {
 	// They are emitted as free functions named `<Class>_<method>`; call
 	// sites of the form `Class.method(args)` rewrite to that free call.
 	ClassMethods map[string]bool
+	// IsEnum marks subclasses of `Enum`. The transpiler emits the class
+	// as a `type <Name> int64` plus one untyped constant per declared
+	// member; `Class.MEMBER` attribute accesses rewrite to `<Class><MEMBER>`.
+	IsEnum bool
+	// EnumMembers lists the declared name / value pairs in source order.
+	EnumMembers []EnumMember
+}
+
+type EnumMember struct {
+	Name  string
+	Value int64
 }
 
 func (*Class) declNode() {}
