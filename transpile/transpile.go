@@ -318,6 +318,7 @@ type gen struct {
 	needsException bool                 // module references the builtin Exception type
 	currentClass   *ir.Class            // set while emitting a method body, used for super()
 	helpers        map[string]string    // inline runtime helpers emitted once at module end
+	currentFn      *ir.Func             // current function being emitted (used for multi-return Return)
 	fileVars       map[string]bool      // names currently bound to *os.File inside an active `with` block
 	generators     map[string]bool      // function names that return a channel (Python generators)
 	// aliases maps a local Python name (introduced by `from X import Y` or
@@ -438,6 +439,8 @@ func (g *gen) fn(fn *ir.Func) error {
 	// Var-type tracking is function-local: a name reused across two
 	// functions could plausibly hold different stdlib types in each, so
 	// we start fresh and restore on exit.
+	prevFn := g.currentFn
+	g.currentFn = fn
 	prevVars := g.varTypes
 	g.varTypes = map[string]string{}
 	prevLocal := g.localVarTypes
@@ -455,6 +458,7 @@ func (g *gen) fn(fn *ir.Func) error {
 	defer func() {
 		g.varTypes = prevVars
 		g.localVarTypes = prevLocal
+		g.currentFn = prevFn
 	}()
 	if fn.IsGenerator {
 		return g.generatorFn(fn)
@@ -483,7 +487,16 @@ func (g *gen) fn(fn *ir.Func) error {
 		g.writef("%s map[string]any", fn.Kwarg.Name)
 	}
 	g.writef(")")
-	if fn.Ret != nil && fn.Ret.Kind != ir.TyUnknown && fn.Ret.Kind != ir.TyNone {
+	if fn.Ret != nil && fn.Ret.Kind == ir.TyTuple {
+		g.writef(" (")
+		for i, t := range fn.Ret.Tuple {
+			if i > 0 {
+				g.writef(", ")
+			}
+			g.writef("%s", g.goType(t))
+		}
+		g.writef(")")
+	} else if fn.Ret != nil && fn.Ret.Kind != ir.TyUnknown && fn.Ret.Kind != ir.TyNone {
 		g.writef(" %s", g.goType(fn.Ret))
 	}
 	g.writef(" {\n")
@@ -671,6 +684,23 @@ func (g *gen) stmt(s ir.Stmt) error {
 			g.writef("return\n")
 			return nil
 		}
+		// Multi-return Return: enclosing func declared `tuple[T, U, ...]`
+		// and the returned value is a list/tuple literal that matches.
+		if g.currentFn != nil && g.currentFn.Ret != nil && g.currentFn.Ret.Kind == ir.TyTuple {
+			if ll, ok := x.X.(*ir.ListLit); ok && len(ll.Elems) == len(g.currentFn.Ret.Tuple) {
+				g.writef("return ")
+				for i, el := range ll.Elems {
+					if i > 0 {
+						g.writef(", ")
+					}
+					if err := g.expr(el); err != nil {
+						return err
+					}
+				}
+				g.writef("\n")
+				return nil
+			}
+		}
 		g.writef("return ")
 		if err := g.expr(x.X); err != nil {
 			return err
@@ -752,6 +782,19 @@ func (g *gen) stmt(s ir.Stmt) error {
 			g.writef(" := ")
 		} else {
 			g.writef(" = ")
+		}
+		// Multi-return single-call shorthand: `a, b = f()` where f
+		// returns tuple[T, U]. Emitted as `a, b := f()` directly.
+		if len(x.Values) == 1 {
+			if call, ok := x.Values[0].(*ir.Call); ok {
+				if t := g.userCallRetType(call); t != nil && t.Kind == ir.TyTuple && len(t.Tuple) == len(x.Targets) {
+					if err := g.expr(call); err != nil {
+						return err
+					}
+					g.writef("\n")
+					return nil
+				}
+			}
 		}
 		for i, v := range x.Values {
 			if i > 0 {
@@ -2096,21 +2139,28 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 		if i > 0 {
 			g.writef(", ")
 		}
+		// When the param is typed `any`, the argument must be a
+		// concretely-typed Go value — otherwise untyped literals would
+		// box as `int` / `float64` rather than the IR's int64 / float64.
+		emit := g.expr
+		if p.Ty != nil && p.Ty.Kind == ir.TyAny {
+			emit = g.boxedExpr
+		}
 		switch {
 		case i < len(c.Args):
 			if _, dup := kwIdx[p.Name]; dup {
 				return fmt.Errorf("%s: keyword %q clashes with positional", fn.Name, p.Name)
 			}
-			if err := g.expr(c.Args[i]); err != nil {
+			if err := emit(c.Args[i]); err != nil {
 				return err
 			}
 		case kwIdx[p.Name] != nil:
-			if err := g.expr(kwIdx[p.Name]); err != nil {
+			if err := emit(kwIdx[p.Name]); err != nil {
 				return err
 			}
 			delete(kwIdx, p.Name)
 		case p.Default != nil:
-			if err := g.expr(p.Default); err != nil {
+			if err := emit(p.Default); err != nil {
 				return err
 			}
 		default:

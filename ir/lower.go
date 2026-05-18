@@ -310,13 +310,38 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 }
 
 func lowerFunc(n parser.Node) (*Func, error) {
-	// F4 accepts only `@staticmethod` (silently ignored — methods don't get a
-	// `self`-bound receiver at the call site, which matches Go semantics for
-	// plain functions). Other decorators are rejected so we don't quietly
-	// produce wrong output.
+	// Accepted decorators (silently ignored — they don't change Go
+	// codegen): `@staticmethod` matches a free function with no self;
+	// `@functools.lru_cache` / `@lru_cache` / `@lru_cache(...)` is a
+	// performance hint we currently ignore (the function still runs,
+	// uncached). Anything else is rejected so wrong-looking output
+	// doesn't slip through quietly.
 	for _, d := range n.Children("decorator_list") {
-		if d.Type() == "Name" && d.Str("id") == "staticmethod" {
-			continue
+		if d.Type() == "Name" {
+			switch d.Str("id") {
+			case "staticmethod", "lru_cache":
+				continue
+			}
+		}
+		if d.Type() == "Attribute" {
+			recv := d.Child("value")
+			if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" && d.Str("attr") == "lru_cache" {
+				continue
+			}
+		}
+		if d.Type() == "Call" {
+			fn := d.Child("func")
+			if fn != nil {
+				if fn.Type() == "Name" && fn.Str("id") == "lru_cache" {
+					continue
+				}
+				if fn.Type() == "Attribute" {
+					recv := fn.Child("value")
+					if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" && fn.Str("attr") == "lru_cache" {
+						continue
+					}
+				}
+			}
 		}
 		var name string
 		if d.Type() == "Name" {
@@ -324,7 +349,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		} else {
 			name = d.Type()
 		}
-		return nil, fmt.Errorf("line %d: decorator %q not supported (F4: only @staticmethod)", n.Lineno(), name)
+		return nil, fmt.Errorf("line %d: decorator %q not supported", n.Lineno(), name)
 	}
 	f := &Func{Name: n.Str("name")}
 	args := n.Child("args")
@@ -483,6 +508,16 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			return &Type{Kind: TyNamed, Name: v}, nil
 		}
 		return nil, fmt.Errorf("unsupported constant annotation")
+	case "BinOp":
+		// `int | str` style unions desugar to `any`. We don't track the
+		// alternative types separately — every operand winds up boxed
+		// when passed through, and explicit `isinstance` covers the
+		// reverse direction.
+		op := n.Child("op")
+		if op != nil && op.Type() == "BitOr" {
+			return &Type{Kind: TyAny}, nil
+		}
+		return nil, fmt.Errorf("unsupported annotation BinOp %q", op.Type())
 	case "Subscript":
 		// list[T] / dict[K, V] / tuple[...]
 		base := n.Child("value")
@@ -514,6 +549,29 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 				return nil, fmt.Errorf("dict val: %w", err)
 			}
 			return &Type{Kind: TyDict, Key: kt, Val: vt}, nil
+		case "tuple":
+			// `tuple[T, U, ...]` carries a typed component list. On a
+			// function return slot the transpiler emits Go multi-value
+			// return; in other positions it falls back to a slice of any.
+			sl := n.Child("slice")
+			if sl == nil {
+				return nil, fmt.Errorf("tuple annotation requires component types")
+			}
+			var elts []parser.Node
+			if sl.Type() == "Tuple" {
+				elts = sl.Children("elts")
+			} else {
+				elts = []parser.Node{sl}
+			}
+			out := &Type{Kind: TyTuple}
+			for _, e := range elts {
+				t, err := lowerAnnotation(e)
+				if err != nil {
+					return nil, fmt.Errorf("tuple component: %w", err)
+				}
+				out.Tuple = append(out.Tuple, t)
+			}
+			return out, nil
 		default:
 			return nil, fmt.Errorf("unsupported generic annotation base %q", base.Str("id"))
 		}
@@ -627,35 +685,50 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		// per-call runtime help we don't emit yet.
 		if tgt.Type() == "Tuple" {
 			elts := tgt.Children("elts")
-			valNode := n.Child("value")
-			if valNode.Type() != "Tuple" {
-				return nil, fmt.Errorf("line %d: tuple unpacking from non-literal RHS not yet supported", n.Lineno())
-			}
-			rhs := valNode.Children("elts")
-			if len(rhs) != len(elts) {
-				return nil, fmt.Errorf("line %d: tuple unpack arity mismatch (%d vs %d)", n.Lineno(), len(elts), len(rhs))
-			}
-			var values []Expr
-			for _, e := range rhs {
-				ve, err := lowerExpr(e, sc)
-				if err != nil {
-					return nil, err
-				}
-				values = append(values, ve)
-			}
 			var names []string
-			declAll := true
-			for i, t := range elts {
+			for _, t := range elts {
 				if t.Type() != "Name" {
 					return nil, fmt.Errorf("line %d: tuple unpack target must be a Name", n.Lineno())
 				}
-				nm := t.Str("id")
-				names = append(names, nm)
-				if !sc.declare(nm, values[i].TypeOf()) {
+				names = append(names, t.Str("id"))
+			}
+			valNode := n.Child("value")
+			// `a, b = f()` where f returns tuple[T, U]: keep one
+			// Value in the IR and let codegen emit Go multi-return.
+			// Tuple-literal RHS still expands per-element.
+			if valNode.Type() == "Tuple" {
+				rhs := valNode.Children("elts")
+				if len(rhs) != len(elts) {
+					return nil, fmt.Errorf("line %d: tuple unpack arity mismatch (%d vs %d)", n.Lineno(), len(elts), len(rhs))
+				}
+				var values []Expr
+				for _, e := range rhs {
+					ve, err := lowerExpr(e, sc)
+					if err != nil {
+						return nil, err
+					}
+					values = append(values, ve)
+				}
+				declAll := true
+				for i, nm := range names {
+					if !sc.declare(nm, values[i].TypeOf()) {
+						declAll = false
+					}
+				}
+				return &MultiAssign{Targets: names, Values: values, Decl: declAll}, nil
+			}
+			// Non-tuple RHS: must be callable returning multi-value at codegen.
+			ve, err := lowerExpr(valNode, sc)
+			if err != nil {
+				return nil, err
+			}
+			declAll := true
+			for _, nm := range names {
+				if !sc.declare(nm, nil) {
 					declAll = false
 				}
 			}
-			return &MultiAssign{Targets: names, Values: values, Decl: declAll}, nil
+			return &MultiAssign{Targets: names, Values: []Expr{ve}, Decl: declAll}, nil
 		}
 		val, err := lowerExpr(n.Child("value"), sc)
 		if err != nil {

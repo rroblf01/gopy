@@ -12,6 +12,7 @@ type Type struct {
 	Elem     *Type   // for List/Optional
 	Key, Val *Type   // for Dict
 	Name     string  // for Named
+	Tuple    []*Type // for TyTuple
 }
 
 type TypeKind int
