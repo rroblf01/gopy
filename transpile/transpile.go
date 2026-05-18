@@ -1551,6 +1551,13 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinAccumulate(c)
 			case "subprocess.run":
 				return g.builtinSubprocessRun(c)
+			case "functools.reduce":
+				return g.builtinReduceFn(c)
+			case "logging.basicConfig":
+				// kwargs accepted and ignored.
+				g.helpers["__gopy_log_basicConfig"] = helperLogBasicConfig
+				g.writef("__gopy_log_basicConfig()")
+				return nil
 			}
 			segs := splitDotted(path)
 			if len(segs) >= 2 {
@@ -3031,6 +3038,88 @@ func sanitizeHelper(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// builtinReduceFn emits a left-fold over the iterable using the inline
+// binary lambda. Supports the two- and three-arg forms (initial value
+// optional). The lambda body is re-lowered with both param types so
+// arithmetic typechecks; result type comes from the body.
+func (g *gen) builtinReduceFn(c *ir.Call) error {
+	if len(c.Args) != 2 && len(c.Args) != 3 {
+		return fmt.Errorf("reduce() takes (fn, iterable[, initializer])")
+	}
+	lam, ok := c.Args[0].(*ir.Lambda)
+	if !ok {
+		return fmt.Errorf("reduce(): first argument must be an inline lambda")
+	}
+	if len(lam.Params) != 2 {
+		return fmt.Errorf("reduce(): lambda must take two arguments")
+	}
+	elem, err := listElemTypeOf(c.Args[1])
+	if err != nil {
+		return fmt.Errorf("reduce(): %w", err)
+	}
+	// Re-lower body with (acc, elem) types. Acc type defaults to elem
+	// when no initializer; with initializer we'd need the init's type
+	// — use elem for the simple case.
+	body, err := ir.LowerLambdaBody(lam, []*ir.Type{elem, elem})
+	if err != nil {
+		return fmt.Errorf("reduce(): %w", err)
+	}
+	resTy := body.TypeOf()
+	if resTy == nil || resTy.Kind == ir.TyUnknown {
+		resTy = elem
+	}
+	resGo := g.goType(resTy)
+	accName, elemName := lam.Params[0].Name, lam.Params[1].Name
+	g.writef("func() %s {\n", resGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	if len(c.Args) == 3 {
+		g.writef("var %s %s = ", accName, resGo)
+		if err := g.expr(c.Args[2]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("for _, %s := range __src {\n", elemName)
+		g.indent++
+		g.writeIndent()
+		g.writef("_ = %s\n", elemName)
+	} else {
+		// Two-arg form: seed acc from first element, iterate the rest.
+		g.writef("if len(__src) == 0 { panic(\"reduce() of empty sequence with no initial value\") }\n")
+		g.writeIndent()
+		g.writef("var %s %s = __src[0]\n", accName, resGo)
+		g.writeIndent()
+		g.writef("for __i := 1; __i < len(__src); __i++ {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("%s := __src[__i]\n", elemName)
+		g.writeIndent()
+		g.writef("_ = %s\n", elemName)
+	}
+	g.writeIndent()
+	g.writef("%s = ", accName)
+	if err := g.expr(body); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return %s\n", accName)
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
 }
 
 // builtinSubprocessRun emits a call to the inline __gopy_subprocess_run

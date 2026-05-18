@@ -112,6 +112,23 @@ var stdlibModules = map[string]stdlibModule{
 			"run": {GoFunc: "__gopy_subprocess_run_unused", RetTag: "__CompletedProcess"},
 		},
 	},
+	"functools": {
+		Funcs: map[string]stdlibFunc{
+			// reduce uses an inline lambda for the binary op; dispatch
+			// lives in transpile.go's call() builder.
+			"reduce": {GoFunc: "__gopy_reduce_unused"},
+		},
+	},
+	"logging": {
+		Funcs: map[string]stdlibFunc{
+			"debug":       {GoFunc: "__gopy_log_debug", GoImport: "fmt", Helper: helperLogDebug, HelperImports: []string{"os"}},
+			"info":        {GoFunc: "__gopy_log_info", GoImport: "fmt", Helper: helperLogInfo, HelperImports: []string{"os"}},
+			"warning":     {GoFunc: "__gopy_log_warning", GoImport: "fmt", Helper: helperLogWarning, HelperImports: []string{"os"}},
+			"error":       {GoFunc: "__gopy_log_error", GoImport: "fmt", Helper: helperLogError, HelperImports: []string{"os"}},
+			"critical":    {GoFunc: "__gopy_log_critical", GoImport: "fmt", Helper: helperLogCritical, HelperImports: []string{"os"}},
+			"basicConfig": {GoFunc: "__gopy_log_basicConfig", Helper: helperLogBasicConfig},
+		},
+	},
 	"itertools": {
 		Funcs: map[string]stdlibFunc{
 			"chain":      {GoFunc: "__gopy_chain_unused"},
@@ -455,6 +472,17 @@ const helperURLUnquote = `func __gopy_url_unquote(s string) string {
 	}
 	return v
 }`
+
+// helperLog* mimic the logging module's level-prefixed stderr output.
+// CPython's default formatter is `LEVEL:root:msg`; our shim uses the
+// same shape so fixtures comparing stderr can round-trip. basicConfig
+// is a no-op because we don't honor log levels yet — every call writes.
+const helperLogDebug = `func __gopy_log_debug(msg string) { fmt.Fprintln(os.Stderr, "DEBUG:root:"+msg) }`
+const helperLogInfo = `func __gopy_log_info(msg string) { fmt.Fprintln(os.Stderr, "INFO:root:"+msg) }`
+const helperLogWarning = `func __gopy_log_warning(msg string) { fmt.Fprintln(os.Stderr, "WARNING:root:"+msg) }`
+const helperLogError = `func __gopy_log_error(msg string) { fmt.Fprintln(os.Stderr, "ERROR:root:"+msg) }`
+const helperLogCritical = `func __gopy_log_critical(msg string) { fmt.Fprintln(os.Stderr, "CRITICAL:root:"+msg) }`
+const helperLogBasicConfig = `func __gopy_log_basicConfig() {}`
 
 // helperCompletedProcessType + helperSubprocessRun bridge Python's
 // subprocess.run to Go's os/exec. We always capture stdout / stderr;
