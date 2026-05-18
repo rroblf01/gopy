@@ -481,6 +481,22 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("\n")
 		return nil
 	case *ir.Assign:
+		// `defaultdict(factory)` at the RHS of a typed assignment: the
+		// factory is ignored and we emit a plain empty map of the
+		// declared (K, V). Untyped assignments can't infer K, so they
+		// fall through to the default codegen and error there.
+		if x.Decl && x.Ty != nil && x.Ty.Kind == ir.TyDict {
+			if call, ok := x.Value.(*ir.Call); ok {
+				if n, ok := call.Func.(*ir.Name); ok {
+					if path, hit := g.aliases[n.N]; hit && path == "collections.defaultdict" {
+						g.writeIndent()
+						g.writef("var %s %s = %s{}\n", x.Target, g.goType(x.Ty), g.goType(x.Ty))
+						g.localVarTypes[x.Target] = x.Ty
+						return nil
+					}
+				}
+			}
+		}
 		// Augmented list-concat: `lst += other` lowered to `lst = lst + other`
 		// where both sides have TyList. Python extends in place; Go has no
 		// `+` for slices, so rewrite as `lst = append(lst, other...)`.
@@ -1225,6 +1241,18 @@ func (g *gen) expr(e ir.Expr) error {
 				return nil
 			}
 		}
+		// Tagged-attribute dispatch (e.g. CompletedProcess.stdout).
+		if tag := g.exprTag(x.Recv); tag != "" {
+			if attrs, ok := taggedAttrs[tag]; ok {
+				if info, ok := attrs[x.Name]; ok {
+					if err := g.expr(x.Recv); err != nil {
+						return err
+					}
+					g.writef(".%s", info.GoName)
+					return nil
+				}
+			}
+		}
 		// @property: receiver is an instance of a user class that registers
 		// this attribute as a property (in itself or in any base). Emit
 		// `recv.x()` (method call) rather than `recv.x` (field load).
@@ -1503,6 +1531,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinChain(c)
 			case "itertools.accumulate":
 				return g.builtinAccumulate(c)
+			case "subprocess.run":
+				return g.builtinSubprocessRun(c)
 			}
 			segs := splitDotted(path)
 			if len(segs) >= 2 {
@@ -1822,6 +1852,22 @@ var taggedMethodRename = map[string]map[string]string{
 	},
 }
 
+// taggedAttrInfo describes one tagged-value field: the Go field name to
+// emit at the call site plus the IR type its access yields so chained
+// expressions can dispatch correctly (e.g. `result.stdout.strip()`).
+type taggedAttrInfo struct {
+	GoName string
+	Ty     *ir.Type
+}
+
+var taggedAttrs = map[string]map[string]taggedAttrInfo{
+	"__CompletedProcess": {
+		"returncode": {GoName: "Returncode", Ty: &ir.Type{Kind: ir.TyInt}},
+		"stdout":     {GoName: "Stdout", Ty: &ir.Type{Kind: ir.TyStr}},
+		"stderr":     {GoName: "Stderr", Ty: &ir.Type{Kind: ir.TyStr}},
+	},
+}
+
 func (g *gen) methodCall(m *ir.MethodCall) error {
 	// Tagged-receiver method dispatch (Match.group, Path.exists, ...).
 	// Tag may come from a Name (varTypes) or from a Call / MethodCall
@@ -1853,6 +1899,20 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	// receiver expression and try the registry; if it resolves we emit
 	// the helper call directly without falling through.
 	if path, ok := stdlibPathOf(m.Recv, g.aliases); ok {
+		// Per-call-shape specials (same set as the Call branch).
+		fullPath := path + "." + m.Method
+		// Synthesize a fake Call so we can reuse the builders.
+		synth := &ir.Call{Args: m.Args, Keywords: m.Keywords}
+		switch fullPath {
+		case "collections.Counter":
+			return g.builtinCounter(synth)
+		case "itertools.chain":
+			return g.builtinChain(synth)
+		case "itertools.accumulate":
+			return g.builtinAccumulate(synth)
+		case "subprocess.run":
+			return g.builtinSubprocessRun(synth)
+		}
 		if fn := lookupStdlibFunc(path, m.Method); fn != nil {
 			if fn.GoImport != "" {
 				g.addImport(fn.GoImport)
@@ -2779,6 +2839,25 @@ func sanitizeHelper(s string) string {
 	return string(b)
 }
 
+// builtinSubprocessRun emits a call to the inline __gopy_subprocess_run
+// helper. The first positional argument is the command list; any kwargs
+// at the call site (capture_output=True, text=True, ...) are silently
+// ignored — the helper always captures stdout / stderr / returncode.
+func (g *gen) builtinSubprocessRun(c *ir.Call) error {
+	if len(c.Args) < 1 {
+		return fmt.Errorf("subprocess.run() needs the command list as the first positional argument")
+	}
+	g.addImport("os/exec")
+	g.helpers["__gopy_subprocess_run"] = helperSubprocessRun
+	g.helpers["__CompletedProcess"] = helperCompletedProcessType
+	g.writef("__gopy_subprocess_run(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")")
+	return nil
+}
+
 // builtinCounter emits an IIFE that walks the input list and tallies
 // occurrences into a typed map. Element type comes from the static IR
 // type of the argument, so the resulting `dict[T, int]` can be indexed
@@ -3314,6 +3393,17 @@ func (g *gen) effectiveType(e ir.Expr) *ir.Type {
 	}
 	if t := g.stdlibCallRetType(e); t != nil {
 		return t
+	}
+	// Tagged-attr access: `result.stdout` where result has tag
+	// __CompletedProcess and stdout is registered as str.
+	if attr, ok := e.(*ir.Attribute); ok {
+		if tag := g.exprTag(attr.Recv); tag != "" {
+			if attrs, ok := taggedAttrs[tag]; ok {
+				if info, ok := attrs[attr.Name]; ok {
+					return info.Ty
+				}
+			}
+		}
 	}
 	return e.TypeOf()
 }

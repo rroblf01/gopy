@@ -77,17 +77,39 @@ var stdlibModules = map[string]stdlibModule{
 		Subs: map[string]stdlibModule{
 			"parse": {
 				Funcs: map[string]stdlibFunc{
-					"quote":   {GoFunc: "__gopy_url_quote", GoImport: "net/url", Helper: helperURLQuote, HelperImports: []string{"strings", "fmt"}, RetKind: "str"},
-					"unquote": {GoFunc: "__gopy_url_unquote", GoImport: "net/url", Helper: helperURLUnquote, RetKind: "str"},
+					"quote":     {GoFunc: "__gopy_url_quote", GoImport: "net/url", Helper: helperURLQuote, HelperImports: []string{"strings", "fmt"}, RetKind: "str"},
+					"unquote":   {GoFunc: "__gopy_url_unquote", GoImport: "net/url", Helper: helperURLUnquote, RetKind: "str"},
+					"urlencode": {GoFunc: "__gopy_url_urlencode", GoImport: "net/url", Helper: helperURLUrlencode, HelperImports: []string{"strings"}, RetKind: "str"},
 				},
 			},
 		},
 	},
+	"string": {
+		Attrs: map[string]stdlibAttr{
+			"ascii_lowercase": {GoExpr: `"abcdefghijklmnopqrstuvwxyz"`},
+			"ascii_uppercase": {GoExpr: `"ABCDEFGHIJKLMNOPQRSTUVWXYZ"`},
+			"ascii_letters":   {GoExpr: `"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"`},
+			"digits":          {GoExpr: `"0123456789"`},
+			"hexdigits":       {GoExpr: `"0123456789abcdefABCDEF"`},
+			"octdigits":       {GoExpr: `"01234567"`},
+			"punctuation":     {GoExpr: "\"!\\\"#$%&'()*+,-./:;<=>?@[\\\\]^_`{|}~\""},
+			"whitespace":      {GoExpr: `" \t\n\r\f\v"`},
+		},
+	},
 	"collections": {
-		// Counter is handled by a per-arg-type builder in transpile.go;
-		// the entry below is a stub so alias resolution succeeds.
+		// Counter and defaultdict are handled by per-arg-type builders
+		// in transpile.go; entries below are stubs so alias resolution
+		// succeeds for the call expressions.
 		Funcs: map[string]stdlibFunc{
-			"Counter": {GoFunc: "__gopy_counter_unused"},
+			"Counter":     {GoFunc: "__gopy_counter_unused"},
+			"defaultdict": {GoFunc: "__gopy_defaultdict_unused"},
+		},
+	},
+	"subprocess": {
+		// run() needs to ignore Python kwargs (capture_output, text, ...)
+		// that don't have a Go equivalent. Dispatch lives in transpile.go.
+		Funcs: map[string]stdlibFunc{
+			"run": {GoFunc: "__gopy_subprocess_run_unused", RetTag: "__CompletedProcess"},
 		},
 	},
 	"itertools": {
@@ -396,6 +418,34 @@ const helperURLQuote = `func __gopy_url_quote(s string) string {
 	return b.String()
 }`
 
+// helperURLUrlencode mirrors CPython's urllib.parse.urlencode for the
+// common dict[str, str] input shape. Output is &-joined key=value pairs
+// with each part quoted under our `+` semantics (Python's default).
+const helperURLUrlencode = `func __gopy_url_urlencode(d map[string]string) string {
+	keys := make([]string, 0, len(d))
+	for k := range d {
+		keys = append(keys, k)
+	}
+	// urlencode iteration order in CPython follows insertion, which Go
+	// maps don't preserve. Sort for deterministic output so fixtures
+	// match across runtimes.
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j-1] > keys[j]; j-- {
+			keys[j-1], keys[j] = keys[j], keys[j-1]
+		}
+	}
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString(url.QueryEscape(k))
+		b.WriteByte('=')
+		b.WriteString(url.QueryEscape(d[k]))
+	}
+	return b.String()
+}`
+
 // helperURLUnquote uses url.PathUnescape because Python's unquote
 // preserves `+` (only QueryUnescape converts `+` to space).
 const helperURLUnquote = `func __gopy_url_unquote(s string) string {
@@ -404,6 +454,32 @@ const helperURLUnquote = `func __gopy_url_unquote(s string) string {
 		panic(err)
 	}
 	return v
+}`
+
+// helperCompletedProcessType + helperSubprocessRun bridge Python's
+// subprocess.run to Go's os/exec. We always capture stdout / stderr;
+// kwargs like capture_output / text are accepted at the call site and
+// silently ignored because Go's exec semantics are equivalent.
+const helperCompletedProcessType = `type __CompletedProcess struct {
+	Returncode int64
+	Stdout     string
+	Stderr     string
+}`
+
+const helperSubprocessRun = `func __gopy_subprocess_run(args []string) *__CompletedProcess {
+	if len(args) == 0 {
+		return &__CompletedProcess{Returncode: -1}
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	out, err := cmd.Output()
+	r := &__CompletedProcess{Stdout: string(out)}
+	if ee, ok := err.(*exec.ExitError); ok {
+		r.Returncode = int64(ee.ExitCode())
+		r.Stderr = string(ee.Stderr)
+	} else if err != nil {
+		r.Returncode = -1
+	}
+	return r
 }`
 
 // helperMathFloor / helperMathCeil match Python 3's math.floor / math.ceil
