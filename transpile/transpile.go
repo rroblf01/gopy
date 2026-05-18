@@ -226,8 +226,13 @@ func (g *gen) scanExprForException(e ir.Expr) {
 	}
 	switch x := e.(type) {
 	case *ir.Call:
-		if n, ok := x.Func.(*ir.Name); ok && n.N == "getattr" && len(x.Args) == 2 {
-			g.needsException = true
+		if n, ok := x.Func.(*ir.Name); ok {
+			switch {
+			case n.N == "getattr" && len(x.Args) == 2:
+				g.needsException = true
+			case n.N == "next" && len(x.Args) == 1:
+				g.needsException = true
+			}
 		}
 		g.scanExprForException(x.Func)
 		for _, a := range x.Args {
@@ -825,6 +830,27 @@ const helperCmpInt = `func __gopy_cmp_int(a int64, expected any, op string) bool
 	}
 	return false
 }`
+
+// helperGopyID returns a stable integer derived from the value's
+// pointer when possible, falling back to its string representation.
+// CPython's id() returns the object's memory address; the gopy
+// shim matches the spirit (different addresses ↔ different ids) but
+// not specific values, so cross-runtime fixtures should only compare
+// id-equality, never literal id values.
+const helperGopyID = `func __gopy_id(v any) int64 {
+	return int64(__gopy_hash(v))
+}`
+
+const helperGopyHash = `func __gopy_hash(v any) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(fmt.Sprintf("%v", v)))
+	return int64(h.Sum64())
+}`
+
+// builtinNext receives the next value off a generator's channel. Bare
+// `next(it)` panics on exhaustion (mirroring Python's StopIteration);
+// `next(it, default)` returns the default in that case.
+const helperNoDefault = "panic(NewException(\"StopIteration\"))"
 
 // helperGopyInt mirrors Python's int(x) for the common cases: numeric
 // types are truncated to int64, strings are parsed as base-10, bools
@@ -1967,6 +1993,41 @@ func (g *gen) call(c *ir.Call) error {
 				return fmt.Errorf("list() takes 1 argument")
 			}
 			return g.expr(c.Args[0])
+		case "id":
+			if len(c.Args) != 1 {
+				return fmt.Errorf("id() takes 1 argument")
+			}
+			g.addImport("fmt")
+			g.helpers["__gopy_id"] = helperGopyID
+			g.writef("__gopy_id(")
+			if err := g.boxedExpr(c.Args[0]); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
+		case "hash":
+			if len(c.Args) != 1 {
+				return fmt.Errorf("hash() takes 1 argument")
+			}
+			g.addImport("fmt")
+			g.addImport("hash/fnv")
+			g.helpers["__gopy_hash"] = helperGopyHash
+			g.writef("__gopy_hash(")
+			if err := g.boxedExpr(c.Args[0]); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
+		case "iter":
+			// CPython returns an iterator; the gopy shim returns the
+			// argument unchanged so `for x in iter(xs)` works the same
+			// way `for x in xs` does.
+			if len(c.Args) != 1 {
+				return fmt.Errorf("iter() takes 1 argument")
+			}
+			return g.expr(c.Args[0])
+		case "next":
+			return g.builtinNext(c)
 		case "pow":
 			return g.builtinPow(c)
 		case "chr":
@@ -2091,19 +2152,53 @@ kwargsBlock:
 		if len(fn.Params) > 0 || fn.Vararg != nil {
 			g.writef(", ")
 		}
-		g.writef("map[string]any{")
-		first := true
-		for k, v := range kwIdx {
-			if !first {
-				g.writef(", ")
+		// Splat **kwargs values from the kwIdx — the lower stage tags
+		// them with the sentinel name "**".
+		splats := kwIdx["**"]
+		delete(kwIdx, "**")
+		if splats == nil && len(kwIdx) == 0 {
+			g.writef("map[string]any{}")
+		} else if splats == nil {
+			g.writef("map[string]any{")
+			first := true
+			for k, v := range kwIdx {
+				if !first {
+					g.writef(", ")
+				}
+				first = false
+				g.writef("%q: ", k)
+				if err := g.boxedExpr(v); err != nil {
+					return err
+				}
 			}
-			first = false
-			g.writef("%q: ", k)
-			if err := g.boxedExpr(v); err != nil {
+			g.writef("}")
+		} else {
+			// Build the kwargs map dynamically: seed with the splatted
+			// dict, overwrite with any explicit keyword arguments.
+			g.writef("func() map[string]any {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("__r := map[string]any{}\n")
+			g.writeIndent()
+			g.writef("for __k, __v := range ")
+			if err := g.expr(splats); err != nil {
 				return err
 			}
+			g.writef(" { __r[__k] = __v }\n")
+			for k, v := range kwIdx {
+				g.writeIndent()
+				g.writef("__r[%q] = ", k)
+				if err := g.boxedExpr(v); err != nil {
+					return err
+				}
+				g.writef("\n")
+			}
+			g.writeIndent()
+			g.writef("return __r\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
 		}
-		g.writef("}")
 		// All remaining kwargs went into Kwarg; clear to skip the
 		// "unknown keyword" error below.
 		kwIdx = nil
@@ -3556,6 +3651,55 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	g.writef("}\n")
 	g.writeIndent()
 	g.writef("return %s\n", accName)
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinNext receives the next value off an iterator. For Python
+// generator channels (function-call expressions referencing a known
+// generator) we emit `<-ch` directly. With a default, the receive form
+// `v, ok := <-ch` lets us fall back when the channel closes.
+func (g *gen) builtinNext(c *ir.Call) error {
+	if len(c.Args) < 1 || len(c.Args) > 2 {
+		return fmt.Errorf("next() takes (iterator[, default])")
+	}
+	if len(c.Args) == 1 {
+		g.needsException = true
+		g.writef("func() any {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("__v, __ok := <-")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("if !__ok { panic(NewException(\"StopIteration\")) }\n")
+		g.writeIndent()
+		g.writef("return __v\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()")
+		return nil
+	}
+	g.writef("func() any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__v, __ok := <-")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("if !__ok { return ")
+	if err := g.boxedExpr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(" }\n")
+	g.writeIndent()
+	g.writef("return __v\n")
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")

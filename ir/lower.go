@@ -990,13 +990,15 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		var kws []Keyword
 		for _, kw := range n.Children("keywords") {
 			name := kw.Str("arg")
-			if name == "" {
-				// **kwargs splat — no Python keyword name. Not supported yet.
-				return nil, fmt.Errorf("line %d: **kwargs splat not supported", n.Lineno())
-			}
 			v, err := lowerExpr(kw.Child("value"), sc)
 			if err != nil {
 				return nil, err
+			}
+			// `name == ""` marks a `**dict` splat; we propagate it
+			// through the IR with the sentinel name "**" so codegen
+			// can spot it without a separate enum.
+			if name == "" {
+				name = "**"
 			}
 			kws = append(kws, Keyword{Name: name, Value: v})
 		}
