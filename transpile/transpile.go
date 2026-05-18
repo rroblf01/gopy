@@ -723,6 +723,8 @@ func (g *gen) stmt(s ir.Stmt) error {
 		return g.raise(x)
 	case *ir.WithFile:
 		return g.withFile(x)
+	case *ir.Match:
+		return g.matchStmt(x)
 	case *ir.Break:
 		g.writeIndent()
 		g.writef("break\n")
@@ -966,6 +968,79 @@ func (g *gen) withFile(w *ir.WithFile) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()\n")
+	return nil
+}
+
+// matchStmt lowers Python's `match` to an if/else-if chain rather than
+// a Go switch — switches can't combine guarded wildcards with an
+// unconditional default, and exhaustive return analysis works equally
+// well on a chained if. The subject is evaluated once into a local.
+func (g *gen) matchStmt(m *ir.Match) error {
+	g.writeIndent()
+	g.writef("{\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__subj := ")
+	if err := g.expr(m.Subject); err != nil {
+		return err
+	}
+	g.writef("\n")
+	hadUnconditionalDefault := false
+	for i, mc := range m.Cases {
+		g.writeIndent()
+		if i > 0 {
+			g.writef("} else ")
+		}
+		if len(mc.Patterns) == 0 && mc.Guard == nil {
+			// Bare wildcard — open an else with no condition.
+			g.writef("{\n")
+			hadUnconditionalDefault = true
+		} else {
+			g.writef("if ")
+			needAnd := false
+			if len(mc.Patterns) > 0 {
+				g.writef("(")
+				for j, p := range mc.Patterns {
+					if j > 0 {
+						g.writef(" || ")
+					}
+					g.writef("__subj == ")
+					if err := g.expr(p); err != nil {
+						return err
+					}
+				}
+				g.writef(")")
+				needAnd = true
+			}
+			if mc.Guard != nil {
+				if needAnd {
+					g.writef(" && (")
+				} else {
+					g.writef("(")
+				}
+				if err := g.boolExpr(mc.Guard); err != nil {
+					return err
+				}
+				g.writef(")")
+			}
+			g.writef(" {\n")
+		}
+		g.indent++
+		if err := g.stmts(mc.Body); err != nil {
+			return err
+		}
+		g.indent--
+	}
+	g.writeIndent()
+	g.writef("}\n")
+	// Mute potential unused-variable warning if no case used __subj.
+	if !hadUnconditionalDefault {
+		g.writeIndent()
+		g.writef("_ = __subj\n")
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
 	return nil
 }
 
@@ -1631,6 +1706,10 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinChain(c)
 			case "itertools.accumulate":
 				return g.builtinAccumulate(c)
+			case "itertools.takewhile":
+				return g.builtinTakeWhile(c)
+			case "itertools.dropwhile":
+				return g.builtinDropWhile(c)
 			case "subprocess.run":
 				return g.builtinSubprocessRun(c)
 			case "functools.reduce":
@@ -1800,6 +1879,8 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinSetattr(c)
 		case "hasattr":
 			return g.builtinHasattr(c)
+		case "issubclass":
+			return g.builtinIsSubclass(c)
 		case "pow":
 			return g.builtinPow(c)
 		case "chr":
@@ -3380,6 +3461,92 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	return nil
 }
 
+// builtinTakeWhile / builtinDropWhile emit IIFE loops that consume the
+// predicate lambda's static return type from the body inference. Like
+// filter, the first argument must be an inline lambda.
+func (g *gen) builtinTakeWhile(c *ir.Call) error { return g.builtinWhile(c, true) }
+func (g *gen) builtinDropWhile(c *ir.Call) error { return g.builtinWhile(c, false) }
+
+func (g *gen) builtinWhile(c *ir.Call, take bool) error {
+	name := "takewhile"
+	if !take {
+		name = "dropwhile"
+	}
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("%s() takes (predicate, iterable)", name)
+	}
+	lam, ok := c.Args[0].(*ir.Lambda)
+	if !ok {
+		return fmt.Errorf("%s(): first argument must be an inline lambda", name)
+	}
+	if len(lam.Params) != 1 {
+		return fmt.Errorf("%s(): lambda must take one argument", name)
+	}
+	elem, err := listElemTypeOf(c.Args[1])
+	if err != nil {
+		return fmt.Errorf("%s(): %w", name, err)
+	}
+	body, err := ir.LowerLambdaBody(lam, []*ir.Type{elem})
+	if err != nil {
+		return fmt.Errorf("%s(): %w", name, err)
+	}
+	elemGo := g.goType(elem)
+	param := lam.Params[0].Name
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__out := []%s{}\n", elemGo)
+	g.writeIndent()
+	if take {
+		g.writef("for _, %s := range ", param)
+	} else {
+		g.writef("__taking := false\n")
+		g.writeIndent()
+		g.writef("for _, %s := range ", param)
+	}
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(" {\n")
+	g.indent++
+	if take {
+		g.writeIndent()
+		g.writef("if !(")
+		if err := g.expr(body); err != nil {
+			return err
+		}
+		g.writef(") { break }\n")
+		g.writeIndent()
+		g.writef("__out = append(__out, %s)\n", param)
+	} else {
+		g.writeIndent()
+		g.writef("if !__taking {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("if ")
+		if err := g.expr(body); err != nil {
+			return err
+		}
+		g.writef(" { continue }\n")
+		g.writeIndent()
+		g.writef("__taking = true\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+		g.writeIndent()
+		g.writef("__out = append(__out, %s)\n", param)
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 // builtinSubprocessRun emits a call to the inline __gopy_subprocess_run
 // helper. The first positional argument is the command list; any kwargs
 // at the call site (capture_output=True, text=True, ...) are silently
@@ -3586,45 +3753,113 @@ func (g *gen) builtinRound(c *ir.Call) error {
 	return nil
 }
 
-// builtinIsInstance compiles `isinstance(obj, Cls)` to a Go type
-// assertion. Only single-class checks are supported; class tuples (e.g.
-// `isinstance(x, (int, str))`) require richer lowering and are deferred.
+// builtinIsSubclass compiles `issubclass(C, Base)` to a static lookup
+// against the class registry's recorded base chain. Both arguments must
+// be bare class names; runtime class objects aren't tracked.
+func (g *gen) builtinIsSubclass(c *ir.Call) error {
+	if len(c.Args) != 2 {
+		return fmt.Errorf("issubclass() takes (class, base)")
+	}
+	clsN, ok := c.Args[0].(*ir.Name)
+	if !ok {
+		return fmt.Errorf("issubclass(): first arg must be a bare class name")
+	}
+	bases, err := isInstanceClasses(c.Args[1])
+	if err != nil {
+		return err
+	}
+	// Compute the answer at transpile time — class hierarchy is fixed.
+	result := false
+	visited := map[string]bool{}
+	var walk func(string) []string
+	walk = func(name string) []string {
+		if visited[name] {
+			return nil
+		}
+		visited[name] = true
+		out := []string{name}
+		if cl, ok := g.classes[name]; ok {
+			for _, b := range cl.Bases {
+				out = append(out, walk(b)...)
+			}
+		}
+		return out
+	}
+	chain := walk(clsN.N)
+	for _, b := range bases {
+		for _, c := range chain {
+			if c == b {
+				result = true
+				break
+			}
+		}
+		if result {
+			break
+		}
+	}
+	if result {
+		g.writef("true")
+	} else {
+		g.writef("false")
+	}
+	return nil
+}
+
+// builtinIsInstance compiles `isinstance(obj, Cls)` and `isinstance(obj,
+// (Cls1, Cls2, ...))` to short-circuited Go type assertions. The list
+// element-type case (`isinstance(x, list)`) is still unsupported.
 func (g *gen) builtinIsInstance(c *ir.Call) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
-		return fmt.Errorf("isinstance() takes (obj, Class)")
+		return fmt.Errorf("isinstance() takes (obj, Class[s])")
 	}
-	clsNode, ok := c.Args[1].(*ir.Name)
-	if !ok {
-		return fmt.Errorf("isinstance(): second argument must be a class name")
+	classes, err := isInstanceClasses(c.Args[1])
+	if err != nil {
+		return err
 	}
-	g.writef("func() bool { _, __ok := any(")
+	g.writef("func() bool { __v := any(")
 	if err := g.boxedExpr(c.Args[0]); err != nil {
 		return err
 	}
-	// Match generated Go shape: user classes become `*ClassName`.
-	if _, declared := g.classes[clsNode.N]; declared {
-		g.writef(").(*%s); return __ok }()", clsNode.N)
-		return nil
+	g.writef("); _ = __v\n")
+	for _, name := range classes {
+		switch {
+		case g.classes[name] != nil:
+			g.writef("\tif _, __ok := __v.(*%s); __ok { return true }\n", name)
+		case name == "int":
+			g.writef("\tif _, __ok := __v.(int64); __ok { return true }\n")
+		case name == "float":
+			g.writef("\tif _, __ok := __v.(float64); __ok { return true }\n")
+		case name == "str":
+			g.writef("\tif _, __ok := __v.(string); __ok { return true }\n")
+		case name == "bool":
+			g.writef("\tif _, __ok := __v.(bool); __ok { return true }\n")
+		default:
+			return fmt.Errorf("isinstance() against %q not supported", name)
+		}
 	}
-	// Builtins: map Python names → Go type assertions.
-	switch clsNode.N {
-	case "int":
-		g.writef(").(int64); return __ok }()")
-	case "float":
-		g.writef(").(float64); return __ok }()")
-	case "str":
-		g.writef(").(string); return __ok }()")
-	case "bool":
-		g.writef(").(bool); return __ok }()")
-	case "list":
-		g.writef(").([]any); _ = __ok; return false }()")
-		// Note: list type-assertion needs element-type awareness; F11+
-		// rejects the bare check.
-		return fmt.Errorf("isinstance(x, list) needs the element type to be useful; not supported yet")
-	default:
-		return fmt.Errorf("isinstance() against %q not supported", clsNode.N)
-	}
+	g.writef("\treturn false }()")
 	return nil
+}
+
+// isInstanceClasses extracts the class names from the second argument
+// of isinstance(). Accepts either a bare Name or a tuple/list literal
+// of Names.
+func isInstanceClasses(e ir.Expr) ([]string, error) {
+	switch x := e.(type) {
+	case *ir.Name:
+		return []string{x.N}, nil
+	case *ir.ListLit:
+		var names []string
+		for _, el := range x.Elems {
+			n, ok := el.(*ir.Name)
+			if !ok {
+				return nil, fmt.Errorf("isinstance(): tuple of classes must contain bare class names")
+			}
+			names = append(names, n.N)
+		}
+		return names, nil
+	}
+	return nil, fmt.Errorf("isinstance(): second argument must be a class name or tuple of class names")
 }
 
 // builtinReduce handles single-pass list reductions: any/all/sum/min/max.

@@ -215,6 +215,24 @@ type Yield struct {
 	X Expr
 }
 
+// Match is Python's structural-match. F+ supports only literal patterns
+// (MatchValue / MatchSingleton) plus a wildcard catch-all; richer
+// destructuring patterns (sequence / mapping / class) are rejected at
+// lower time.
+type Match struct {
+	Subject Expr
+	Cases   []MatchCase
+}
+
+// MatchCase: Patterns lists each `case X:` literal value (multiple for
+// `case 1 | 2:`). Wildcard is the empty Patterns list. Guard is the
+// optional `if <cond>` filter.
+type MatchCase struct {
+	Patterns []Expr
+	Guard    Expr
+	Body     []Stmt
+}
+
 // Break and Continue map directly to Go's break / continue inside the
 // nearest enclosing loop. No payload needed.
 type Break struct{}
@@ -253,6 +271,7 @@ func (*Yield) stmtNode()      {}
 func (*Break) stmtNode()      {}
 func (*Continue) stmtNode()   {}
 func (*Block) stmtNode()      {}
+func (*Match) stmtNode()      {}
 func (*MultiAssign) stmtNode() {}
 
 // Expr is any value-producing node.

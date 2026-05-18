@@ -830,6 +830,8 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		return &Raise{Exc: exc}, nil
 	case "Pass":
 		return nil, nil
+	case "Match":
+		return lowerMatch(n, sc)
 	case "Break":
 		return &Break{}, nil
 	case "Continue":
@@ -1586,6 +1588,83 @@ func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
 		ValTy: vt,
 		Ty:    &Type{Kind: TyDict, Key: kt, Val: vt},
 	}, nil
+}
+
+// lowerMatch handles Python's `match` statement. F+ recognizes only
+// literal patterns (MatchValue / MatchSingleton) and the wildcard
+// (MatchAs with no pattern), each optionally guarded by `if cond`.
+// Sequence / mapping / class patterns are rejected at lower time.
+func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
+	subject, err := lowerExpr(n.Child("subject"), sc)
+	if err != nil {
+		return nil, err
+	}
+	m := &Match{Subject: subject}
+	for _, caseNode := range n.Children("cases") {
+		pat := caseNode.Child("pattern")
+		patterns, err := lowerMatchPattern(pat, sc)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", caseNode.Lineno(), err)
+		}
+		var guard Expr
+		if g := caseNode.Child("guard"); g != nil {
+			ge, err := lowerExpr(g, sc)
+			if err != nil {
+				return nil, err
+			}
+			guard = ge
+		}
+		body, err := lowerBody(caseNode.Children("body"), sc)
+		if err != nil {
+			return nil, err
+		}
+		m.Cases = append(m.Cases, MatchCase{Patterns: patterns, Guard: guard, Body: body})
+	}
+	return m, nil
+}
+
+// lowerMatchPattern returns the literal-value expressions a `case`
+// matches against. Wildcard (MatchAs with no pattern, or MatchValue
+// pattern bound to `_`) returns nil to signal the default arm.
+func lowerMatchPattern(p parser.Node, sc *scope) ([]Expr, error) {
+	switch p.Type() {
+	case "MatchValue":
+		v, err := lowerExpr(p.Child("value"), sc)
+		if err != nil {
+			return nil, err
+		}
+		return []Expr{v}, nil
+	case "MatchSingleton":
+		v := p["value"]
+		switch v.(type) {
+		case nil:
+			return []Expr{&NoneLit{Ty: &Type{Kind: TyNone}}}, nil
+		case bool:
+			return []Expr{&BoolLit{V: v.(bool), Ty: &Type{Kind: TyBool}}}, nil
+		}
+		return nil, fmt.Errorf("match pattern: unsupported singleton %T", v)
+	case "MatchAs":
+		// `case _` or `case x` — both wildcard for our subset; bare name
+		// captures aren't bound to a variable yet.
+		if p.Child("pattern") == nil {
+			return nil, nil // wildcard
+		}
+		return nil, fmt.Errorf("match pattern: `as` captures not supported (use a guard or rewrite the case)")
+	case "MatchOr":
+		var out []Expr
+		for _, sub := range p.Children("patterns") {
+			one, err := lowerMatchPattern(sub, sc)
+			if err != nil {
+				return nil, err
+			}
+			if one == nil {
+				return nil, fmt.Errorf("match pattern: `|` cannot include wildcard")
+			}
+			out = append(out, one...)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("match pattern: %q not supported", p.Type())
 }
 
 // lowerWith handles only `with open(path[, mode]) as name: body` in F4.

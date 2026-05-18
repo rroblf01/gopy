@@ -134,6 +134,8 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"chain":      {GoFunc: "__gopy_chain_unused"},
 			"accumulate": {GoFunc: "__gopy_accumulate_unused"},
+			"takewhile":  {GoFunc: "__gopy_takewhile_unused"},
+			"dropwhile":  {GoFunc: "__gopy_dropwhile_unused"},
 		},
 	},
 	"random": {
