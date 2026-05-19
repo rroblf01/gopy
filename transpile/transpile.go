@@ -2594,8 +2594,9 @@ func min(a, b int) int {
 // snake_case → CamelCase, mostly.
 var taggedMethodRename = map[string]map[string]string{
 	"__Match": {
-		"group":  "Group",
-		"groups": "Groups",
+		"group":     "Group",
+		"groups":    "Groups",
+		"groupdict": "Groupdict",
 	},
 	"__Path": {
 		"exists":     "Exists",
@@ -2965,9 +2966,100 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return nil
 		}
 	}
-	// list.count(x) / list.index(x): inline scans keyed on element type.
+	// list mutators that need reassignment of the receiver expression.
 	if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyList && rt.Elem != nil {
 		switch m.Method {
+		case "extend":
+			if len(m.Args) != 1 {
+				return fmt.Errorf("list.extend() takes 1 argument")
+			}
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(" = append(")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(", ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("...)")
+			return nil
+		case "insert":
+			if len(m.Args) != 2 {
+				return fmt.Errorf("list.insert() takes 2 arguments")
+			}
+			elemGo := g.goType(rt.Elem)
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(" = append(")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[:")
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("], append([]%s{", elemGo)
+			if err := g.expr(m.Args[1]); err != nil {
+				return err
+			}
+			g.writef("}, ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[")
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef(":]...)...)")
+			return nil
+		case "remove":
+			if len(m.Args) != 1 {
+				return fmt.Errorf("list.remove() takes 1 argument")
+			}
+			elemGo := g.goType(rt.Elem)
+			g.needsException = true
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(" = func() []%s {\n", elemGo)
+			g.indent++
+			g.writeIndent()
+			g.writef("__src := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("var __target %s = ", elemGo)
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("for __i, __v := range __src { if __v == __target { return append(__src[:__i], __src[__i+1:]...) } }\n")
+			g.writeIndent()
+			g.writef("panic(NewException(\"ValueError: not in list\"))\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		case "clear":
+			if len(m.Args) != 0 {
+				return fmt.Errorf("list.clear() takes no arguments")
+			}
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(" = ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[:0]")
+			return nil
 		case "count":
 			if len(m.Args) != 1 {
 				return fmt.Errorf("list.count() takes 1 argument")
@@ -3027,21 +3119,109 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return nil
 		}
 	}
-	// dict.update(other): merge other's keys into the receiver.
-	if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyDict && m.Method == "update" {
-		if len(m.Args) != 1 {
-			return fmt.Errorf("dict.update() takes 1 argument")
+	// Dict mutators: update / pop / setdefault / clear.
+	if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyDict {
+		switch m.Method {
+		case "update":
+			if len(m.Args) != 1 {
+				return fmt.Errorf("dict.update() takes 1 argument")
+			}
+			g.writef("for __k, __v := range ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef(" { ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[__k] = __v }")
+			return nil
+		case "pop":
+			if len(m.Args) < 1 || len(m.Args) > 2 {
+				return fmt.Errorf("dict.pop() takes (key[, default])")
+			}
+			valGo := g.goType(rt.Val)
+			g.writef("func() %s {\n", valGo)
+			g.indent++
+			g.writeIndent()
+			g.writef("__d := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("__k := ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("if __v, __ok := __d[__k]; __ok { delete(__d, __k); return __v }\n")
+			g.writeIndent()
+			if len(m.Args) == 2 {
+				g.writef("return ")
+				if err := g.expr(m.Args[1]); err != nil {
+					return err
+				}
+				g.writef("\n")
+			} else {
+				g.needsException = true
+				g.writef("panic(NewException(\"KeyError\"))\n")
+			}
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		case "setdefault":
+			if len(m.Args) != 2 {
+				return fmt.Errorf("dict.setdefault() takes (key, default)")
+			}
+			valGo := g.goType(rt.Val)
+			g.writef("func() %s {\n", valGo)
+			g.indent++
+			g.writeIndent()
+			g.writef("__d := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("__k := ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("if __v, __ok := __d[__k]; __ok { return __v }\n")
+			g.writeIndent()
+			g.writef("var __dv %s = ", valGo)
+			if err := g.expr(m.Args[1]); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("__d[__k] = __dv\n")
+			g.writeIndent()
+			g.writef("return __dv\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		case "clear":
+			if len(m.Args) != 0 {
+				return fmt.Errorf("dict.clear() takes no arguments")
+			}
+			g.writef("for __k := range ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(" { delete(")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(", __k) }")
+			return nil
 		}
-		g.writef("for __k, __v := range ")
-		if err := g.expr(m.Args[0]); err != nil {
-			return err
-		}
-		g.writef(" { ")
-		if err := g.expr(m.Recv); err != nil {
-			return err
-		}
-		g.writef("[__k] = __v }")
-		return nil
 	}
 	// list.append(x) — Python mutates in place; Go's append returns a new slice
 	// and we must reassign. This is only safe when the receiver is an addressable

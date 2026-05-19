@@ -297,26 +297,61 @@ const helperReFindall = `func __gopy_re_findall(pattern, s string) []string {
 }`
 
 // helperMatchType is the runtime Match struct used by re.search / re.match.
-// Methods mirror a (very) thin subset of Python's Match: Group(n) returns
-// the full match for n=0 or empty, and capture n otherwise. Strings round
-// through fmt as the match text so callers can pass Match directly to
-// __gopy_print.
+// Methods mirror a thin subset of Python's Match: Group accepts an int or
+// a string (named group); Groups() and Groupdict() expose the captures by
+// position and by name respectively. Strings round through fmt so callers
+// can pass Match directly to __gopy_print.
 const helperMatchType = `type __Match struct {
 	full   string
 	groups []string
+	names  []string
 }
 
-func (m *__Match) Group(n ...int) string {
-	if len(n) == 0 || n[0] == 0 {
+func (m *__Match) Group(args ...any) string {
+	if len(args) == 0 {
 		return m.full
 	}
-	if n[0] < 1 || n[0] > len(m.groups) {
+	switch a := args[0].(type) {
+	case int:
+		if a == 0 {
+			return m.full
+		}
+		if a < 1 || a > len(m.groups) {
+			return ""
+		}
+		return m.groups[a-1]
+	case int64:
+		i := int(a)
+		if i == 0 {
+			return m.full
+		}
+		if i < 1 || i > len(m.groups) {
+			return ""
+		}
+		return m.groups[i-1]
+	case string:
+		for i, n := range m.names {
+			if n == a && i >= 1 && i <= len(m.groups) {
+				return m.groups[i-1]
+			}
+		}
 		return ""
 	}
-	return m.groups[n[0]-1]
+	return ""
 }
 
 func (m *__Match) Groups() []string { return m.groups }
+
+func (m *__Match) Groupdict() map[string]string {
+	out := map[string]string{}
+	for i, n := range m.names {
+		if n == "" || i < 1 || i > len(m.groups) {
+			continue
+		}
+		out[n] = m.groups[i-1]
+	}
+	return out
+}
 
 func (m *__Match) String() string { return m.full }`
 
@@ -329,7 +364,7 @@ const helperReSearch = `func __gopy_re_search(pattern, s string) *__Match {
 	if parts == nil {
 		return nil
 	}
-	return &__Match{full: parts[0], groups: parts[1:]}
+	return &__Match{full: parts[0], groups: parts[1:], names: r.SubexpNames()}
 }`
 
 // helperReMatch anchors the pattern to the start of the string, matching
@@ -340,7 +375,7 @@ const helperReMatch = `func __gopy_re_match(pattern, s string) *__Match {
 	if parts == nil {
 		return nil
 	}
-	return &__Match{full: parts[0], groups: parts[1:]}
+	return &__Match{full: parts[0], groups: parts[1:], names: r.SubexpNames()}
 }`
 
 // helperReSub replaces every match of pattern with repl.
@@ -362,7 +397,7 @@ func (p *__Pattern) Match(s string) *__Match {
 	if m == nil {
 		return nil
 	}
-	return &__Match{full: m[0], groups: m[1:]}
+	return &__Match{full: m[0], groups: m[1:], names: p.r.SubexpNames()}
 }
 
 func (p *__Pattern) Search(s string) *__Match {
@@ -370,7 +405,7 @@ func (p *__Pattern) Search(s string) *__Match {
 	if m == nil {
 		return nil
 	}
-	return &__Match{full: m[0], groups: m[1:]}
+	return &__Match{full: m[0], groups: m[1:], names: p.r.SubexpNames()}
 }
 
 func (p *__Pattern) Findall(s string) []string {
