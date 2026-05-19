@@ -620,7 +620,7 @@ func (g *gen) stmt(s ir.Stmt) error {
 		if x.Decl && x.Ty != nil && x.Ty.Kind == ir.TyDict {
 			if call, ok := x.Value.(*ir.Call); ok {
 				if n, ok := call.Func.(*ir.Name); ok {
-					if path, hit := g.aliases[n.N]; hit && path == "collections.defaultdict" {
+					if path, hit := g.aliases[n.N]; hit && (path == "collections.defaultdict" || path == "collections.OrderedDict") {
 						g.writeIndent()
 						g.writef("var %s %s = %s{}\n", x.Target, g.goType(x.Ty), g.goType(x.Ty))
 						g.localVarTypes[x.Target] = x.Ty
@@ -1604,13 +1604,55 @@ func (g *gen) expr(e ir.Expr) error {
 				return fmt.Errorf("// on non-int operands not supported")
 			}
 		}
+		// True division: Python's `/` always returns float. Go's `/` on
+		// int64 truncates, so when both operands are int we cast each
+		// to float64 first to preserve the fraction.
+		if x.Op == "/" {
+			lTy, rTy := x.L.TypeOf(), x.R.TypeOf()
+			if lTy != nil && rTy != nil && lTy.Kind == ir.TyInt && rTy.Kind == ir.TyInt {
+				g.writef("(float64(")
+				if err := g.expr(x.L); err != nil {
+					return err
+				}
+				g.writef(") / float64(")
+				if err := g.expr(x.R); err != nil {
+					return err
+				}
+				g.writef("))")
+				return nil
+			}
+		}
+		// Mixed int/float arithmetic: Go won't auto-promote, so wrap
+		// the int side in float64(...) when the other side is float.
+		lTy, rTy := x.L.TypeOf(), x.R.TypeOf()
+		castL, castR := false, false
+		if lTy != nil && rTy != nil {
+			if lTy.Kind == ir.TyInt && rTy.Kind == ir.TyFloat {
+				castL = true
+			}
+			if lTy.Kind == ir.TyFloat && rTy.Kind == ir.TyInt {
+				castR = true
+			}
+		}
 		g.writef("(")
+		if castL {
+			g.writef("float64(")
+		}
 		if err := g.expr(x.L); err != nil {
 			return err
 		}
+		if castL {
+			g.writef(")")
+		}
 		g.writef(" %s ", op)
+		if castR {
+			g.writef("float64(")
+		}
 		if err := g.expr(x.R); err != nil {
 			return err
+		}
+		if castR {
+			g.writef(")")
 		}
 		g.writef(")")
 	case *ir.CmpOp:
@@ -2922,6 +2964,84 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			g.writef("}()")
 			return nil
 		}
+	}
+	// list.count(x) / list.index(x): inline scans keyed on element type.
+	if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyList && rt.Elem != nil {
+		switch m.Method {
+		case "count":
+			if len(m.Args) != 1 {
+				return fmt.Errorf("list.count() takes 1 argument")
+			}
+			elemGo := g.goType(rt.Elem)
+			g.writef("func() int64 {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("__src := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("var __target %s = ", elemGo)
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("__n := int64(0)\n")
+			g.writeIndent()
+			g.writef("for _, __v := range __src { if __v == __target { __n++ } }\n")
+			g.writeIndent()
+			g.writef("return __n\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		case "index":
+			if len(m.Args) != 1 {
+				return fmt.Errorf("list.index() takes 1 argument")
+			}
+			elemGo := g.goType(rt.Elem)
+			g.needsException = true
+			g.writef("func() int64 {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("__src := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("var __target %s = ", elemGo)
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("for __i, __v := range __src { if __v == __target { return int64(__i) } }\n")
+			g.writeIndent()
+			g.writef("panic(NewException(\"ValueError: not in list\"))\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		}
+	}
+	// dict.update(other): merge other's keys into the receiver.
+	if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyDict && m.Method == "update" {
+		if len(m.Args) != 1 {
+			return fmt.Errorf("dict.update() takes 1 argument")
+		}
+		g.writef("for __k, __v := range ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return err
+		}
+		g.writef(" { ")
+		if err := g.expr(m.Recv); err != nil {
+			return err
+		}
+		g.writef("[__k] = __v }")
+		return nil
 	}
 	// list.append(x) — Python mutates in place; Go's append returns a new slice
 	// and we must reassign. This is only safe when the receiver is an addressable

@@ -104,6 +104,7 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"Counter":     {GoFunc: "__gopy_counter_unused"},
 			"defaultdict": {GoFunc: "__gopy_defaultdict_unused"},
+			"OrderedDict": {GoFunc: "__gopy_ordereddict_unused"},
 			"deque":       {GoFunc: "__gopy_deque_unused", RetTag: "__Deque"},
 		},
 	},

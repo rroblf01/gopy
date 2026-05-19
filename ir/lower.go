@@ -921,7 +921,7 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			name := tgt.Str("id")
 			lhsTy, _ := sc.lookup(name)
 			lhs := &Name{N: name, Ty: lhsTy}
-			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promote(lhs.Ty, rhs.TypeOf())}
+			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promoteOp(op, lhs.Ty, rhs.TypeOf())}
 			return &Assign{Target: name, Value: bin, Decl: false}, nil
 		case "Attribute":
 			recv, err := lowerExpr(tgt.Child("value"), sc)
@@ -930,7 +930,7 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			}
 			attrName := tgt.Str("attr")
 			lhs := &Attribute{Recv: recv, Name: attrName, Ty: rhs.TypeOf()}
-			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promote(lhs.Ty, rhs.TypeOf())}
+			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promoteOp(op, lhs.Ty, rhs.TypeOf())}
 			return &AssignAttr{Target: recv, Name: attrName, Value: bin}, nil
 		case "Subscript":
 			obj, err := lowerExpr(tgt.Child("value"), sc)
@@ -951,7 +951,7 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 				}
 			}
 			lhs := &Subscript{Value: obj, Index: idx, Ty: elemTy}
-			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promote(elemTy, rhs.TypeOf())}
+			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promoteOp(op, elemTy, rhs.TypeOf())}
 			return &AssignSub{Target: obj, Index: idx, Value: bin}, nil
 		default:
 			return nil, fmt.Errorf("line %d: unsupported AugAssign target %q", n.Lineno(), tgt.Type())
@@ -1126,7 +1126,7 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", n.Lineno(), err)
 		}
-		return &BinOp{Op: op, L: l, R: r, Ty: promote(l.TypeOf(), r.TypeOf())}, nil
+		return &BinOp{Op: op, L: l, R: r, Ty: promoteOp(op, l.TypeOf(), r.TypeOf())}, nil
 	case "Compare":
 		ops := n.Children("ops")
 		comps := n.Children("comparators")
@@ -2326,4 +2326,15 @@ func promote(a, b *Type) *Type {
 		return &Type{Kind: TyInt}
 	}
 	return &Type{Kind: TyUnknown}
+}
+
+// promoteOp is promote that also knows about Python's `/` always yielding
+// float — even for two int operands. Used at BinOp construction so the
+// IR type of a `/` expression reads as TyFloat downstream.
+func promoteOp(op string, a, b *Type) *Type {
+	t := promote(a, b)
+	if op == "/" && t != nil && t.Kind == TyInt {
+		return &Type{Kind: TyFloat}
+	}
+	return t
 }
