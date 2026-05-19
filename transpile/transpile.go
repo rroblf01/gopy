@@ -3060,6 +3060,70 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			}
 			g.writef("[:0]")
 			return nil
+		case "sort":
+			// Only naive ascending sort. reverse=True flips the comparator.
+			reverse := false
+			for _, kw := range m.Keywords {
+				if kw.Name == "reverse" {
+					if b, ok := kw.Value.(*ir.BoolLit); ok {
+						reverse = b.V
+					} else {
+						return fmt.Errorf("list.sort(reverse=...): expected literal True/False")
+					}
+				} else if kw.Name == "key" {
+					return fmt.Errorf("list.sort(key=...): not supported, use sorted(xs, key=...) instead")
+				} else {
+					return fmt.Errorf("list.sort(): unknown keyword %q", kw.Name)
+				}
+			}
+			if rt.Elem.Kind != ir.TyInt && rt.Elem.Kind != ir.TyFloat && rt.Elem.Kind != ir.TyStr {
+				return fmt.Errorf("list.sort(): only int/float/str element types supported")
+			}
+			g.addImport("sort")
+			g.writef("sort.Slice(")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(", func(i, j int) bool { return ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			op := "<"
+			if reverse {
+				op = ">"
+			}
+			g.writef("[i] %s ", op)
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[j] })")
+			return nil
+		case "reverse":
+			if len(m.Args) != 0 {
+				return fmt.Errorf("list.reverse() takes no arguments")
+			}
+			g.writef("for __i, __j := 0, len(")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(")-1; __i < __j; __i, __j = __i+1, __j-1 { ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[__i], ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[__j] = ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[__j], ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("[__i] }")
+			return nil
 		case "count":
 			if len(m.Args) != 1 {
 				return fmt.Errorf("list.count() takes 1 argument")
@@ -5618,8 +5682,64 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef(")")
 		return true, nil
+	case "isdigit", "isalpha", "isalnum", "isspace", "isupper", "islower":
+		if len(m.Args) != 0 {
+			return true, fmt.Errorf("str.%s() takes no arguments", m.Method)
+		}
+		helperName := "__gopy_str_" + m.Method
+		g.helpers[helperName] = strPredicateHelper(m.Method)
+		g.writef("%s(", helperName)
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
 	}
 	return false, nil
+}
+
+// strPredicateHelper builds the inline Go body for a str-predicate method.
+// Mirrors CPython: empty string → False; isupper/islower additionally
+// require at least one cased character.
+func strPredicateHelper(kind string) string {
+	switch kind {
+	case "isupper":
+		return `func __gopy_str_isupper(s string) bool {
+	if len(s) == 0 { return false }
+	hasCased := false
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' { hasCased = true; continue }
+		if r >= 'a' && r <= 'z' { return false }
+	}
+	return hasCased
+}`
+	case "islower":
+		return `func __gopy_str_islower(s string) bool {
+	if len(s) == 0 { return false }
+	hasCased := false
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' { hasCased = true; continue }
+		if r >= 'A' && r <= 'Z' { return false }
+	}
+	return hasCased
+}`
+	}
+	body := ""
+	switch kind {
+	case "isdigit":
+		body = "r < '0' || r > '9'"
+	case "isalpha":
+		body = "!((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'))"
+	case "isalnum":
+		body = "!((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))"
+	case "isspace":
+		body = "r != ' ' && r != '\\t' && r != '\\n' && r != '\\r' && r != '\\v' && r != '\\f'"
+	}
+	return "func __gopy_str_" + kind + "(s string) bool {\n" +
+		"\tif len(s) == 0 { return false }\n" +
+		"\tfor _, r := range s { if " + body + " { return false } }\n" +
+		"\treturn true\n" +
+		"}"
 }
 
 const helperStrTitle = `func __gopy_str_title(s string) string {
@@ -5744,18 +5864,185 @@ const helperStrZfill = `func __gopy_str_zfill(s string, width int64) string {
 const helperStrFormat = `func __gopy_str_format(s string, args ...any) string {
 	var b strings.Builder
 	argi := 0
-	for i := 0; i < len(s); i++ {
-		if i+1 < len(s) && s[i] == '{' && s[i+1] == '}' {
+	i := 0
+	for i < len(s) {
+		if s[i] == '{' && i+1 < len(s) && s[i+1] == '{' {
+			b.WriteByte('{')
+			i += 2
+			continue
+		}
+		if s[i] == '}' && i+1 < len(s) && s[i+1] == '}' {
+			b.WriteByte('}')
+			i += 2
+			continue
+		}
+		if s[i] == '{' {
+			j := i + 1
+			for j < len(s) && s[j] != '}' {
+				j++
+			}
+			if j >= len(s) {
+				b.WriteByte(s[i])
+				i++
+				continue
+			}
+			spec := s[i+1 : j]
+			colon := -1
+			for k := 0; k < len(spec); k++ {
+				if spec[k] == ':' {
+					colon = k
+					break
+				}
+			}
+			fspec := ""
+			if colon >= 0 {
+				fspec = spec[colon+1:]
+			}
 			if argi < len(args) {
-				b.WriteString(fmt.Sprint(args[argi]))
+				b.WriteString(__gopy_fmt_spec(fspec, args[argi]))
 				argi++
 			}
-			i++
+			i = j + 1
 			continue
 		}
 		b.WriteByte(s[i])
+		i++
 	}
 	return b.String()
+}
+
+func __gopy_fmt_spec(spec string, v any) string {
+	if spec == "" {
+		return fmt.Sprint(v)
+	}
+	fill := byte(' ')
+	align := byte(0)
+	zero := false
+	width := 0
+	prec := -1
+	typeCh := byte(0)
+	n := len(spec)
+	i := 0
+	if n >= 2 && (spec[1] == '<' || spec[1] == '>' || spec[1] == '^') {
+		fill = spec[0]
+		align = spec[1]
+		i = 2
+	}
+	if i < n && (spec[i] == '<' || spec[i] == '>' || spec[i] == '^') {
+		align = spec[i]
+		i++
+	}
+	if i < n && spec[i] == '0' {
+		zero = true
+		i++
+	}
+	for i < n && spec[i] >= '0' && spec[i] <= '9' {
+		width = width*10 + int(spec[i]-'0')
+		i++
+	}
+	if i < n && spec[i] == '.' {
+		i++
+		prec = 0
+		for i < n && spec[i] >= '0' && spec[i] <= '9' {
+			prec = prec*10 + int(spec[i]-'0')
+			i++
+		}
+	}
+	if i < n {
+		typeCh = spec[i]
+	}
+	// Coerce v based on the requested type so Go's fmt doesn't reject it.
+	switch typeCh {
+	case 'd', 'x', 'X', 'o', 'b':
+		switch x := v.(type) {
+		case int:
+			v = int64(x)
+		case int32:
+			v = int64(x)
+		case int64:
+			v = x
+		case float64:
+			v = int64(x)
+		case float32:
+			v = int64(x)
+		case bool:
+			if x {
+				v = int64(1)
+			} else {
+				v = int64(0)
+			}
+		}
+	case 'f', 'F', 'e', 'E', 'g', 'G':
+		switch x := v.(type) {
+		case int:
+			v = float64(x)
+		case int32:
+			v = float64(x)
+		case int64:
+			v = float64(x)
+		case float32:
+			v = float64(x)
+		case float64:
+			v = x
+		}
+	case 's':
+		v = fmt.Sprint(v)
+	}
+	customFill := fill != ' ' && !zero && align != 0
+	var sb strings.Builder
+	sb.WriteByte('%')
+	if align == '<' && !customFill {
+		sb.WriteByte('-')
+	}
+	if zero {
+		sb.WriteByte('0')
+	}
+	if width > 0 && align != '^' && !customFill {
+		fmt.Fprintf(&sb, "%d", width)
+	}
+	if prec >= 0 {
+		fmt.Fprintf(&sb, ".%d", prec)
+	}
+	verb := byte('v')
+	switch typeCh {
+	case 'd':
+		verb = 'd'
+	case 'f', 'F':
+		verb = 'f'
+	case 'e', 'E':
+		verb = byte(typeCh)
+	case 'g', 'G':
+		verb = byte(typeCh)
+	case 'x', 'X', 'o', 'b':
+		verb = typeCh
+	case 's':
+		verb = 's'
+	default:
+		switch v.(type) {
+		case float32, float64:
+			verb = 'g'
+		case string:
+			verb = 's'
+		default:
+			verb = 'v'
+		}
+	}
+	sb.WriteByte(verb)
+	out := fmt.Sprintf(sb.String(), v)
+	if align == '^' && len(out) < width {
+		pad := width - len(out)
+		left := pad / 2
+		right := pad - left
+		return strings.Repeat(string(fill), left) + out + strings.Repeat(string(fill), right)
+	}
+	if customFill && (align == '<' || align == '>') && len(out) < width {
+		pad := width - len(out)
+		if align == '<' {
+			return out + strings.Repeat(string(fill), pad)
+		}
+		return strings.Repeat(string(fill), pad) + out
+	}
+	return out
 }`
 
 // emitInOp emits Python's `in` / `not in` operators. The right operand's
