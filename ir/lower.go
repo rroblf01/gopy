@@ -13,6 +13,7 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 	if root.Type() != "Module" {
 		return nil, fmt.Errorf("expected Module root, got %q", root.Type())
 	}
+	moduleScopeReset()
 	m := &Module{Name: modName}
 	for _, stmt := range root.Children("body") {
 		if isMainGuard(stmt) {
@@ -98,9 +99,72 @@ func lowerTopLevel(n parser.Node) ([]Decl, error) {
 		// (re, json, etc.) are not yet supported and will produce
 		// undefined-name errors downstream.
 		return nil, nil
+	case "Assign":
+		// Top-level `name = expr`. We only support single-target Name
+		// assignments here; tuple unpack / chained at module level land
+		// later if needed.
+		targets := n.Children("targets")
+		if len(targets) != 1 || targets[0].Type() != "Name" {
+			return nil, fmt.Errorf("line %d: module-level assignment must be `name = expr`", n.Lineno())
+		}
+		name := targets[0].Str("id")
+		sc := newScope()
+		val, err := lowerExpr(n.Child("value"), sc)
+		if err != nil {
+			return nil, err
+		}
+		ty := val.TypeOf()
+		moduleScopeDeclare(name, ty)
+		return []Decl{&Var{Name: name, Ty: ty, Value: val}}, nil
+	case "AnnAssign":
+		tgt := n.Child("target")
+		if tgt.Type() != "Name" {
+			return nil, fmt.Errorf("line %d: module-level annotated assignment must target a Name", n.Lineno())
+		}
+		name := tgt.Str("id")
+		ann := n.Child("annotation")
+		ty, err := lowerAnnotation(ann)
+		if err != nil {
+			return nil, err
+		}
+		var val Expr
+		if v := n.Child("value"); v != nil {
+			sc := newScope()
+			val, err = lowerExpr(v, sc)
+			if err != nil {
+				return nil, err
+			}
+		}
+		moduleScopeDeclare(name, ty)
+		return []Decl{&Var{Name: name, Ty: ty, Value: val}}, nil
+	case "If":
+		// Guard `if __name__ == "__main__":` at module top — already filtered
+		// at the module-walk site, but defensively skip here too.
+		if isMainGuard(n) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("line %d: unsupported top-level `if` (only `if __name__ == \"__main__\":` is recognized)", n.Lineno())
 	default:
 		return nil, fmt.Errorf("line %d: unsupported top-level node %q", n.Lineno(), n.Type())
 	}
+}
+
+// moduleScopeVars tracks top-level Name → Type so function-body scopes
+// can find globals during read-after-write inference. The map is reset
+// at each call to Module so multi-file tests don't bleed types.
+var moduleScopeVars = map[string]*Type{}
+
+func moduleScopeDeclare(name string, ty *Type) {
+	moduleScopeVars[name] = ty
+}
+
+func moduleScopeLookup(name string) (*Type, bool) {
+	t, ok := moduleScopeVars[name]
+	return t, ok
+}
+
+func moduleScopeReset() {
+	moduleScopeVars = map[string]*Type{}
 }
 
 // lowerClass emits a Class decl plus one Func per method (with Receiver set).
@@ -1075,6 +1139,40 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		return &Raise{Exc: exc}, nil
 	case "Pass":
 		return nil, nil
+	case "Global":
+		// Python's `global x` opts subsequent writes into the module-level
+		// binding. Mark the names as already-declared in the local scope
+		// using the module-level type so future Assigns lower with the
+		// existing-binding shape; codegen then routes them to `=` against
+		// the package var.
+		if raw, ok := n["names"].([]any); ok {
+			for _, x := range raw {
+				name, _ := x.(string)
+				if name == "" {
+					continue
+				}
+				t, _ := moduleScopeLookup(name)
+				if t == nil {
+					t = &Type{Kind: TyUnknown}
+				}
+				sc.declare(name, t)
+			}
+		}
+		return nil, nil
+	case "Nonlocal":
+		// Same shape: opt-in to an enclosing-scope binding. We don't track
+		// enclosing-fn scopes explicitly, so this is best-effort — declare
+		// the names as TyUnknown and let later inference fill in.
+		if raw, ok := n["names"].([]any); ok {
+			for _, x := range raw {
+				name, _ := x.(string)
+				if name == "" {
+					continue
+				}
+				sc.declare(name, &Type{Kind: TyUnknown})
+			}
+		}
+		return nil, nil
 	case "Match":
 		return lowerMatch(n, sc)
 	case "FunctionDef":
@@ -1110,7 +1208,12 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		return lowerConstant(n)
 	case "Name":
 		name := n.Str("id")
-		t, _ := sc.lookup(name)
+		t, ok := sc.lookup(name)
+		if !ok {
+			if gt, gok := moduleScopeLookup(name); gok {
+				t = gt
+			}
+		}
 		return &Name{N: name, Ty: t}, nil
 	case "BinOp":
 		l, err := lowerExpr(n.Child("left"), sc)

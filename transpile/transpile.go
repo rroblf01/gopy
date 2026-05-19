@@ -23,7 +23,7 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}}
 	g.buildAliases(m)
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
@@ -45,6 +45,8 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 				}
 				g.methods[cls][x.Name] = x
 			}
+		case *ir.Var:
+			g.globals[x.Name] = x.Ty
 		}
 	}
 	// Diamond-inheritance method conflict check. Go's embedding rules will
@@ -67,6 +69,10 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 			}
 		case *ir.Class:
 			if err := g.class(x); err != nil {
+				return nil, err
+			}
+		case *ir.Var:
+			if err := g.moduleVar(x); err != nil {
 				return nil, err
 			}
 		default:
@@ -100,6 +106,28 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 		return []byte(src), fmt.Errorf("gofmt: %w\n---\n%s", err, src)
 	}
 	return formatted, nil
+}
+
+// moduleVar emits a Go package-scope variable declaration from a Var Decl.
+// Untyped vars (no annotation) get their type from the initializer; typed
+// ones honor the annotation so untyped numeric literals don't drift to Go
+// defaults that disagree with Python's int64 / float64 model.
+func (g *gen) moduleVar(v *ir.Var) error {
+	hasTy := v.Ty != nil && v.Ty.Kind != ir.TyUnknown && v.Ty.Kind != ir.TyNone
+	switch {
+	case hasTy:
+		g.writef("var %s %s", v.Name, g.goType(v.Ty))
+	default:
+		g.writef("var %s", v.Name)
+	}
+	if v.Value != nil {
+		g.writef(" = ")
+		if err := g.expr(v.Value); err != nil {
+			return err
+		}
+	}
+	g.writef("\n")
+	return nil
 }
 
 // buildAliases populates g.aliases from the module's import statements.
@@ -351,6 +379,11 @@ type gen struct {
 	// function's declared return type is `User`). Used by Name/Attribute
 	// codegen to dispatch user-class methods when no annotation exists.
 	localVarTypes map[string]*ir.Type
+	// globals tracks module-level variable names (from `ir.Var` decls)
+	// so writes inside function bodies emit `name = expr` (package-var
+	// reassignment) rather than `name := expr` (which would shadow with
+	// a local). Populated up-front from the IR.
+	globals map[string]*ir.Type
 }
 
 func (g *gen) writef(f string, a ...any) { fmt.Fprintf(&g.body, f, a...) }
@@ -668,7 +701,14 @@ func (g *gen) stmt(s ir.Stmt) error {
 			}
 		}
 		g.writeIndent()
+		// Writes targeting a module-level (package-scope) var must use
+		// `=`, never `:=`, otherwise the function body would shadow the
+		// global with a new local. The IR doesn't carry `global` info,
+		// so we override here based on the registered globals.
+		isGlobal := g.globals[x.Target] != nil
 		switch {
+		case isGlobal:
+			g.writef("%s = ", x.Target)
 		case x.Decl && x.Ty != nil && x.Ty.Kind != ir.TyUnknown:
 			g.writef("var %s %s = ", x.Target, g.goType(x.Ty))
 		case x.Decl && g.varTypes[x.Target] != "":
@@ -2629,6 +2669,12 @@ var taggedMethodRename = map[string]map[string]string{
 		"findall": "Findall",
 		"sub":     "Sub",
 	},
+	"__Date": {
+		"isoformat": "Isoformat",
+	},
+	"__Time": {
+		"isoformat": "Isoformat",
+	},
 }
 
 // taggedMethodRetTag tracks the tag of a tagged-method call's return
@@ -2659,6 +2705,16 @@ var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 	"__Path": {
 		"name":   {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
 		"parent": {GoName: "Parent", Ty: nil},
+	},
+	"__Date": {
+		"year":  {GoName: "Year", Ty: &ir.Type{Kind: ir.TyInt}},
+		"month": {GoName: "Month", Ty: &ir.Type{Kind: ir.TyInt}},
+		"day":   {GoName: "Day", Ty: &ir.Type{Kind: ir.TyInt}},
+	},
+	"__Time": {
+		"hour":   {GoName: "Hour", Ty: &ir.Type{Kind: ir.TyInt}},
+		"minute": {GoName: "Minute", Ty: &ir.Type{Kind: ir.TyInt}},
+		"second": {GoName: "Second", Ty: &ir.Type{Kind: ir.TyInt}},
 	},
 }
 
@@ -5406,7 +5462,56 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 			g.writef(")")
 			return true, nil
 		}
+		if len(m.Args) == 2 {
+			// split(sep, maxsplit): Go's SplitN takes n = maxsplit+1.
+			g.writef("strings.SplitN(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(", ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return true, err
+			}
+			g.writef(", int(")
+			if err := g.expr(m.Args[1]); err != nil {
+				return true, err
+			}
+			g.writef("+1))")
+			return true, nil
+		}
 		g.writef("strings.Split(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "splitlines":
+		if len(m.Args) != 0 {
+			return true, fmt.Errorf("str.splitlines() takes no arguments")
+		}
+		g.helpers["__gopy_str_splitlines"] = helperStrSplitlines
+		g.writef("__gopy_str_splitlines(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "partition", "rpartition":
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.%s() takes 1 argument", m.Method)
+		}
+		helperName := "__gopy_str_" + m.Method
+		if m.Method == "partition" {
+			g.helpers[helperName] = helperStrPartition
+		} else {
+			g.helpers[helperName] = helperStrRpartition
+		}
+		g.addImport("strings")
+		g.writef("%s(", helperName)
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
 		}
@@ -5859,6 +5964,59 @@ const helperStrZfill = `func __gopy_str_zfill(s string, width int64) string {
 	}
 	out = append(out, rs...)
 	return string(out)
+}`
+
+// helperStrSplitlines mirrors Python's str.splitlines: splits on \n, \r,
+// \r\n, \v, \f and drops trailing empty element from a final newline.
+const helperStrSplitlines = `func __gopy_str_splitlines(s string) []string {
+	var out []string
+	cur := ""
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == '\n' || c == '\v' || c == '\f' {
+			out = append(out, cur)
+			cur = ""
+			i++
+			continue
+		}
+		if c == '\r' {
+			out = append(out, cur)
+			cur = ""
+			i++
+			if i < len(s) && s[i] == '\n' {
+				i++
+			}
+			continue
+		}
+		cur += string(c)
+		i++
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}`
+
+// helperStrPartition mirrors Python's str.partition: returns the head,
+// separator, and tail. When sep is absent, head=s, sep="", tail="".
+const helperStrPartition = `func __gopy_str_partition(s, sep string) []string {
+	i := strings.Index(s, sep)
+	if i < 0 {
+		return []string{s, "", ""}
+	}
+	return []string{s[:i], sep, s[i+len(sep):]}
+}`
+
+const helperStrRpartition = `func __gopy_str_rpartition(s, sep string) []string {
+	i := strings.LastIndex(s, sep)
+	if i < 0 {
+		return []string{"", "", s}
+	}
+	return []string{s[:i], sep, s[i+len(sep):]}
 }`
 
 const helperStrFormat = `func __gopy_str_format(s string, args ...any) string {

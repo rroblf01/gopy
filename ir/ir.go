@@ -81,6 +81,19 @@ type Func struct {
 
 func (*Func) declNode() {}
 
+// Var is a module-level (package-scope) variable declaration: produced
+// by lowering `name = expr` or `name: T = expr` at module top level.
+// Inside function bodies, writes to Name without a `global` declaration
+// still create a Go-local — codegen consults the gen.globals map to
+// detect cross-function writes and switch to `=` instead of `:=`.
+type Var struct {
+	Name  string
+	Ty    *Type
+	Value Expr
+}
+
+func (*Var) declNode() {}
+
 // Class lowers a Python `class` into a Go struct plus a constructor.
 // Methods land in the module's Decls as separate Func entries with Receiver set.
 type Class struct {

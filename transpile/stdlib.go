@@ -173,6 +173,8 @@ var stdlibModules = map[string]stdlibModule{
 	"datetime": {
 		Funcs: map[string]stdlibFunc{
 			"timedelta": {GoFunc: "__gopy_timedelta_new", GoImport: "time", Helper: helperTimedeltaNew, RetTag: "__Timedelta", ExtraHelpers: map[string]string{"__Timedelta": helperTimedeltaType}, HelperImports: []string{"fmt"}},
+			"date":      {GoFunc: "__gopy_date_new", GoImport: "fmt", Helper: helperDateNew, RetTag: "__Date", ExtraHelpers: map[string]string{"__Date": helperDateType}},
+			"time":      {GoFunc: "__gopy_time_new", GoImport: "fmt", Helper: helperTimeNew, RetTag: "__Time", ExtraHelpers: map[string]string{"__Time": helperTimeType}},
 		},
 		Subs: map[string]stdlibModule{
 			"datetime": {
@@ -774,6 +776,54 @@ func (d *__Datetime) Isoformat() string {
 // helperDatetimeNow returns Python's datetime.datetime.now() as a
 // *__Datetime so it can take part in timedelta arithmetic.
 const helperDatetimeNow = `func __gopy_datetime_now() *__Datetime { return &__Datetime{t: time.Now()} }`
+
+// helperDateType mirrors Python's datetime.date — year/month/day and an
+// isoformat that prints YYYY-MM-DD.
+const helperDateType = `type __Date struct {
+	Y int64
+	M int64
+	D int64
+}
+
+func (d *__Date) String() string {
+	return fmt.Sprintf("%04d-%02d-%02d", d.Y, d.M, d.D)
+}
+
+func (d *__Date) Isoformat() string { return d.String() }
+
+func (d *__Date) Year() int64  { return d.Y }
+func (d *__Date) Month() int64 { return d.M }
+func (d *__Date) Day() int64   { return d.D }`
+
+const helperDateNew = `func __gopy_date_new(y, m, d int64) *__Date {
+	return &__Date{Y: y, M: m, D: d}
+}`
+
+// helperTimeType mirrors Python's datetime.time — hour/minute/second
+// (microseconds dropped) and isoformat printing HH:MM:SS.
+const helperTimeType = `type __Time struct {
+	H int64
+	M int64
+	S int64
+}
+
+func (t *__Time) String() string {
+	return fmt.Sprintf("%02d:%02d:%02d", t.H, t.M, t.S)
+}
+
+func (t *__Time) Isoformat() string { return t.String() }
+
+func (t *__Time) Hour() int64   { return t.H }
+func (t *__Time) Minute() int64 { return t.M }
+func (t *__Time) Second() int64 { return t.S }`
+
+const helperTimeNew = `func __gopy_time_new(args ...int64) *__Time {
+	t := &__Time{}
+	if len(args) > 0 { t.H = args[0] }
+	if len(args) > 1 { t.M = args[1] }
+	if len(args) > 2 { t.S = args[2] }
+	return t
+}`
 
 // isStdlibModule reports whether name refers to a stdlib module we recognize.
 func isStdlibModule(name string) bool {
