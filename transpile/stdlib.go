@@ -156,6 +156,7 @@ var stdlibModules = map[string]stdlibModule{
 			"search":  {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
 			"match":   {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
 			"sub":     {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub},
+			"compile": {GoFunc: "__gopy_re_compile", GoImport: "regexp", Helper: helperReCompile, RetTag: "__Pattern", ExtraHelpers: map[string]string{"__Pattern": helperPatternType, "__Match": helperMatchType}},
 		},
 	},
 	"csv": {
@@ -345,6 +346,49 @@ const helperReMatch = `func __gopy_re_match(pattern, s string) *__Match {
 const helperReSub = `func __gopy_re_sub(pattern, repl, s string) string {
 	r := regexp.MustCompile(pattern)
 	return r.ReplaceAllString(s, repl)
+}`
+
+// helperPatternType wraps a compiled regexp so re.compile(p).match(s)
+// and friends share one re-usable underlying *regexp.Regexp. Method
+// names match the (already-renamed) Match/Search/Findall/Sub forms.
+const helperPatternType = `type __Pattern struct {
+	r       *regexp.Regexp
+	anchor  *regexp.Regexp
+}
+
+func (p *__Pattern) Match(s string) *__Match {
+	m := p.anchor.FindStringSubmatch(s)
+	if m == nil {
+		return nil
+	}
+	return &__Match{full: m[0], groups: m[1:]}
+}
+
+func (p *__Pattern) Search(s string) *__Match {
+	m := p.r.FindStringSubmatch(s)
+	if m == nil {
+		return nil
+	}
+	return &__Match{full: m[0], groups: m[1:]}
+}
+
+func (p *__Pattern) Findall(s string) []string {
+	out := p.r.FindAllString(s, -1)
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+func (p *__Pattern) Sub(repl, s string) string {
+	return p.r.ReplaceAllString(s, repl)
+}`
+
+const helperReCompile = `func __gopy_re_compile(pattern string) *__Pattern {
+	return &__Pattern{
+		r:      regexp.MustCompile(pattern),
+		anchor: regexp.MustCompile("^(?:" + pattern + ")"),
+	}
 }`
 
 // helperCSVReader materializes Python's `csv.reader(iterable_of_lines)`
@@ -567,6 +611,37 @@ const helperRandomSeed = `func __gopy_random_seed(s int64) { rand.Seed(s) }`
 // Mirrors a handful of Path methods sufficient for "open this, check
 // existence, read/write text" workflows.
 const helperPathType = `type __Path struct{ p string }
+
+func (p *__Path) Join(other string) *__Path {
+	if p.p == "" {
+		return &__Path{p: other}
+	}
+	if len(p.p) > 0 && p.p[len(p.p)-1] == '/' {
+		return &__Path{p: p.p + other}
+	}
+	return &__Path{p: p.p + "/" + other}
+}
+
+func (p *__Path) Name() string {
+	for i := len(p.p) - 1; i >= 0; i-- {
+		if p.p[i] == '/' {
+			return p.p[i+1:]
+		}
+	}
+	return p.p
+}
+
+func (p *__Path) Parent() *__Path {
+	for i := len(p.p) - 1; i >= 0; i-- {
+		if p.p[i] == '/' {
+			if i == 0 {
+				return &__Path{p: "/"}
+			}
+			return &__Path{p: p.p[:i]}
+		}
+	}
+	return &__Path{p: "."}
+}
 
 func (p *__Path) Exists() bool {
 	_, err := os.Stat(p.p)

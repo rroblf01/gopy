@@ -649,7 +649,7 @@ func (g *gen) stmt(s ir.Stmt) error {
 		// Track stdlib-call return tags so later method dispatch and
 		// truthy checks see the right type. We do this regardless of
 		// whether the declaration carries an explicit annotation.
-		if tag := g.stdlibCallRetTag(x.Value); tag != "" {
+		if tag := g.exprTag(x.Value); tag != "" {
 			g.varTypes[x.Target] = tag
 		}
 		// Propagate types so later attribute / method dispatch resolves
@@ -928,6 +928,55 @@ const helperGopyHash = `func __gopy_hash(v any) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(fmt.Sprintf("%v", v)))
 	return int64(h.Sum64())
+}`
+
+// helperGopyType returns the Python class name of v as a string. Covers
+// primitives directly; for everything else we strip the package prefix
+// off Go's %T formatting so user classes render as plain "Point" rather
+// than "main.Point". Pointer types and slices/maps map to "list"/"dict"
+// like CPython's repr-style names.
+const helperGopyType = `type __Type struct {
+	Name  string
+	Qname string
+}
+
+func (t *__Type) String() string {
+	if t.Qname != "" {
+		return "<class '" + t.Qname + "'>"
+	}
+	return "<class '" + t.Name + "'>"
+}
+
+func __gopy_type(v any) *__Type {
+	switch v.(type) {
+	case nil:
+		return &__Type{Name: "NoneType"}
+	case bool:
+		return &__Type{Name: "bool"}
+	case int, int32, int64:
+		return &__Type{Name: "int"}
+	case float32, float64:
+		return &__Type{Name: "float"}
+	case string:
+		return &__Type{Name: "str"}
+	}
+	s := fmt.Sprintf("%T", v)
+	if len(s) >= 2 && s[0] == '[' && s[1] == ']' {
+		return &__Type{Name: "list"}
+	}
+	if len(s) >= 4 && s[:4] == "map[" {
+		return &__Type{Name: "dict"}
+	}
+	if len(s) >= 1 && s[0] == '*' {
+		s = s[1:]
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' {
+			short := s[i+1:]
+			return &__Type{Name: short, Qname: "__main__." + short}
+		}
+	}
+	return &__Type{Name: s}
 }`
 
 // builtinNext receives the next value off a generator's channel. Bare
@@ -1543,6 +1592,8 @@ func (g *gen) expr(e ir.Expr) error {
 			if x.Op == "-" {
 				return g.emitMethodOp(x.L, "Sub", x.R)
 			}
+		case lt == "__Path" && x.Op == "/":
+			return g.emitMethodOp(x.L, "Join", x.R)
 		}
 		op := x.Op
 		if op == "//" {
@@ -1607,6 +1658,19 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.MethodCall:
 		return g.methodCall(x)
 	case *ir.Attribute:
+		// `type(x).__name__` in CPython yields the class name as a str.
+		// __gopy_type(...) returns a *__Type with .Name = the class name.
+		if x.Name == "__name__" {
+			if call, ok := x.Recv.(*ir.Call); ok {
+				if n, ok := call.Func.(*ir.Name); ok && n.N == "type" {
+					if err := g.expr(x.Recv); err != nil {
+						return err
+					}
+					g.writef(".Name")
+					return nil
+				}
+			}
+		}
 		// Enum member access: `Color.RED` → `ColorRED`.
 		if n, ok := x.Recv.(*ir.Name); ok {
 			if cls, ok := g.classes[n.N]; ok && cls.IsEnum {
@@ -1641,6 +1705,15 @@ func (g *gen) expr(e ir.Expr) error {
 						return err
 					}
 					g.writef(".%s", info.GoName)
+					return nil
+				}
+			}
+			if attrs, ok := taggedPropAttrs[tag]; ok {
+				if info, ok := attrs[x.Name]; ok {
+					if err := g.expr(x.Recv); err != nil {
+						return err
+					}
+					g.writef(".%s()", info.GoName)
 					return nil
 				}
 			}
@@ -2279,6 +2352,8 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinReduce(c, "max")
 		case "set", "frozenset":
 			return g.builtinSet(c)
+		case "type":
+			return g.builtinType(c)
 		}
 	}
 	// User-defined free function: resolve kwargs/defaults if any.
@@ -2505,6 +2580,25 @@ var taggedMethodRename = map[string]map[string]string{
 		"pop":        "Pop",
 		"popleft":    "Popleft",
 	},
+	"__Pattern": {
+		"match":   "Match",
+		"search":  "Search",
+		"findall": "Findall",
+		"sub":     "Sub",
+	},
+}
+
+// taggedMethodRetTag tracks the tag of a tagged-method call's return
+// value so chained dispatch (e.g. `re.compile(p).match(s).group()`) keeps
+// resolving through exprTag.
+var taggedMethodRetTag = map[string]map[string]string{
+	"__Pattern": {
+		"match":  "__Match",
+		"search": "__Match",
+	},
+	"__Datetime": {
+		"__add__": "__Datetime",
+	},
 }
 
 // taggedAttrInfo describes one tagged-value field: the Go field name to
@@ -2513,6 +2607,16 @@ var taggedMethodRename = map[string]map[string]string{
 type taggedAttrInfo struct {
 	GoName string
 	Ty     *ir.Type
+}
+
+// taggedPropAttrs is the property-style equivalent of taggedAttrs: an
+// attribute access on the tagged receiver emits a *method* call rather
+// than a field load. Maps tag → python-name → {GoName, Ty}.
+var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
+	"__Path": {
+		"name":   {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
+		"parent": {GoName: "Parent", Ty: nil},
+	},
 }
 
 var taggedAttrs = map[string]map[string]taggedAttrInfo{
@@ -3915,6 +4019,25 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
+	return nil
+}
+
+// builtinType emits `__gopy_type(x)` which returns the Python class name
+// of x as a string. Mirrors `type(x).__name__` for ordinary primitives and
+// user classes; accessing `.__name__` on the result is a no-op (see the
+// Attribute codegen). Full class-handle comparison (`type(x) is int`) is
+// not supported.
+func (g *gen) builtinType(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("type() takes exactly 1 positional argument")
+	}
+	g.addImport("fmt")
+	g.helpers["__gopy_type"] = helperGopyType
+	g.writef("__gopy_type(")
+	if err := g.boxedExpr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")")
 	return nil
 }
 
@@ -5438,8 +5561,33 @@ func (g *gen) exprTag(e ir.Expr) string {
 	switch x := e.(type) {
 	case *ir.Name:
 		return g.varTypes[x.N]
-	case *ir.Call, *ir.MethodCall:
-		return g.stdlibCallRetTag(e.(ir.Expr))
+	case *ir.MethodCall:
+		if recvTag := g.exprTag(x.Recv); recvTag != "" {
+			if rets, ok := taggedMethodRetTag[recvTag]; ok {
+				if tag, ok := rets[x.Method]; ok {
+					return tag
+				}
+			}
+		}
+		return g.stdlibCallRetTag(e)
+	case *ir.Call:
+		_ = x
+		return g.stdlibCallRetTag(e)
+	case *ir.BinOp:
+		// Path / str / str / ... chains stay Path-tagged so the next /
+		// operator dispatches through emitMethodOp again.
+		if x.Op == "/" && g.exprTag(x.L) == "__Path" {
+			return "__Path"
+		}
+	case *ir.Attribute:
+		if recvTag := g.exprTag(x.Recv); recvTag != "" {
+			if attrs, ok := taggedPropAttrs[recvTag]; ok {
+				if info, ok := attrs[x.Name]; ok && info.Ty == nil {
+					// Untyped prop = same tag as receiver (e.g. Path.parent → Path).
+					return recvTag
+				}
+			}
+		}
 	}
 	return ""
 }
