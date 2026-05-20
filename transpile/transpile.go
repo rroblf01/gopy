@@ -678,6 +678,20 @@ func (g *gen) stmt(s ir.Stmt) error {
 					return nil
 				}
 			}
+			// `d |= other` (Python 3.9+ dict merge) — rewrite as a key-by-key
+			// copy, since Go has no `|` over maps.
+			if bin, ok := x.Value.(*ir.BinOp); ok && bin.Op == "|" {
+				lt, rt := bin.L.TypeOf(), bin.R.TypeOf()
+				if lt != nil && rt != nil && lt.Kind == ir.TyDict && rt.Kind == ir.TyDict {
+					g.writeIndent()
+					g.writef("for __k, __v := range ")
+					if err := g.expr(bin.R); err != nil {
+						return err
+					}
+					g.writef(" { %s[__k] = __v }\n", x.Target)
+					return nil
+				}
+			}
 		}
 		// Track stdlib-call return tags so later method dispatch and
 		// truthy checks see the right type. We do this regardless of
@@ -2685,6 +2699,9 @@ var taggedMethodRename = map[string]map[string]string{
 		"is_dir":     "IsDir",
 		"read_text":  "ReadText",
 		"write_text": "WriteText",
+		"iterdir":    "Iterdir",
+		"mkdir":      "Mkdir",
+		"unlink":     "Unlink",
 	},
 	"__Datetime": {
 		"year":      "Year",
@@ -2694,6 +2711,7 @@ var taggedMethodRename = map[string]map[string]string{
 		"minute":    "Minute",
 		"second":    "Second",
 		"isoformat": "Isoformat",
+		"strftime":  "Strftime",
 	},
 	"__Hasher": {
 		"hexdigest": "Hexdigest",
@@ -2712,6 +2730,7 @@ var taggedMethodRename = map[string]map[string]string{
 	},
 	"__Date": {
 		"isoformat": "Isoformat",
+		"strftime":  "Strftime",
 	},
 	"__Time": {
 		"isoformat": "Isoformat",
@@ -2746,6 +2765,8 @@ var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 	"__Path": {
 		"name":   {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
 		"parent": {GoName: "Parent", Ty: nil},
+		"suffix": {GoName: "Suffix", Ty: &ir.Type{Kind: ir.TyStr}},
+		"stem":   {GoName: "Stem", Ty: &ir.Type{Kind: ir.TyStr}},
 	},
 	"__Date": {
 		"year":  {GoName: "Year", Ty: &ir.Type{Kind: ir.TyInt}},
@@ -2753,6 +2774,14 @@ var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 		"day":   {GoName: "Day", Ty: &ir.Type{Kind: ir.TyInt}},
 	},
 	"__Time": {
+		"hour":   {GoName: "Hour", Ty: &ir.Type{Kind: ir.TyInt}},
+		"minute": {GoName: "Minute", Ty: &ir.Type{Kind: ir.TyInt}},
+		"second": {GoName: "Second", Ty: &ir.Type{Kind: ir.TyInt}},
+	},
+	"__Datetime": {
+		"year":   {GoName: "Year", Ty: &ir.Type{Kind: ir.TyInt}},
+		"month":  {GoName: "Month", Ty: &ir.Type{Kind: ir.TyInt}},
+		"day":    {GoName: "Day", Ty: &ir.Type{Kind: ir.TyInt}},
 		"hour":   {GoName: "Hour", Ty: &ir.Type{Kind: ir.TyInt}},
 		"minute": {GoName: "Minute", Ty: &ir.Type{Kind: ir.TyInt}},
 		"second": {GoName: "Second", Ty: &ir.Type{Kind: ir.TyInt}},

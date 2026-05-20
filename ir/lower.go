@@ -1657,6 +1657,16 @@ func lowerBinOpKind(s string) (string, error) {
 		return "//", nil
 	case "Mod":
 		return "%", nil
+	case "BitOr":
+		return "|", nil
+	case "BitAnd":
+		return "&", nil
+	case "BitXor":
+		return "^", nil
+	case "LShift":
+		return "<<", nil
+	case "RShift":
+		return ">>", nil
 	}
 	return "", fmt.Errorf("unsupported BinOp %q", s)
 }

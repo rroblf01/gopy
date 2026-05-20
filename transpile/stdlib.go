@@ -213,7 +213,7 @@ var stdlibModules = map[string]stdlibModule{
 	"datetime": {
 		Funcs: map[string]stdlibFunc{
 			"timedelta": {GoFunc: "__gopy_timedelta_new", GoImport: "time", Helper: helperTimedeltaNew, RetTag: "__Timedelta", ExtraHelpers: map[string]string{"__Timedelta": helperTimedeltaType}, HelperImports: []string{"fmt"}},
-			"date":      {GoFunc: "__gopy_date_new", GoImport: "fmt", Helper: helperDateNew, RetTag: "__Date", ExtraHelpers: map[string]string{"__Date": helperDateType}},
+			"date":      {GoFunc: "__gopy_date_new", GoImport: "fmt", Helper: helperDateNew, RetTag: "__Date", ExtraHelpers: map[string]string{"__Date": helperDateType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"time", "strings"}},
 			"time":      {GoFunc: "__gopy_time_new", GoImport: "fmt", Helper: helperTimeNew, RetTag: "__Time", ExtraHelpers: map[string]string{"__Time": helperTimeType}},
 		},
 		Subs: map[string]stdlibModule{
@@ -222,7 +222,8 @@ var stdlibModules = map[string]stdlibModule{
 					// __Datetime methods reference __Timedelta (for Add/Sub),
 					// so we always emit both types whenever datetime.now() is
 					// used; otherwise Go would error on the undefined type.
-					"now": {GoFunc: "__gopy_datetime_now", GoImport: "time", Helper: helperDatetimeNow, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType}, HelperImports: []string{"fmt"}},
+					"now":      {GoFunc: "__gopy_datetime_now", GoImport: "time", Helper: helperDatetimeNow, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
+					"strptime": {GoFunc: "__gopy_datetime_strptime", GoImport: "time", Helper: helperDatetimeStrptime, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat}, HelperImports: []string{"fmt", "strings"}},
 				},
 			},
 		},
@@ -779,7 +780,71 @@ func (p *__Path) WriteText(s string) {
 	}
 }
 
-func (p *__Path) String() string { return p.p }`
+func (p *__Path) String() string { return p.p }
+
+func (p *__Path) Iterdir() []*__Path {
+	entries, err := os.ReadDir(p.p)
+	if err != nil {
+		panic(err)
+	}
+	out := make([]*__Path, 0, len(entries))
+	for _, e := range entries {
+		child := p.p
+		if len(child) > 0 && child[len(child)-1] != '/' {
+			child += "/"
+		}
+		child += e.Name()
+		out = append(out, &__Path{p: child})
+	}
+	return out
+}
+
+func (p *__Path) Mkdir(args ...bool) {
+	parents, exist_ok := false, false
+	if len(args) > 0 {
+		parents = args[0]
+	}
+	if len(args) > 1 {
+		exist_ok = args[1]
+	}
+	var err error
+	if parents {
+		err = os.MkdirAll(p.p, 0o755)
+	} else {
+		err = os.Mkdir(p.p, 0o755)
+	}
+	if err != nil && !exist_ok {
+		panic(err)
+	}
+}
+
+func (p *__Path) Unlink() {
+	if err := os.Remove(p.p); err != nil {
+		panic(err)
+	}
+}
+
+func (p *__Path) Suffix() string {
+	for i := len(p.p) - 1; i >= 0; i-- {
+		if p.p[i] == '/' {
+			return ""
+		}
+		if p.p[i] == '.' {
+			return p.p[i:]
+		}
+	}
+	return ""
+}
+
+func (p *__Path) Stem() string {
+	name := p.Name()
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '.' {
+			return name[:i]
+		}
+	}
+	return name
+}`
 
 const helperPathNew = `func __gopy_path_new(s string) *__Path { return &__Path{p: s} }`
 
@@ -976,11 +1041,82 @@ func (d *__Datetime) Second() int64 { return int64(d.t.Second()) }
 
 func (d *__Datetime) Isoformat() string {
 	return d.t.Format("2006-01-02T15:04:05.000000")
+}
+
+func (d *__Datetime) Strftime(layout string) string {
+	return __gopy_datetime_strftime(d.t, layout)
 }`
 
 // helperDatetimeNow returns Python's datetime.datetime.now() as a
 // *__Datetime so it can take part in timedelta arithmetic.
 const helperDatetimeNow = `func __gopy_datetime_now() *__Datetime { return &__Datetime{t: time.Now()} }`
+
+// helperPyTimeFormat translates a Python strftime/strptime layout to the
+// equivalent Go reference-time layout. Subset covers the codes most
+// fixtures lean on: Y/m/d/H/M/S/y/B/b/A/a/p/j.
+const helperPyTimeFormat = `func __gopy_py_time_format(s string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] != '%' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		c := s[i+1]
+		switch c {
+		case 'Y':
+			b.WriteString("2006")
+		case 'y':
+			b.WriteString("06")
+		case 'm':
+			b.WriteString("01")
+		case 'd':
+			b.WriteString("02")
+		case 'H':
+			b.WriteString("15")
+		case 'I':
+			b.WriteString("03")
+		case 'M':
+			b.WriteString("04")
+		case 'S':
+			b.WriteString("05")
+		case 'B':
+			b.WriteString("January")
+		case 'b':
+			b.WriteString("Jan")
+		case 'A':
+			b.WriteString("Monday")
+		case 'a':
+			b.WriteString("Mon")
+		case 'p':
+			b.WriteString("PM")
+		case 'j':
+			b.WriteString("002")
+		case 'z':
+			b.WriteString("-0700")
+		case '%':
+			b.WriteByte('%')
+		default:
+			b.WriteByte('%')
+			b.WriteByte(c)
+		}
+		i += 2
+	}
+	return b.String()
+}`
+
+const helperDatetimeStrftime = `func __gopy_datetime_strftime(t time.Time, layout string) string {
+	return t.Format(__gopy_py_time_format(layout))
+}`
+
+const helperDatetimeStrptime = `func __gopy_datetime_strptime(s, layout string) *__Datetime {
+	t, err := time.Parse(__gopy_py_time_format(layout), s)
+	if err != nil {
+		panic(err)
+	}
+	return &__Datetime{t: t}
+}`
 
 // helperDateType mirrors Python's datetime.date — year/month/day and an
 // isoformat that prints YYYY-MM-DD.
@@ -998,7 +1134,12 @@ func (d *__Date) Isoformat() string { return d.String() }
 
 func (d *__Date) Year() int64  { return d.Y }
 func (d *__Date) Month() int64 { return d.M }
-func (d *__Date) Day() int64   { return d.D }`
+func (d *__Date) Day() int64   { return d.D }
+
+func (d *__Date) Strftime(layout string) string {
+	t := time.Date(int(d.Y), time.Month(int(d.M)), int(d.D), 0, 0, 0, 0, time.UTC)
+	return __gopy_datetime_strftime(t, layout)
+}`
 
 const helperDateNew = `func __gopy_date_new(y, m, d int64) *__Date {
 	return &__Date{Y: y, M: m, D: d}
