@@ -47,10 +47,15 @@ var stdlibModules = map[string]stdlibModule{
 					"basename": {GoFunc: "filepath.Base", GoImport: "path/filepath", RetKind: "str"},
 					"dirname":  {GoFunc: "filepath.Dir", GoImport: "path/filepath", RetKind: "str"},
 					"splitext": {GoFunc: "__gopy_path_splitext", GoImport: "path/filepath", Helper: helperPathSplitext},
-					"abspath":  {GoFunc: "__gopy_path_abspath", GoImport: "path/filepath", Helper: helperPathAbspath, RetKind: "str"},
-					"split":    {GoFunc: "__gopy_path_split", GoImport: "path/filepath", Helper: helperPathSplit},
-					"relpath":  {GoFunc: "__gopy_path_relpath", GoImport: "path/filepath", Helper: helperPathRelpath, RetKind: "str"},
-					"getsize":  {GoFunc: "__gopy_path_getsize", GoImport: "os", Helper: helperPathGetsize, RetKind: "int"},
+					"abspath":      {GoFunc: "__gopy_path_abspath", GoImport: "path/filepath", Helper: helperPathAbspath, RetKind: "str"},
+					"split":        {GoFunc: "__gopy_path_split", GoImport: "path/filepath", Helper: helperPathSplit},
+					"relpath":      {GoFunc: "__gopy_path_relpath", GoImport: "path/filepath", Helper: helperPathRelpath, RetKind: "str"},
+					"getsize":      {GoFunc: "__gopy_path_getsize", GoImport: "os", Helper: helperPathGetsize, RetKind: "int"},
+					"normpath":     {GoFunc: "filepath.Clean", GoImport: "path/filepath", RetKind: "str"},
+					"expanduser":   {GoFunc: "__gopy_path_expanduser", GoImport: "os", Helper: helperPathExpanduser, RetKind: "str"},
+					"expandvars":   {GoFunc: "os.ExpandEnv", GoImport: "os", RetKind: "str"},
+					"commonprefix": {GoFunc: "__gopy_path_commonprefix", Helper: helperPathCommonprefix, RetKind: "str"},
+					"samefile":     {GoFunc: "__gopy_path_samefile", GoImport: "os", Helper: helperPathSamefile, RetKind: "bool"},
 				},
 			},
 		},
@@ -216,6 +221,19 @@ var stdlibModules = map[string]stdlibModule{
 			"glob": {GoFunc: "__gopy_glob", GoImport: "path/filepath", Helper: helperGlob},
 		},
 	},
+	"calendar": {
+		Attrs: map[string]stdlibAttr{
+			"month_name": {GoExpr: `[]string{"", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}`},
+			"day_name":   {GoExpr: `[]string{"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}`},
+			"month_abbr": {GoExpr: `[]string{"", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}`},
+			"day_abbr":   {GoExpr: `[]string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}`},
+		},
+		Funcs: map[string]stdlibFunc{
+			"isleap":     {GoFunc: "__gopy_cal_isleap", Helper: helperCalIsleap, RetKind: "bool"},
+			"monthrange": {GoFunc: "__gopy_cal_monthrange", GoImport: "time", Helper: helperCalMonthrange},
+			"weekday":    {GoFunc: "__gopy_cal_weekday", GoImport: "time", Helper: helperCalWeekday, RetKind: "int"},
+		},
+	},
 	"socket": {
 		Funcs: map[string]stdlibFunc{
 			"gethostname": {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
@@ -358,9 +376,17 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"timedelta": {GoFunc: "__gopy_timedelta_new", GoImport: "time", Helper: helperTimedeltaNew, RetTag: "__Timedelta", ExtraHelpers: map[string]string{"__Timedelta": helperTimedeltaType}, HelperImports: []string{"fmt"}},
 			"date":      {GoFunc: "__gopy_date_new", GoImport: "fmt", Helper: helperDateNew, RetTag: "__Date", ExtraHelpers: map[string]string{"__Date": helperDateType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"time", "strings"}},
+			// Subs entries below provide date.today / date.fromisoformat
+			// as classmethods.
 			"time":      {GoFunc: "__gopy_time_new", GoImport: "fmt", Helper: helperTimeNew, RetTag: "__Time", ExtraHelpers: map[string]string{"__Time": helperTimeType}},
 		},
 		Subs: map[string]stdlibModule{
+			"date": {
+				Funcs: map[string]stdlibFunc{
+					"today":         {GoFunc: "__gopy_date_today", GoImport: "time", Helper: helperDateToday, RetTag: "__Date", ExtraHelpers: map[string]string{"__Date": helperDateType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"time", "strings", "fmt"}},
+					"fromisoformat": {GoFunc: "__gopy_date_fromiso", GoImport: "time", Helper: helperDateFromIso, RetTag: "__Date", ExtraHelpers: map[string]string{"__Date": helperDateType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"time", "strings", "fmt"}},
+				},
+			},
 			"datetime": {
 				Funcs: map[string]stdlibFunc{
 					// __Datetime methods reference __Timedelta (for Add/Sub),
@@ -1116,6 +1142,26 @@ const helperSocketHostname = `func __gopy_socket_hostname() string {
 		return ""
 	}
 	return h
+}`
+
+const helperCalIsleap = `func __gopy_cal_isleap(y int64) bool {
+	return (y%4 == 0 && y%100 != 0) || y%400 == 0
+}`
+
+const helperCalMonthrange = `func __gopy_cal_monthrange(year, month int64) []int64 {
+	first := time.Date(int(year), time.Month(int(month)), 1, 0, 0, 0, 0, time.UTC)
+	startWeekday := int64(first.Weekday())
+	// Python: Monday=0..Sunday=6. Go: Sunday=0..Saturday=6.
+	startWeekday = (startWeekday + 6) % 7
+	next := first.AddDate(0, 1, 0)
+	days := int64(next.Sub(first) / (24 * time.Hour))
+	return []int64{startWeekday, days}
+}`
+
+const helperCalWeekday = `func __gopy_cal_weekday(year, month, day int64) int64 {
+	t := time.Date(int(year), time.Month(int(month)), int(day), 0, 0, 0, 0, time.UTC)
+	w := int64(t.Weekday())
+	return (w + 6) % 7
 }`
 
 const helperGlob = `func __gopy_glob(pattern string) []string {
@@ -2042,6 +2088,50 @@ const helperPathGetsize = `func __gopy_path_getsize(p string) int64 {
 	return i.Size()
 }`
 
+const helperPathExpanduser = `func __gopy_path_expanduser(p string) string {
+	if len(p) > 0 && p[0] == '~' {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return home + p[1:]
+		}
+	}
+	return p
+}`
+
+// helperPathCommonprefix returns the longest string that is a prefix of
+// all paths. Like Python, this works on the raw character sequence (it
+// can return non-existent path components).
+const helperPathCommonprefix = `func __gopy_path_commonprefix(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	pref := paths[0]
+	for _, p := range paths[1:] {
+		n := len(pref)
+		if len(p) < n {
+			n = len(p)
+		}
+		i := 0
+		for i < n && pref[i] == p[i] {
+			i++
+		}
+		pref = pref[:i]
+		if pref == "" {
+			break
+		}
+	}
+	return pref
+}`
+
+const helperPathSamefile = `func __gopy_path_samefile(a, b string) bool {
+	ai, err1 := os.Stat(a)
+	bi, err2 := os.Stat(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
+}`
+
 // helperTimedeltaType mirrors Python's str(timedelta(days=...)) output
 // so cross-runtime fixtures can print the value directly. Supports
 // only the positional-days constructor in F6-fix; richer kwargs land
@@ -2268,10 +2358,38 @@ func (d *__Date) Day() int64   { return d.D }
 func (d *__Date) Strftime(layout string) string {
 	t := time.Date(int(d.Y), time.Month(int(d.M)), int(d.D), 0, 0, 0, 0, time.UTC)
 	return __gopy_datetime_strftime(t, layout)
+}
+
+func (d *__Date) Weekday() int64 {
+	t := time.Date(int(d.Y), time.Month(int(d.M)), int(d.D), 0, 0, 0, 0, time.UTC)
+	w := int(t.Weekday())
+	return int64((w + 6) % 7)
+}
+
+func (d *__Date) Isoweekday() int64 {
+	t := time.Date(int(d.Y), time.Month(int(d.M)), int(d.D), 0, 0, 0, 0, time.UTC)
+	w := int(t.Weekday())
+	if w == 0 {
+		return 7
+	}
+	return int64(w)
 }`
 
 const helperDateNew = `func __gopy_date_new(y, m, d int64) *__Date {
 	return &__Date{Y: y, M: m, D: d}
+}`
+
+const helperDateToday = `func __gopy_date_today() *__Date {
+	now := time.Now()
+	return &__Date{Y: int64(now.Year()), M: int64(now.Month()), D: int64(now.Day())}
+}`
+
+const helperDateFromIso = `func __gopy_date_fromiso(s string) *__Date {
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		panic(NewException("ValueError: Invalid isoformat string: " + s))
+	}
+	return &__Date{Y: int64(t.Year()), M: int64(t.Month()), D: int64(t.Day())}
 }`
 
 // helperTimeType mirrors Python's datetime.time — hour/minute/second

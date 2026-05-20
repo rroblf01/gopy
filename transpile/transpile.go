@@ -2969,8 +2969,10 @@ var taggedMethodRename = map[string]map[string]string{
 		"sub":     "Sub",
 	},
 	"__Date": {
-		"isoformat": "Isoformat",
-		"strftime":  "Strftime",
+		"isoformat":  "Isoformat",
+		"strftime":   "Strftime",
+		"weekday":    "Weekday",
+		"isoweekday": "Isoweekday",
 	},
 	"__Time": {
 		"isoformat": "Isoformat",
