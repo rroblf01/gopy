@@ -248,6 +248,7 @@ var stdlibModules = map[string]stdlibModule{
 			"asdict":  {GoFunc: "__gopy_asdict_unused"},
 			"astuple": {GoFunc: "__gopy_astuple_unused"},
 			"replace": {GoFunc: "__gopy_replace_unused"},
+			"fields":  {GoFunc: "__gopy_fields_unused"},
 		},
 	},
 	"hmac": {

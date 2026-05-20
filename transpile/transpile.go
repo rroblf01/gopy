@@ -2385,6 +2385,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinAstuple(c)
 			case "dataclasses.replace":
 				return g.builtinReplace(c)
+			case "dataclasses.fields":
+				return g.builtinFields(c)
 			case "random.choice":
 				return g.builtinRandomChoice(c)
 			case "random.shuffle":
@@ -3354,6 +3356,32 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 				return err
 			}
 			g.writef(" { __out = append(__out, v) }\n")
+			g.writeIndent()
+			g.writef("return __out\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		case "items":
+			// Standalone .items() returns a slice of {Key, Value} pairs.
+			// For-loop tuple-unpack form (`for k, v in d.items()`) is
+			// handled earlier via Kind="dict" before we ever reach this
+			// branch.
+			kGo, vGo := g.goType(rt.Key), g.goType(rt.Val)
+			g.writef("func() []struct{ Key %s; Value %s } {\n", kGo, vGo)
+			g.indent++
+			g.writeIndent()
+			g.writef("__out := make([]struct{ Key %s; Value %s }, 0, len(", kGo, vGo)
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("))\n")
+			g.writeIndent()
+			g.writef("for __k, __v := range ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(" { __out = append(__out, struct{ Key %s; Value %s }{Key: __k, Value: __v}) }\n", kGo, vGo)
 			g.writeIndent()
 			g.writef("return __out\n")
 			g.indent--
@@ -5215,6 +5243,38 @@ func (g *gen) builtinRandomSample(c *ir.Call) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
+	return nil
+}
+
+// builtinFields emits a `[]string` of field names declared on the class.
+// CPython returns a tuple of Field objects with `.name` attribute; gopy
+// returns the names directly so iteration patterns like `for f in fields(C)`
+// stay simple. Accepts a class name or an instance.
+func (g *gen) builtinFields(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("dataclasses.fields() takes 1 positional argument")
+	}
+	var cls *ir.Class
+	if n, ok := c.Args[0].(*ir.Name); ok {
+		if k, isClass := g.classes[n.N]; isClass {
+			cls = k
+		}
+	}
+	if cls == nil {
+		k, err := g.dataclassFor(c.Args[0])
+		if err != nil {
+			return err
+		}
+		cls = k
+	}
+	g.writef("[]string{")
+	for i, f := range cls.Fields {
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("%q", f.Name)
+	}
+	g.writef("}")
 	return nil
 }
 
