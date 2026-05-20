@@ -379,7 +379,9 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"csv": {
 		Funcs: map[string]stdlibFunc{
-			"reader": {GoFunc: "__gopy_csv_reader", GoImport: "encoding/csv", Helper: helperCSVReader, HelperImports: []string{"strings"}},
+			"reader":     {GoFunc: "__gopy_csv_reader", GoImport: "encoding/csv", Helper: helperCSVReader, HelperImports: []string{"strings"}},
+			"writer":     {GoFunc: "__gopy_csv_writer_new", GoImport: "encoding/csv", Helper: helperCSVWriterNew, RetTag: "__CSVWriter", ExtraHelpers: map[string]string{"__CSVWriter": helperCSVWriterType}},
+			"DictReader": {GoFunc: "__gopy_csv_dictreader", GoImport: "encoding/csv", Helper: helperCSVDictReader, HelperImports: []string{"strings"}},
 		},
 	},
 	"pathlib": {
@@ -788,6 +790,57 @@ const helperCSVReader = `func __gopy_csv_reader(lines []string) [][]string {
 		panic(err)
 	}
 	return rows
+}`
+
+// helperCSVWriterType bridges Python's csv.writer to Go's encoding/csv.
+// Wraps a *csv.Writer bound to the destination io.Writer so writerow /
+// writerows can stream rows like CPython does.
+const helperCSVWriterType = `type __CSVWriter struct{ w *csv.Writer }
+
+func (w *__CSVWriter) Writerow(row []string) {
+	if err := w.w.Write(row); err != nil {
+		panic(err)
+	}
+	w.w.Flush()
+}
+
+func (w *__CSVWriter) Writerows(rows [][]string) {
+	for _, r := range rows {
+		if err := w.w.Write(r); err != nil {
+			panic(err)
+		}
+	}
+	w.w.Flush()
+}`
+
+const helperCSVWriterNew = `func __gopy_csv_writer_new(fh interface{ Write([]byte) (int, error) }) *__CSVWriter {
+	return &__CSVWriter{w: csv.NewWriter(fh)}
+}`
+
+// helperCSVDictReader returns []map[string]string for each data row using
+// the first row as column headers. Mirrors csv.DictReader's most common
+// shape.
+const helperCSVDictReader = `func __gopy_csv_dictreader(lines []string) []map[string]string {
+	r := csv.NewReader(strings.NewReader(strings.Join(lines, "\n")))
+	rows, err := r.ReadAll()
+	if err != nil {
+		panic(err)
+	}
+	if len(rows) == 0 {
+		return []map[string]string{}
+	}
+	header := rows[0]
+	out := make([]map[string]string, 0, len(rows)-1)
+	for _, r := range rows[1:] {
+		m := map[string]string{}
+		for i, h := range header {
+			if i < len(r) {
+				m[h] = r[i]
+			}
+		}
+		out = append(out, m)
+	}
+	return out
 }`
 
 // helperCSVWriter renders a list of rows to a single CSV-formatted string.

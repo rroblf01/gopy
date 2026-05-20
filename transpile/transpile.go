@@ -3076,6 +3076,10 @@ var taggedMethodRename = map[string]map[string]string{
 		"error":    "Error",
 		"critical": "Critical",
 	},
+	"__CSVWriter": {
+		"writerow":  "Writerow",
+		"writerows": "Writerows",
+	},
 	"__Deque": {
 		"append":     "Append",
 		"appendleft": "Appendleft",
