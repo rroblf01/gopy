@@ -382,6 +382,12 @@ var stdlibModules = map[string]stdlibModule{
 			"reader":     {GoFunc: "__gopy_csv_reader", GoImport: "encoding/csv", Helper: helperCSVReader, HelperImports: []string{"strings"}},
 			"writer":     {GoFunc: "__gopy_csv_writer_new", GoImport: "encoding/csv", Helper: helperCSVWriterNew, RetTag: "__CSVWriter", ExtraHelpers: map[string]string{"__CSVWriter": helperCSVWriterType}},
 			"DictReader": {GoFunc: "__gopy_csv_dictreader", GoImport: "encoding/csv", Helper: helperCSVDictReader, HelperImports: []string{"strings"}},
+			"DictWriter": {GoFunc: "__gopy_csv_dictwriter_new", GoImport: "encoding/csv", Helper: helperCSVDictWriterNew, RetTag: "__CSVDictWriter", ExtraHelpers: map[string]string{"__CSVDictWriter": helperCSVDictWriterType}},
+		},
+	},
+	"getpass": {
+		Funcs: map[string]stdlibFunc{
+			"getuser": {GoFunc: "__gopy_getpass_getuser", GoImport: "os", Helper: helperGetpassGetuser, RetKind: "str"},
 		},
 	},
 	"pathlib": {
@@ -414,6 +420,7 @@ var stdlibModules = map[string]stdlibModule{
 					"fromtimestamp":  {GoFunc: "__gopy_datetime_fromts", GoImport: "time", Helper: helperDatetimeFromTs, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
 					"fromisoformat":  {GoFunc: "__gopy_datetime_fromiso", GoImport: "time", Helper: helperDatetimeFromIso, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
 					"utcnow":         {GoFunc: "__gopy_datetime_utcnow", GoImport: "time", Helper: helperDatetimeUtcnow, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
+					"combine":        {GoFunc: "__gopy_datetime_combine", GoImport: "time", Helper: helperDatetimeCombine, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__Date": helperDateType, "__Time": helperTimeType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
 				},
 			},
 		},
@@ -815,6 +822,51 @@ func (w *__CSVWriter) Writerows(rows [][]string) {
 
 const helperCSVWriterNew = `func __gopy_csv_writer_new(fh interface{ Write([]byte) (int, error) }) *__CSVWriter {
 	return &__CSVWriter{w: csv.NewWriter(fh)}
+}`
+
+// helperCSVDictWriterType bridges csv.DictWriter. Caller supplies the
+// fieldnames list at construction; writerow accepts a map and emits the
+// columns in fieldname order.
+const helperCSVDictWriterType = `type __CSVDictWriter struct {
+	w      *csv.Writer
+	fields []string
+}
+
+func (w *__CSVDictWriter) Writeheader() {
+	if err := w.w.Write(w.fields); err != nil {
+		panic(err)
+	}
+	w.w.Flush()
+}
+
+func (w *__CSVDictWriter) Writerow(row map[string]string) {
+	rec := make([]string, len(w.fields))
+	for i, f := range w.fields {
+		rec[i] = row[f]
+	}
+	if err := w.w.Write(rec); err != nil {
+		panic(err)
+	}
+	w.w.Flush()
+}
+
+func (w *__CSVDictWriter) Writerows(rows []map[string]string) {
+	for _, r := range rows {
+		w.Writerow(r)
+	}
+}`
+
+const helperCSVDictWriterNew = `func __gopy_csv_dictwriter_new(fh interface{ Write([]byte) (int, error) }, fields []string) *__CSVDictWriter {
+	return &__CSVDictWriter{w: csv.NewWriter(fh), fields: fields}
+}`
+
+const helperGetpassGetuser = `func __gopy_getpass_getuser() string {
+	for _, k := range []string{"LOGNAME", "USER", "USERNAME"} {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
 }`
 
 // helperCSVDictReader returns []map[string]string for each data row using
@@ -2323,6 +2375,10 @@ func (d *__Datetime) Timestamp() float64 {
 // helperDatetimeNow returns Python's datetime.datetime.now() as a
 // *__Datetime so it can take part in timedelta arithmetic.
 const helperDatetimeNow = `func __gopy_datetime_now() *__Datetime { return &__Datetime{t: time.Now()} }`
+
+const helperDatetimeCombine = `func __gopy_datetime_combine(d *__Date, t *__Time) *__Datetime {
+	return &__Datetime{t: time.Date(int(d.Y), time.Month(int(d.M)), int(d.D), int(t.H), int(t.M), int(t.S), 0, time.UTC)}
+}`
 
 const helperDatetimeUtcnow = `func __gopy_datetime_utcnow() *__Datetime { return &__Datetime{t: time.Now().UTC()} }`
 

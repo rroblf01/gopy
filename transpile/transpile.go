@@ -3080,6 +3080,11 @@ var taggedMethodRename = map[string]map[string]string{
 		"writerow":  "Writerow",
 		"writerows": "Writerows",
 	},
+	"__CSVDictWriter": {
+		"writeheader": "Writeheader",
+		"writerow":    "Writerow",
+		"writerows":   "Writerows",
+	},
 	"__Deque": {
 		"append":     "Append",
 		"appendleft": "Appendleft",
