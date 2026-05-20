@@ -3704,9 +3704,53 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			}
 			g.writef("; __out := make([]%s, len(__src)); copy(__out, __src); return __out }()", elemGo)
 			return nil
+		case "pop":
+			if len(m.Args) > 1 {
+				return fmt.Errorf("list.pop() takes 0 or 1 arguments")
+			}
+			elemGo := g.goType(rt.Elem)
+			g.needsException = true
+			g.writef("func() %s {\n", elemGo)
+			g.indent++
+			g.writeIndent()
+			g.writef("__src := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("if len(__src) == 0 { panic(NewException(\"IndexError: pop from empty list\")) }\n")
+			g.writeIndent()
+			g.writef("__i := len(__src) - 1\n")
+			if len(m.Args) == 1 {
+				g.writeIndent()
+				g.writef("__i = int(")
+				if err := g.expr(m.Args[0]); err != nil {
+					return err
+				}
+				g.writef(")\n")
+				g.writeIndent()
+				g.writef("if __i < 0 { __i += len(__src) }\n")
+				g.writeIndent()
+				g.writef("if __i < 0 || __i >= len(__src) { panic(NewException(\"IndexError: pop index out of range\")) }\n")
+			}
+			g.writeIndent()
+			g.writef("__v := __src[__i]\n")
+			g.writeIndent()
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(" = append(__src[:__i], __src[__i+1:]...)\n")
+			g.writeIndent()
+			g.writef("return __v\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
 		case "sort":
 			// Only naive ascending sort. reverse=True flips the comparator.
 			reverse := false
+			var keyLam *ir.Lambda
 			for _, kw := range m.Keywords {
 				if kw.Name == "reverse" {
 					if b, ok := kw.Value.(*ir.BoolLit); ok {
@@ -3715,15 +3759,68 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 						return fmt.Errorf("list.sort(reverse=...): expected literal True/False")
 					}
 				} else if kw.Name == "key" {
-					return fmt.Errorf("list.sort(key=...): not supported, use sorted(xs, key=...) instead")
+					lam, ok := kw.Value.(*ir.Lambda)
+					if !ok {
+						return fmt.Errorf("list.sort(key=...): only inline lambda supported")
+					}
+					if len(lam.Params) != 1 {
+						return fmt.Errorf("list.sort(key=...): lambda must take 1 arg")
+					}
+					keyLam = lam
 				} else {
 					return fmt.Errorf("list.sort(): unknown keyword %q", kw.Name)
 				}
 			}
+			op := "<"
+			if reverse {
+				op = ">"
+			}
+			g.addImport("sort")
+			if keyLam != nil {
+				body, err := ir.LowerLambdaBody(keyLam, []*ir.Type{rt.Elem})
+				if err != nil {
+					return err
+				}
+				g.writef("sort.Slice(")
+				if err := g.expr(m.Recv); err != nil {
+					return err
+				}
+				g.writef(", func(i, j int) bool {\n")
+				g.indent++
+				g.writeIndent()
+				g.writef("%s := ", keyLam.Params[0].Name)
+				if err := g.expr(m.Recv); err != nil {
+					return err
+				}
+				g.writef("[i]\n")
+				g.writeIndent()
+				g.writef("__ki := ")
+				if err := g.expr(body); err != nil {
+					return err
+				}
+				g.writef("\n")
+				g.writeIndent()
+				g.writef("%s = ", keyLam.Params[0].Name)
+				if err := g.expr(m.Recv); err != nil {
+					return err
+				}
+				g.writef("[j]\n")
+				g.writeIndent()
+				g.writef("__kj := ")
+				if err := g.expr(body); err != nil {
+					return err
+				}
+				g.writef("\n")
+				g.writeIndent()
+				g.writef("return __ki %s __kj\n", op)
+				g.indent--
+				g.writeIndent()
+				g.writef("})")
+				return nil
+			}
 			if rt.Elem.Kind != ir.TyInt && rt.Elem.Kind != ir.TyFloat && rt.Elem.Kind != ir.TyStr {
 				return fmt.Errorf("list.sort(): only int/float/str element types supported")
 			}
-			g.addImport("sort")
 			g.writef("sort.Slice(")
 			if err := g.expr(m.Recv); err != nil {
 				return err
@@ -3731,10 +3828,6 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			g.writef(", func(i, j int) bool { return ")
 			if err := g.expr(m.Recv); err != nil {
 				return err
-			}
-			op := "<"
-			if reverse {
-				op = ">"
 			}
 			g.writef("[i] %s ", op)
 			if err := g.expr(m.Recv); err != nil {
