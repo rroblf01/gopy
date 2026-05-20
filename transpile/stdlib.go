@@ -139,6 +139,9 @@ var stdlibModules = map[string]stdlibModule{
 			"punctuation":     {GoExpr: "\"!\\\"#$%&'()*+,-./:;<=>?@[\\\\]^_`{|}~\""},
 			"whitespace":      {GoExpr: `" \t\n\r\f\v"`},
 		},
+		Funcs: map[string]stdlibFunc{
+			"Template": {GoFunc: "__gopy_string_template_new", Helper: helperStringTemplateNew, RetTag: "__Template", ExtraHelpers: map[string]string{"__Template": helperStringTemplateType}, HelperImports: []string{"strings", "fmt"}},
+		},
 	},
 	"collections": {
 		// Counter and defaultdict are handled by per-arg-type builders
@@ -236,7 +239,7 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"pathlib": {
 		Funcs: map[string]stdlibFunc{
-			"Path": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os"}},
+			"Path": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
 		},
 	},
 	"datetime": {
@@ -968,6 +971,103 @@ const helperTextwrapIndent = `func __gopy_textwrap_indent(s, prefix string) stri
 
 // helperTextwrapFill wraps text to width by breaking on spaces. CPython's
 // textwrap is configurable; this shim covers the simple width-only form.
+// helperStringTemplateType is the runtime Template struct used by
+// string.Template(...). Supports $name and ${name} placeholders.
+const helperStringTemplateType = `type __Template struct{ tmpl string }
+
+func (t *__Template) substExpand(mapping any, safe bool) string {
+	get := func(k string) (any, bool) {
+		switch m := mapping.(type) {
+		case map[string]any:
+			v, ok := m[k]
+			return v, ok
+		case map[string]string:
+			v, ok := m[k]
+			return v, ok
+		case map[string]int64:
+			v, ok := m[k]
+			return v, ok
+		case map[string]float64:
+			v, ok := m[k]
+			return v, ok
+		}
+		return nil, false
+	}
+	var b strings.Builder
+	s := t.tmpl
+	i := 0
+	for i < len(s) {
+		if s[i] != '$' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			b.WriteByte('$')
+			i++
+			continue
+		}
+		if s[i+1] == '$' {
+			b.WriteByte('$')
+			i += 2
+			continue
+		}
+		start := i + 1
+		braced := false
+		if s[start] == '{' {
+			braced = true
+			start++
+		}
+		j := start
+		for j < len(s) {
+			c := s[j]
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+				break
+			}
+			j++
+		}
+		name := s[start:j]
+		if name == "" {
+			b.WriteByte('$')
+			i++
+			continue
+		}
+		end := j
+		if braced {
+			if j >= len(s) || s[j] != '}' {
+				if safe {
+					b.WriteString(s[i:j])
+					i = j
+					continue
+				}
+				panic(NewException("ValueError: unclosed ${...} in template"))
+			}
+			end = j + 1
+		}
+		if v, ok := get(name); ok {
+			b.WriteString(fmt.Sprint(v))
+		} else if safe {
+			b.WriteString(s[i:end])
+		} else {
+			panic(NewException("KeyError: " + name))
+		}
+		i = end
+	}
+	return b.String()
+}
+
+func (t *__Template) Substitute(mapping any) string {
+	return t.substExpand(mapping, false)
+}
+
+func (t *__Template) SafeSubstitute(mapping any) string {
+	return t.substExpand(mapping, true)
+}`
+
+const helperStringTemplateNew = `func __gopy_string_template_new(s string) *__Template {
+	return &__Template{tmpl: s}
+}`
+
 const helperTextwrapFill = `func __gopy_textwrap_fill(s string, width int64) string {
 	w := int(width)
 	if w <= 0 {
@@ -1059,6 +1159,22 @@ func (p *__Path) WriteText(s string) {
 }
 
 func (p *__Path) String() string { return p.p }
+
+func (p *__Path) Glob(pattern string) []*__Path {
+	full := p.p
+	if len(full) > 0 && full[len(full)-1] != '/' {
+		full += "/"
+	}
+	matches, err := filepath.Glob(full + pattern)
+	if err != nil {
+		panic(err)
+	}
+	out := make([]*__Path, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, &__Path{p: m})
+	}
+	return out
+}
 
 func (p *__Path) Iterdir() []*__Path {
 	entries, err := os.ReadDir(p.p)

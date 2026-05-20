@@ -999,6 +999,27 @@ const helperGopyHash = `func __gopy_hash(v any) int64 {
 	return int64(h.Sum64())
 }`
 
+const helperGopyHex = `func __gopy_hex(n int64) string {
+	if n < 0 {
+		return fmt.Sprintf("-0x%x", -n)
+	}
+	return fmt.Sprintf("0x%x", n)
+}`
+
+const helperGopyOct = `func __gopy_oct(n int64) string {
+	if n < 0 {
+		return fmt.Sprintf("-0o%o", -n)
+	}
+	return fmt.Sprintf("0o%o", n)
+}`
+
+const helperGopyBin = `func __gopy_bin(n int64) string {
+	if n < 0 {
+		return fmt.Sprintf("-0b%b", -n)
+	}
+	return fmt.Sprintf("0b%b", n)
+}`
+
 // helperGopyType returns the Python class name of v as a string. Covers
 // primitives directly; for everything else we strip the package prefix
 // off Go's %T formatting so user classes render as plain "Point" rather
@@ -2569,6 +2590,12 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinType(c)
 		case "format":
 			return g.builtinFormat(c)
+		case "hex":
+			return g.builtinHex(c)
+		case "oct":
+			return g.builtinOct(c)
+		case "bin":
+			return g.builtinBin(c)
 		}
 	}
 	// User-defined free function: resolve kwargs/defaults if any.
@@ -2780,6 +2807,7 @@ var taggedMethodRename = map[string]map[string]string{
 		"iterdir":    "Iterdir",
 		"mkdir":      "Mkdir",
 		"unlink":     "Unlink",
+		"glob":       "Glob",
 	},
 	"__Datetime": {
 		"year":      "Year",
@@ -2813,6 +2841,10 @@ var taggedMethodRename = map[string]map[string]string{
 	"__Time": {
 		"isoformat": "Isoformat",
 	},
+	"__Template": {
+		"substitute":      "Substitute",
+		"safe_substitute": "SafeSubstitute",
+	},
 }
 
 // taggedMethodRetTag tracks the tag of a tagged-method call's return
@@ -2835,6 +2867,7 @@ var taggedMethodRetTag = map[string]map[string]string{
 var taggedMethodElemTag = map[string]map[string]string{
 	"__Path": {
 		"iterdir": "__Path",
+		"glob":    "__Path",
 	},
 }
 
@@ -4629,6 +4662,51 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
+	return nil
+}
+
+// builtinHex / builtinOct / builtinBin mirror Python's prefixed-string
+// converters for ints. Negative numbers get a leading minus before the
+// prefix (e.g. `-0xff`), matching CPython.
+func (g *gen) builtinHex(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("hex() takes exactly 1 positional argument")
+	}
+	g.helpers["__gopy_hex"] = helperGopyHex
+	g.addImport("fmt")
+	g.writef("__gopy_hex(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")")
+	return nil
+}
+
+func (g *gen) builtinOct(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("oct() takes exactly 1 positional argument")
+	}
+	g.helpers["__gopy_oct"] = helperGopyOct
+	g.addImport("fmt")
+	g.writef("__gopy_oct(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")")
+	return nil
+}
+
+func (g *gen) builtinBin(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("bin() takes exactly 1 positional argument")
+	}
+	g.helpers["__gopy_bin"] = helperGopyBin
+	g.addImport("fmt")
+	g.writef("__gopy_bin(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")")
 	return nil
 }
 
