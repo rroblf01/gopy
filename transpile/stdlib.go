@@ -197,6 +197,31 @@ var stdlibModules = map[string]stdlibModule{
 			"mkstemp":     {GoFunc: "__gopy_tempfile_mkstemp", GoImport: "os", Helper: helperTempfileMkstemp},
 		},
 	},
+	"gzip": {
+		Funcs: map[string]stdlibFunc{
+			"compress":   {GoFunc: "__gopy_gzip_compress", GoImport: "compress/gzip", Helper: helperGzipCompress, HelperImports: []string{"bytes"}, RetKind: "str"},
+			"decompress": {GoFunc: "__gopy_gzip_decompress", GoImport: "compress/gzip", Helper: helperGzipDecompress, HelperImports: []string{"bytes", "io"}, RetKind: "str"},
+		},
+	},
+	"zlib": {
+		Funcs: map[string]stdlibFunc{
+			"compress":   {GoFunc: "__gopy_zlib_compress", GoImport: "compress/zlib", Helper: helperZlibCompress, HelperImports: []string{"bytes"}, RetKind: "str"},
+			"decompress": {GoFunc: "__gopy_zlib_decompress", GoImport: "compress/zlib", Helper: helperZlibDecompress, HelperImports: []string{"bytes", "io"}, RetKind: "str"},
+			"crc32":      {GoFunc: "__gopy_zlib_crc32", GoImport: "hash/crc32", Helper: helperZlibCrc32, RetKind: "int"},
+			"adler32":    {GoFunc: "__gopy_zlib_adler32", GoImport: "hash/adler32", Helper: helperZlibAdler32, RetKind: "int"},
+		},
+	},
+	"glob": {
+		Funcs: map[string]stdlibFunc{
+			"glob": {GoFunc: "__gopy_glob", GoImport: "path/filepath", Helper: helperGlob},
+		},
+	},
+	"socket": {
+		Funcs: map[string]stdlibFunc{
+			"gethostname": {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
+			"getfqdn":     {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
+		},
+	},
 	"hmac": {
 		Funcs: map[string]stdlibFunc{
 			"new":     {GoFunc: "__gopy_hmac_new", GoImport: "crypto/hmac", Helper: helperHmacNew, RetTag: "__Hmac", ExtraHelpers: map[string]string{"__Hmac": helperHmacType}, HelperImports: []string{"crypto/sha1", "crypto/sha256", "crypto/sha512", "crypto/md5", "hash", "encoding/hex"}},
@@ -1026,6 +1051,83 @@ const helperLogWarning = `func __gopy_log_warning(msg string) { fmt.Fprintln(os.
 const helperLogError = `func __gopy_log_error(msg string) { fmt.Fprintln(os.Stderr, "ERROR:root:"+msg) }`
 const helperLogCritical = `func __gopy_log_critical(msg string) { fmt.Fprintln(os.Stderr, "CRITICAL:root:"+msg) }`
 const helperLogBasicConfig = `func __gopy_log_basicConfig() {}`
+
+const helperGzipCompress = `func __gopy_gzip_compress(s string) string {
+	var b bytes.Buffer
+	w := gzip.NewWriter(&b)
+	if _, err := w.Write([]byte(s)); err != nil {
+		panic(err)
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
+	return b.String()
+}`
+
+const helperGzipDecompress = `func __gopy_gzip_decompress(s string) string {
+	r, err := gzip.NewReader(bytes.NewReader([]byte(s)))
+	if err != nil {
+		panic(err)
+	}
+	defer r.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		panic(err)
+	}
+	return string(out)
+}`
+
+const helperZlibCompress = `func __gopy_zlib_compress(s string) string {
+	var b bytes.Buffer
+	w := zlib.NewWriter(&b)
+	if _, err := w.Write([]byte(s)); err != nil {
+		panic(err)
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
+	return b.String()
+}`
+
+const helperZlibDecompress = `func __gopy_zlib_decompress(s string) string {
+	r, err := zlib.NewReader(bytes.NewReader([]byte(s)))
+	if err != nil {
+		panic(err)
+	}
+	defer r.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		panic(err)
+	}
+	return string(out)
+}`
+
+const helperZlibCrc32 = `func __gopy_zlib_crc32(s string) int64 {
+	return int64(crc32.ChecksumIEEE([]byte(s)))
+}`
+
+const helperZlibAdler32 = `func __gopy_zlib_adler32(s string) int64 {
+	return int64(adler32.Checksum([]byte(s)))
+}`
+
+const helperSocketHostname = `func __gopy_socket_hostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+}`
+
+const helperGlob = `func __gopy_glob(pattern string) []string {
+	out, err := filepath.Glob(pattern)
+	if err != nil {
+		return []string{}
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}`
 
 const helperShutilRmtree = `func __gopy_shutil_rmtree(p string) {
 	if err := os.RemoveAll(p); err != nil {
