@@ -2824,6 +2824,12 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinCallable(c)
 		case "ascii":
 			return g.builtinAscii(c)
+		case "vars":
+			return g.builtinVars(c)
+		case "dir":
+			return g.builtinDir(c)
+		case "eval", "exec", "compile":
+			return fmt.Errorf("%s() is not supported by gopy (no runtime Python interpreter)", name.N)
 		}
 	}
 	// User-defined free function: resolve kwargs/defaults if any.
@@ -3062,6 +3068,13 @@ var taggedMethodRename = map[string]map[string]string{
 	"__Hmac": {
 		"hexdigest": "Hexdigest",
 		"update":    "Update",
+	},
+	"__Logger": {
+		"debug":    "Debug",
+		"info":     "Info",
+		"warning":  "Warning",
+		"error":    "Error",
+		"critical": "Critical",
 	},
 	"__Deque": {
 		"append":     "Append",
@@ -4993,6 +5006,79 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
+	return nil
+}
+
+// builtinVars emits `map[string]any{...}` populated from the instance's
+// fields. Same shape as `dataclasses.asdict`, since gopy doesn't have a
+// real __dict__ — the static class registry stands in.
+func (g *gen) builtinVars(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("vars() takes 1 positional argument")
+	}
+	cls, err := g.dataclassFor(c.Args[0])
+	if err != nil {
+		return err
+	}
+	g.writef("func() map[string]any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__obj := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("return map[string]any{\n")
+	g.indent++
+	for _, f := range cls.Fields {
+		g.writeIndent()
+		g.writef("%q: __obj.%s,\n", f.Name, f.Name)
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinDir emits `[]string{...}` listing the instance's field and
+// method names. Order: declared fields first, then declared methods.
+func (g *gen) builtinDir(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("dir() takes 1 positional argument")
+	}
+	var cls *ir.Class
+	if n, ok := c.Args[0].(*ir.Name); ok {
+		if k, isClass := g.classes[n.N]; isClass {
+			cls = k
+		}
+	}
+	if cls == nil {
+		k, err := g.dataclassFor(c.Args[0])
+		if err != nil {
+			return err
+		}
+		cls = k
+	}
+	g.writef("[]string{")
+	first := true
+	emit := func(s string) {
+		if !first {
+			g.writef(", ")
+		}
+		first = false
+		g.writef("%q", s)
+	}
+	for _, f := range cls.Fields {
+		emit(f.Name)
+	}
+	for _, mname := range cls.MethodNames {
+		emit(mname)
+	}
+	g.writef("}")
 	return nil
 }
 

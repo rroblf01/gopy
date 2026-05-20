@@ -284,6 +284,7 @@ var stdlibModules = map[string]stdlibModule{
 			"error":       {GoFunc: "__gopy_log_error", GoImport: "fmt", Helper: helperLogError, HelperImports: []string{"os"}},
 			"critical":    {GoFunc: "__gopy_log_critical", GoImport: "fmt", Helper: helperLogCritical, HelperImports: []string{"os"}},
 			"basicConfig": {GoFunc: "__gopy_log_basicConfig", Helper: helperLogBasicConfig},
+			"getLogger":   {GoFunc: "__gopy_log_getlogger", GoImport: "fmt", Helper: helperLogGetLogger, RetTag: "__Logger", ExtraHelpers: map[string]string{"__Logger": helperLoggerType}, HelperImports: []string{"os"}},
 		},
 	},
 	"heapq": {
@@ -1091,6 +1092,22 @@ const helperLogWarning = `func __gopy_log_warning(msg string) { fmt.Fprintln(os.
 const helperLogError = `func __gopy_log_error(msg string) { fmt.Fprintln(os.Stderr, "ERROR:root:"+msg) }`
 const helperLogCritical = `func __gopy_log_critical(msg string) { fmt.Fprintln(os.Stderr, "CRITICAL:root:"+msg) }`
 const helperLogBasicConfig = `func __gopy_log_basicConfig() {}`
+
+const helperLoggerType = `type __Logger struct{ name string }
+
+func (l *__Logger) Debug(msg string)    { fmt.Fprintln(os.Stderr, "DEBUG:"+l.name+":"+msg) }
+func (l *__Logger) Info(msg string)     { fmt.Fprintln(os.Stderr, "INFO:"+l.name+":"+msg) }
+func (l *__Logger) Warning(msg string)  { fmt.Fprintln(os.Stderr, "WARNING:"+l.name+":"+msg) }
+func (l *__Logger) Error(msg string)    { fmt.Fprintln(os.Stderr, "ERROR:"+l.name+":"+msg) }
+func (l *__Logger) Critical(msg string) { fmt.Fprintln(os.Stderr, "CRITICAL:"+l.name+":"+msg) }`
+
+const helperLogGetLogger = `func __gopy_log_getlogger(args ...string) *__Logger {
+	name := "root"
+	if len(args) > 0 && args[0] != "" {
+		name = args[0]
+	}
+	return &__Logger{name: name}
+}`
 
 const helperGzipCompress = `func __gopy_gzip_compress(s string) string {
 	var b bytes.Buffer
