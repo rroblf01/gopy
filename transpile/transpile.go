@@ -1783,6 +1783,8 @@ func (g *gen) expr(e ir.Expr) error {
 			g.writef("(+")
 		case "not":
 			g.writef("(!")
+		case "~":
+			g.writef("(^")
 		}
 		if err := g.expr(x.X); err != nil {
 			return err
@@ -2112,21 +2114,60 @@ func (g *gen) dictComp(c *ir.DictComp) error {
 func (g *gen) fstring(f *ir.FStr) error {
 	g.addImport("fmt")
 	var fmtBuf strings.Builder
-	var args []ir.Expr
+	type fstrArg struct {
+		expr ir.Expr
+		spec string
+		conv byte
+	}
+	var args []fstrArg
 	for _, p := range f.Parts {
 		if p.Expr != nil {
-			fmtBuf.WriteString("%v")
-			args = append(args, p.Expr)
+			if p.Spec != "" || p.Conv != 0 {
+				// Spec or conversion present — route through the runtime
+				// format spec helper. Placeholder becomes %s since the
+				// helper returns a fully-formatted string.
+				fmtBuf.WriteString("%s")
+			} else {
+				fmtBuf.WriteString("%v")
+			}
+			args = append(args, fstrArg{expr: p.Expr, spec: p.Spec, conv: p.Conv})
 		} else {
-			// Escape literal % inside the format string.
 			fmtBuf.WriteString(strings.ReplaceAll(p.Lit, "%", "%%"))
 		}
 	}
 	g.writef("fmt.Sprintf(%s", strconv.Quote(fmtBuf.String()))
 	for _, a := range args {
 		g.writef(", ")
-		if err := g.expr(a); err != nil {
-			return err
+		if a.spec != "" || a.conv != 0 {
+			// __gopy_fmt_spec is defined alongside __gopy_str_format in the
+			// same helper const, so adding one pulls in both. Helper body
+			// uses strings.Builder / strings.Repeat.
+			g.helpers["__gopy_str_format"] = helperStrFormat
+			g.addImport("strings")
+			g.writef("__gopy_fmt_spec(%s, ", strconv.Quote(a.spec))
+			switch a.conv {
+			case 'r':
+				g.writef("fmt.Sprintf(\"%%#v\", ")
+				if err := g.boxedExpr(a.expr); err != nil {
+					return err
+				}
+				g.writef(")")
+			case 's':
+				g.writef("fmt.Sprint(")
+				if err := g.boxedExpr(a.expr); err != nil {
+					return err
+				}
+				g.writef(")")
+			default:
+				if err := g.boxedExpr(a.expr); err != nil {
+					return err
+				}
+			}
+			g.writef(")")
+		} else {
+			if err := g.expr(a.expr); err != nil {
+				return err
+			}
 		}
 	}
 	g.writef(")")
@@ -2491,6 +2532,8 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinSet(c)
 		case "type":
 			return g.builtinType(c)
+		case "format":
+			return g.builtinFormat(c)
 		}
 	}
 	// User-defined free function: resolve kwargs/defaults if any.
@@ -4509,6 +4552,35 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
+	return nil
+}
+
+// builtinFormat emits `format(value[, spec])` — single-value formatter.
+// Routes through the same __gopy_fmt_spec helper used by f-strings and
+// str.format. With no spec, returns the default string representation.
+func (g *gen) builtinFormat(c *ir.Call) error {
+	if len(c.Keywords) != 0 {
+		return fmt.Errorf("format() takes no keyword arguments")
+	}
+	if len(c.Args) < 1 || len(c.Args) > 2 {
+		return fmt.Errorf("format() takes (value[, spec])")
+	}
+	g.helpers["__gopy_str_format"] = helperStrFormat
+	g.addImport("strings")
+	g.addImport("fmt")
+	g.writef("__gopy_fmt_spec(")
+	if len(c.Args) == 2 {
+		if err := g.expr(c.Args[1]); err != nil {
+			return err
+		}
+	} else {
+		g.writef(`""`)
+	}
+	g.writef(", ")
+	if err := g.boxedExpr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")")
 	return nil
 }
 

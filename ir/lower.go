@@ -1318,6 +1318,8 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			op = "not"
 		case "UAdd":
 			op = "+"
+		case "Invert":
+			op = "~"
 		default:
 			return nil, fmt.Errorf("line %d: unsupported UnaryOp %q", n.Lineno(), opNode.Type())
 		}
@@ -1587,12 +1589,30 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 				s, _ := p["value"].(string)
 				parts = append(parts, FStrPart{Lit: s})
 			case "FormattedValue":
-				// Ignore format_spec/conversion in F2; treat as %v.
 				x, err := lowerExpr(p.Child("value"), sc)
 				if err != nil {
 					return nil, err
 				}
-				parts = append(parts, FStrPart{Expr: x})
+				spec := ""
+				if fs := p.Child("format_spec"); fs != nil && fs.Type() == "JoinedStr" {
+					// format_spec is itself a JoinedStr; flatten its
+					// literal pieces into a single spec string. Nested
+					// expressions inside the spec are uncommon — skip.
+					for _, sp := range fs.Children("values") {
+						if sp.Type() == "Constant" {
+							s, _ := sp["value"].(string)
+							spec += s
+						}
+					}
+				}
+				var conv byte
+				if cv, ok := p["conversion"].(float64); ok && cv >= 0 {
+					ci := int(cv)
+					if ci == int('r') || ci == int('s') || ci == int('a') {
+						conv = byte(ci)
+					}
+				}
+				parts = append(parts, FStrPart{Expr: x, Spec: spec, Conv: conv})
 			default:
 				return nil, fmt.Errorf("line %d: unsupported f-string part %q", n.Lineno(), p.Type())
 			}

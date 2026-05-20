@@ -497,10 +497,14 @@ type FStr struct {
 	Ty    *Type
 }
 
-// FStrPart: exactly one of Lit or Expr is set.
+// FStrPart: exactly one of Lit or Expr is set. Spec carries the optional
+// Python format spec (e.g. ".2f" / ">5d"). Conv carries the `!r` / `!s`
+// conversion flag if any (`r`, `s`, `a` → repr / str / ascii).
 type FStrPart struct {
 	Lit  string
 	Expr Expr
+	Spec string
+	Conv byte
 }
 
 func (*IntLit) exprNode()     {}
