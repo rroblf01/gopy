@@ -2482,6 +2482,11 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinReplace(c)
 			case "dataclasses.fields":
 				return g.builtinFields(c)
+			case "typing.cast":
+				if len(c.Args) != 2 {
+					return fmt.Errorf("typing.cast() takes (type, value)")
+				}
+				return g.expr(c.Args[1])
 			case "random.choice":
 				return g.builtinRandomChoice(c)
 			case "random.shuffle":
@@ -3085,6 +3090,11 @@ var taggedMethodRename = map[string]map[string]string{
 		"writerow":    "Writerow",
 		"writerows":   "Writerows",
 	},
+	"__Lock": {
+		"acquire": "Acquire",
+		"release": "Release",
+		"locked":  "Locked",
+	},
 	"__Deque": {
 		"append":     "Append",
 		"appendleft": "Appendleft",
@@ -3122,6 +3132,10 @@ var taggedMethodRetTag = map[string]map[string]string{
 	},
 	"__Datetime": {
 		"__add__": "__Datetime",
+		"replace": "__Datetime",
+	},
+	"__Date": {
+		"replace": "__Date",
 	},
 }
 
@@ -3204,6 +3218,16 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	// `str.maketrans(...)` — classmethod-like; build a rune→string map.
 	if n, ok := m.Recv.(*ir.Name); ok && n.N == "str" && m.Method == "maketrans" {
 		return g.builtinStrMaketrans(m)
+	}
+	// `dt.replace(year=..., ...)` / `d.replace(year=..., ...)` — kwargs
+	// can't ride the standard tagged-method dispatch, so intercept.
+	if m.Method == "replace" {
+		if tag := g.exprTag(m.Recv); tag == "__Datetime" {
+			return g.builtinDatetimeReplace(m)
+		}
+		if tag := g.exprTag(m.Recv); tag == "__Date" {
+			return g.builtinDateReplace(m)
+		}
 	}
 	// Tagged-receiver method dispatch (Match.group, Path.exists, ...).
 	// Tag may come from a Name (varTypes) or from a Call / MethodCall
@@ -5648,6 +5672,122 @@ func (g *gen) builtinJSONDumps(c *ir.Call) error {
 		g.writef(")")
 	}
 	g.writef(")")
+	return nil
+}
+
+// builtinDatetimeReplace emits a fresh *__Datetime built from the receiver
+// with year / month / day / hour / minute / second overridden by kwargs.
+// Unrecognized kwargs error rather than silently drop.
+func (g *gen) builtinDatetimeReplace(m *ir.MethodCall) error {
+	if len(m.Args) != 0 {
+		return fmt.Errorf("datetime.replace() takes keyword arguments only")
+	}
+	overrides := map[string]ir.Expr{}
+	for _, kw := range m.Keywords {
+		switch kw.Name {
+		case "year", "month", "day", "hour", "minute", "second":
+			overrides[kw.Name] = kw.Value
+		default:
+			return fmt.Errorf("datetime.replace(): unsupported keyword %q", kw.Name)
+		}
+	}
+	g.writef("func() *__Datetime {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__old := ")
+	if err := g.expr(m.Recv); err != nil {
+		return err
+	}
+	g.writef(".t\n")
+	emit := func(name, defExpr string) error {
+		g.writeIndent()
+		if v, ok := overrides[name]; ok {
+			g.writef("__%s := int(", name)
+			if err := g.expr(v); err != nil {
+				return err
+			}
+			g.writef(")\n")
+		} else {
+			g.writef("__%s := %s\n", name, defExpr)
+		}
+		return nil
+	}
+	if err := emit("year", "__old.Year()"); err != nil {
+		return err
+	}
+	if err := emit("month", "int(__old.Month())"); err != nil {
+		return err
+	}
+	if err := emit("day", "__old.Day()"); err != nil {
+		return err
+	}
+	if err := emit("hour", "__old.Hour()"); err != nil {
+		return err
+	}
+	if err := emit("minute", "__old.Minute()"); err != nil {
+		return err
+	}
+	if err := emit("second", "__old.Second()"); err != nil {
+		return err
+	}
+	g.writeIndent()
+	g.addImport("time")
+	g.writef("return &__Datetime{t: time.Date(__year, time.Month(__month), __day, __hour, __minute, __second, __old.Nanosecond(), __old.Location())}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinDateReplace mirrors builtinDatetimeReplace for *__Date.
+func (g *gen) builtinDateReplace(m *ir.MethodCall) error {
+	if len(m.Args) != 0 {
+		return fmt.Errorf("date.replace() takes keyword arguments only")
+	}
+	overrides := map[string]ir.Expr{}
+	for _, kw := range m.Keywords {
+		switch kw.Name {
+		case "year", "month", "day":
+			overrides[kw.Name] = kw.Value
+		default:
+			return fmt.Errorf("date.replace(): unsupported keyword %q", kw.Name)
+		}
+	}
+	g.writef("func() *__Date {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__old := ")
+	if err := g.expr(m.Recv); err != nil {
+		return err
+	}
+	g.writef("\n")
+	emit := func(name, defExpr string) error {
+		g.writeIndent()
+		if v, ok := overrides[name]; ok {
+			g.writef("__%s := int64(", name)
+			if err := g.expr(v); err != nil {
+				return err
+			}
+			g.writef(")\n")
+		} else {
+			g.writef("__%s := %s\n", name, defExpr)
+		}
+		return nil
+	}
+	if err := emit("year", "__old.Y"); err != nil {
+		return err
+	}
+	if err := emit("month", "__old.M"); err != nil {
+		return err
+	}
+	if err := emit("day", "__old.D"); err != nil {
+		return err
+	}
+	g.writeIndent()
+	g.writef("return &__Date{Y: __year, M: __month, D: __day}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
 	return nil
 }
 

@@ -390,6 +390,19 @@ var stdlibModules = map[string]stdlibModule{
 			"getuser": {GoFunc: "__gopy_getpass_getuser", GoImport: "os", Helper: helperGetpassGetuser, RetKind: "str"},
 		},
 	},
+	"typing": {
+		Funcs: map[string]stdlibFunc{
+			// typing.cast at runtime is the identity — dispatched in
+			// transpile.go's call() so the second arg passes through.
+			"cast": {GoFunc: "__gopy_typing_cast_unused"},
+		},
+	},
+	"threading": {
+		Funcs: map[string]stdlibFunc{
+			"Lock":  {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}},
+			"RLock": {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}},
+		},
+	},
 	"pathlib": {
 		Funcs: map[string]stdlibFunc{
 			"Path": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
@@ -868,6 +881,20 @@ const helperGetpassGetuser = `func __gopy_getpass_getuser() string {
 	}
 	return ""
 }`
+
+// helperLockType is a no-op stand-in for threading.Lock / RLock. The
+// transpiled program is single-goroutine by default, so acquire/release
+// degrade to bookkeeping. Context-manager use (`with lock:`) works too
+// because Acquire returns the lock itself.
+const helperLockType = `type __Lock struct{ held bool }
+
+func (l *__Lock) Acquire(args ...any) bool { l.held = true; return true }
+func (l *__Lock) Release()                 { l.held = false }
+func (l *__Lock) Locked() bool             { return l.held }
+func (l *__Lock) Enter() *__Lock           { l.held = true; return l }
+func (l *__Lock) Exit() bool               { l.held = false; return false }`
+
+const helperThreadingLock = `func __gopy_threading_lock() *__Lock { return &__Lock{} }`
 
 // helperCSVDictReader returns []map[string]string for each data row using
 // the first row as column headers. Mirrors csv.DictReader's most common
