@@ -1030,6 +1030,44 @@ const helperGopyCallable = `func __gopy_callable(v any) bool {
 	return reflect.TypeOf(v).Kind() == reflect.Func
 }`
 
+// helperGopyAscii mirrors Python's ascii(): wraps the string-ish repr in
+// single quotes (or 'b"..."' for bytes), escaping non-ASCII as \uXXXX.
+// Non-string inputs route through fmt.Sprintf("%#v") for a debug-style
+// dump (Python uses repr() too).
+const helperGopyAscii = `func __gopy_ascii(v any) string {
+	s, ok := v.(string)
+	if !ok {
+		s = fmt.Sprintf("%#v", v)
+		return s
+	}
+	var b []byte
+	b = append(b, '\'')
+	for _, r := range s {
+		switch {
+		case r == '\'':
+			b = append(b, '\\', '\'')
+		case r == '\\':
+			b = append(b, '\\', '\\')
+		case r == '\n':
+			b = append(b, '\\', 'n')
+		case r == '\t':
+			b = append(b, '\\', 't')
+		case r == '\r':
+			b = append(b, '\\', 'r')
+		case r >= 0x20 && r <= 0x7E:
+			b = append(b, byte(r))
+		case r < 0x100:
+			b = append(b, []byte(fmt.Sprintf("\\x%02x", r))...)
+		case r < 0x10000:
+			b = append(b, []byte(fmt.Sprintf("\\u%04x", r))...)
+		default:
+			b = append(b, []byte(fmt.Sprintf("\\U%08x", r))...)
+		}
+	}
+	b = append(b, '\'')
+	return string(b)
+}`
+
 // helperStrMaketrans builds the rune→string mapping used by str.translate.
 // 2-arg form: pair from[i] → to[i]. 3-arg form: chars in delete map to "".
 const helperStrMaketrans = `func __gopy_str_maketrans(from, to string, del ...string) map[rune]string {
@@ -1750,6 +1788,63 @@ func (g *gen) expr(e ir.Expr) error {
 			}
 		case lt == "__Path" && x.Op == "/":
 			return g.emitMethodOp(x.L, "Join", x.R)
+		}
+		// `s % args` printf-style string formatting. Python's % format
+		// codes mostly overlap with Go's fmt; we pass the string through
+		// unchanged and rely on Go fmt to do the substitution.
+		if x.Op == "%" {
+			lTy := x.L.TypeOf()
+			if lTy != nil && lTy.Kind == ir.TyStr {
+				g.addImport("fmt")
+				g.writef("fmt.Sprintf(")
+				if err := g.expr(x.L); err != nil {
+					return err
+				}
+				if ll, ok := x.R.(*ir.ListLit); ok {
+					for _, e := range ll.Elems {
+						g.writef(", ")
+						if err := g.boxedExpr(e); err != nil {
+							return err
+						}
+					}
+				} else {
+					g.writef(", ")
+					if err := g.boxedExpr(x.R); err != nil {
+						return err
+					}
+				}
+				g.writef(")")
+				return nil
+			}
+		}
+		// `a | b` over dicts → merged dict (b wins on key collision).
+		if x.Op == "|" {
+			lTy, rTy := x.L.TypeOf(), x.R.TypeOf()
+			if lTy != nil && rTy != nil && lTy.Kind == ir.TyDict && rTy.Kind == ir.TyDict {
+				mapGo := g.goType(lTy)
+				g.writef("func() %s {\n", mapGo)
+				g.indent++
+				g.writeIndent()
+				g.writef("__out := %s{}\n", mapGo)
+				g.writeIndent()
+				g.writef("for __k, __v := range ")
+				if err := g.expr(x.L); err != nil {
+					return err
+				}
+				g.writef(" { __out[__k] = __v }\n")
+				g.writeIndent()
+				g.writef("for __k, __v := range ")
+				if err := g.expr(x.R); err != nil {
+					return err
+				}
+				g.writef(" { __out[__k] = __v }\n")
+				g.writeIndent()
+				g.writef("return __out\n")
+				g.indent--
+				g.writeIndent()
+				g.writef("}()")
+				return nil
+			}
 		}
 		// `"ab" * 3` / `3 * "ab"` → strings.Repeat. Same shape for list*int
 		// would need element-type knowledge; skip for now.
@@ -2727,6 +2822,8 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinBin(c)
 		case "callable":
 			return g.builtinCallable(c)
+		case "ascii":
+			return g.builtinAscii(c)
 		}
 	}
 	// User-defined free function: resolve kwargs/defaults if any.
@@ -4896,6 +4993,22 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
+	return nil
+}
+
+// builtinAscii emits the ASCII-safe repr — string-like with non-ASCII
+// characters replaced by `\uXXXX` escapes. Mirrors Python's ascii(s).
+func (g *gen) builtinAscii(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("ascii() takes exactly 1 positional argument")
+	}
+	g.helpers["__gopy_ascii"] = helperGopyAscii
+	g.addImport("fmt")
+	g.writef("__gopy_ascii(")
+	if err := g.boxedExpr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")")
 	return nil
 }
 

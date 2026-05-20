@@ -2748,5 +2748,11 @@ func promoteOp(op string, a, b *Type) *Type {
 			return &Type{Kind: TyList, Elem: b.Elem}
 		}
 	}
+	if op == "|" && a != nil && b != nil && a.Kind == TyDict && b.Kind == TyDict {
+		return &Type{Kind: TyDict, Key: a.Key, Val: a.Val}
+	}
+	if op == "%" && a != nil && a.Kind == TyStr {
+		return &Type{Kind: TyStr}
+	}
 	return t
 }
