@@ -2347,6 +2347,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinCompress(c)
 			case "itertools.count":
 				return g.builtinCount(c)
+			case "itertools.zip_longest":
+				return g.builtinZipLongest(c)
 			case "heapq.heappush":
 				return g.builtinHeappush(c)
 			case "heapq.heappop":
@@ -5327,6 +5329,90 @@ func (g *gen) builtinDictFromkeys(m *ir.MethodCall) error {
 	return nil
 }
 
+// builtinZipLongest emits a list of 2-element pairs from two iterables.
+// Shorter sequence padded with the fillvalue kwarg (or the element type's
+// zero value when fillvalue is absent). Returned shape matches starmap's
+// expected pair-list input.
+func (g *gen) builtinZipLongest(c *ir.Call) error {
+	if len(c.Args) != 2 {
+		return fmt.Errorf("zip_longest() takes (a, b); fillvalue is a kwarg")
+	}
+	var fill ir.Expr
+	for _, kw := range c.Keywords {
+		if kw.Name != "fillvalue" {
+			return fmt.Errorf("zip_longest(): unknown keyword %q", kw.Name)
+		}
+		fill = kw.Value
+	}
+	elemA, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("zip_longest(): %w", err)
+	}
+	elemB, err := listElemTypeOf(c.Args[1])
+	if err != nil {
+		return fmt.Errorf("zip_longest(): %w", err)
+	}
+	// Both sides must share element type so the pair-list has a single
+	// element type. Mismatched types degrade to any.
+	elem := elemA
+	if elemA == nil || elemB == nil || elemA.Kind != elemB.Kind {
+		elem = &ir.Type{Kind: ir.TyAny}
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() [][]%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__a := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__b := ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__n := len(__a)\n")
+	g.writeIndent()
+	g.writef("if len(__b) > __n { __n = len(__b) }\n")
+	g.writeIndent()
+	g.writef("var __fill %s\n", elemGo)
+	if fill != nil {
+		g.writeIndent()
+		g.writef("__fill = ")
+		if err := g.expr(fill); err != nil {
+			return err
+		}
+		g.writef("\n")
+	}
+	g.writeIndent()
+	g.writef("__out := make([][]%s, 0, __n)\n", elemGo)
+	g.writeIndent()
+	g.writef("for __i := 0; __i < __n; __i++ {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__pa := __fill\n")
+	g.writeIndent()
+	g.writef("__pb := __fill\n")
+	g.writeIndent()
+	g.writef("if __i < len(__a) { __pa = __a[__i] }\n")
+	g.writeIndent()
+	g.writef("if __i < len(__b) { __pb = __b[__i] }\n")
+	g.writeIndent()
+	g.writef("__out = append(__out, []%s{__pa, __pb})\n", elemGo)
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 // builtinFilterfalse emits filter(not pred(x), xs) — keeps elements for
 // which the lambda predicate returns false. Lambda re-lowered with the
 // iterable's element type.
@@ -7766,7 +7852,7 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef(")")
 		return true, nil
-	case "isdigit", "isalpha", "isalnum", "isspace", "isupper", "islower":
+	case "isdigit", "isalpha", "isalnum", "isspace", "isupper", "islower", "isnumeric", "isdecimal", "isidentifier", "isprintable", "isascii":
 		if len(m.Args) != 0 {
 			return true, fmt.Errorf("str.%s() takes no arguments", m.Method)
 		}
@@ -7787,6 +7873,36 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 // require at least one cased character.
 func strPredicateHelper(kind string) string {
 	switch kind {
+	case "isidentifier":
+		// Python: first char letter or _, rest letters/digits/_. Empty → False.
+		return `func __gopy_str_isidentifier(s string) bool {
+	if len(s) == 0 { return false }
+	for i, r := range s {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
+		if i > 0 {
+			ok = ok || (r >= '0' && r <= '9')
+		}
+		if !ok { return false }
+	}
+	return true
+}`
+	case "isprintable":
+		// True for empty string. ASCII range 0x20..0x7E plus tab handled
+		// as non-printable; matches CPython for ASCII subset.
+		return `func __gopy_str_isprintable(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7F { return false }
+	}
+	return true
+}`
+	case "isascii":
+		// True for empty string. All chars must be < 128.
+		return `func __gopy_str_isascii(s string) bool {
+	for _, r := range s {
+		if r > 0x7F { return false }
+	}
+	return true
+}`
 	case "isupper":
 		return `func __gopy_str_isupper(s string) bool {
 	if len(s) == 0 { return false }
@@ -7810,7 +7926,10 @@ func strPredicateHelper(kind string) string {
 	}
 	body := ""
 	switch kind {
-	case "isdigit":
+	case "isdigit", "isnumeric", "isdecimal":
+		// gopy lumps these together — the Unicode distinctions
+		// CPython makes (numeric ⊃ digit ⊃ decimal) require a Unicode
+		// table we don't carry. Treats ASCII 0-9 as the in-set.
 		body = "r < '0' || r > '9'"
 	case "isalpha":
 		body = "!((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'))"

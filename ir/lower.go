@@ -156,6 +156,71 @@ func lowerTopLevel(n parser.Node) ([]Decl, error) {
 	}
 }
 
+// decodeDataclassField recognizes `field(default=..., default_factory=...)`
+// inside a @dataclass annotation and returns the equivalent default IR
+// expression. Returns nil when the value isn't a field(...) call.
+func decodeDataclassField(n parser.Node, ty *Type) Expr {
+	if n == nil || n.Type() != "Call" {
+		return nil
+	}
+	fn := n.Child("func")
+	if fn == nil {
+		return nil
+	}
+	// Recognized forms: bare `field` or `dataclasses.field`.
+	switch {
+	case fn.Type() == "Name" && fn.Str("id") == "field":
+	case fn.Type() == "Attribute" && fn.Str("attr") == "field":
+		recv := fn.Child("value")
+		if recv == nil || recv.Type() != "Name" || recv.Str("id") != "dataclasses" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	for _, kw := range n.Children("keywords") {
+		switch kw.Str("arg") {
+		case "default":
+			v, err := lowerExpr(kw.Child("value"), newScope())
+			if err == nil {
+				return v
+			}
+		case "default_factory":
+			factory := kw.Child("value")
+			if factory == nil || factory.Type() != "Name" {
+				return nil
+			}
+			switch factory.Str("id") {
+			case "list":
+				elem := &Type{Kind: TyAny}
+				if ty != nil && ty.Kind == TyList && ty.Elem != nil {
+					elem = ty.Elem
+				}
+				return &ListLit{Elems: nil, ElemTy: elem, Ty: &Type{Kind: TyList, Elem: elem}}
+			case "dict":
+				kt := &Type{Kind: TyAny}
+				vt := &Type{Kind: TyAny}
+				if ty != nil && ty.Kind == TyDict {
+					if ty.Key != nil {
+						kt = ty.Key
+					}
+					if ty.Val != nil {
+						vt = ty.Val
+					}
+				}
+				return &DictLit{Keys: nil, Vals: nil, KeyTy: kt, ValTy: vt, Ty: &Type{Kind: TyDict, Key: kt, Val: vt}}
+			case "set":
+				elem := &Type{Kind: TyAny}
+				if ty != nil && ty.Kind == TyList && ty.Elem != nil {
+					elem = ty.Elem
+				}
+				return &ListLit{Elems: nil, ElemTy: elem, Ty: &Type{Kind: TyList, Elem: elem}}
+			}
+		}
+	}
+	return nil
+}
+
 // namedtupleDecl recognizes the `Name = namedtuple("Name", ["f1", ...])`
 // pattern and synthesizes a Class decl with one any-typed field per name.
 // Returns (nil, false) when the RHS isn't a namedtuple call. The class
@@ -372,11 +437,19 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				class.Fields = append(class.Fields, Param{Name: fieldName, Ty: ty})
 				p := Param{Name: fieldName, Ty: ty}
 				if def := m.Child("value"); def != nil {
-					dv, err := lowerExpr(def, dcSc)
-					if err != nil {
-						return nil, err
+					// `field(default_factory=list)` / `field(default=...)`:
+					// substitute an empty container literal (or the explicit
+					// default value) before lowering so each call site builds
+					// a fresh instance.
+					if dvExpr := decodeDataclassField(def, ty); dvExpr != nil {
+						p.Default = dvExpr
+					} else {
+						dv, err := lowerExpr(def, dcSc)
+						if err != nil {
+							return nil, err
+						}
+						p.Default = dv
 					}
-					p.Default = dv
 				}
 				class.InitArgs = append(class.InitArgs, p)
 				dcSc.declare(fieldName, ty)

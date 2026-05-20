@@ -307,6 +307,7 @@ var stdlibModules = map[string]stdlibModule{
 			"filterfalse":  {GoFunc: "__gopy_filterfalse_unused"},
 			"compress":     {GoFunc: "__gopy_compress_unused"},
 			"count":        {GoFunc: "__gopy_count_unused"},
+			"zip_longest":  {GoFunc: "__gopy_zip_longest_unused"},
 		},
 	},
 	"random": {
