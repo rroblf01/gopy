@@ -6847,6 +6847,16 @@ func (g *gen) builtinAbs(c *ir.Call) error {
 	if len(c.Args) != 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("abs() takes one positional argument")
 	}
+	// abs(timedelta) → call the helper's Abs method, returning a fresh
+	// __Timedelta with non-negative duration.
+	if tag := g.exprTag(c.Args[0]); tag == "__Timedelta" {
+		g.writef("func() *__Timedelta { __td := ")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("; if __td.d < 0 { return &__Timedelta{d: -__td.d} }; return __td }()")
+		return nil
+	}
 	t := c.Args[0].TypeOf()
 	if t == nil || (t.Kind != ir.TyInt && t.Kind != ir.TyFloat) {
 		return fmt.Errorf("abs() requires int or float, got %s", g.goType(t))
@@ -7064,6 +7074,66 @@ func (g *gen) builtinMinMaxArgs(c *ir.Call, kind string) error {
 	return nil
 }
 
+// builtinSumStart handles `sum(xs, start)` — accumulate from `start`
+// instead of zero. Type follows the start expression so callers can sum
+// floats into an int-typed list etc.
+func (g *gen) builtinSumStart(c *ir.Call) error {
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("sum(): %w", err)
+	}
+	if elem.Kind != ir.TyInt && elem.Kind != ir.TyFloat {
+		return fmt.Errorf("sum(): list must contain int or float")
+	}
+	startTy := c.Args[1].TypeOf()
+	if startTy == nil || (startTy.Kind != ir.TyInt && startTy.Kind != ir.TyFloat) {
+		return fmt.Errorf("sum(): start must be int or float")
+	}
+	retTy := startTy
+	if elem.Kind == ir.TyFloat || startTy.Kind == ir.TyFloat {
+		retTy = &ir.Type{Kind: ir.TyFloat}
+	}
+	retGo := g.goType(retTy)
+	g.writef("func() %s {\n", retGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("var __acc %s = ", retGo)
+	if retTy.Kind == ir.TyFloat && startTy.Kind == ir.TyInt {
+		g.writef("float64(")
+		if err := g.expr(c.Args[1]); err != nil {
+			return err
+		}
+		g.writef(")")
+	} else {
+		if err := g.expr(c.Args[1]); err != nil {
+			return err
+		}
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("for _, __v := range ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(" {\n")
+	g.indent++
+	g.writeIndent()
+	if retTy.Kind == ir.TyFloat && elem.Kind == ir.TyInt {
+		g.writef("__acc += float64(__v)\n")
+	} else {
+		g.writef("__acc += __v\n")
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __acc\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 func (g *gen) builtinReduce(c *ir.Call, kind string) error {
 	// `min(xs, key=lambda x: ...)` / `max(...)` re-lower the lambda body with
 	// the iterable's element type and pick the element with the min/max key.
@@ -7084,6 +7154,10 @@ func (g *gen) builtinReduce(c *ir.Call, kind string) error {
 	}
 	// Multi-arg form (min/max only): `min(a, b)` / `min(a, b, c)`.
 	// Reject for any / all / sum which only make sense over an iterable.
+	// `sum(xs, start)` is the one exception — handled below.
+	if kind == "sum" && len(c.Args) == 2 {
+		return g.builtinSumStart(c)
+	}
 	if len(c.Args) > 1 {
 		if kind != "min" && kind != "max" {
 			return fmt.Errorf("%s() takes one iterable; got %d arguments", kind, len(c.Args))

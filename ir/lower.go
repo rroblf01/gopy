@@ -291,23 +291,38 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 	}
 	class.Bases = append(class.Bases, rawBases...)
 	if class.IsEnum {
+		nextAuto := int64(1)
 		for _, m := range n.Children("body") {
 			if m.Type() != "Assign" {
-				return nil, fmt.Errorf("enum %s: body must contain only `NAME = int` declarations", name)
+				return nil, fmt.Errorf("enum %s: body must contain only `NAME = value` declarations", name)
 			}
 			tgts := m.Children("targets")
 			if len(tgts) != 1 || tgts[0].Type() != "Name" {
 				return nil, fmt.Errorf("enum %s: each member needs a single Name target", name)
 			}
 			val := m.Child("value")
+			memberName := tgts[0].Str("id")
+			// `auto()` — assign next sequential int starting at 1 (Python
+			// default), mirroring enum.auto() semantics.
+			if val.Type() == "Call" {
+				fn := val.Child("func")
+				if fn != nil && ((fn.Type() == "Name" && fn.Str("id") == "auto") ||
+					(fn.Type() == "Attribute" && fn.Str("attr") == "auto")) {
+					class.EnumMembers = append(class.EnumMembers, EnumMember{Name: memberName, Value: nextAuto})
+					nextAuto++
+					continue
+				}
+			}
 			if val.Type() != "Constant" {
-				return nil, fmt.Errorf("enum %s.%s: value must be an integer literal", name, tgts[0].Str("id"))
+				return nil, fmt.Errorf("enum %s.%s: value must be an int literal or auto()", name, memberName)
 			}
 			fv, ok := val["value"].(float64)
 			if !ok {
-				return nil, fmt.Errorf("enum %s.%s: value must be an integer literal", name, tgts[0].Str("id"))
+				return nil, fmt.Errorf("enum %s.%s: value must be an int literal", name, memberName)
 			}
-			class.EnumMembers = append(class.EnumMembers, EnumMember{Name: tgts[0].Str("id"), Value: int64(fv)})
+			iv := int64(fv)
+			class.EnumMembers = append(class.EnumMembers, EnumMember{Name: memberName, Value: iv})
+			nextAuto = iv + 1
 		}
 		return []Decl{class}, nil
 	}
