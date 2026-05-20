@@ -570,26 +570,35 @@ func lowerFunc(n parser.Node) (*Func, error) {
 	for _, d := range n.Children("decorator_list") {
 		if d.Type() == "Name" {
 			switch d.Str("id") {
-			case "staticmethod", "lru_cache":
+			case "staticmethod", "lru_cache", "cache", "cached_property":
 				continue
 			}
 		}
 		if d.Type() == "Attribute" {
 			recv := d.Child("value")
-			if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" && d.Str("attr") == "lru_cache" {
-				continue
+			if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" {
+				switch d.Str("attr") {
+				case "lru_cache", "cache", "cached_property":
+					continue
+				}
 			}
 		}
 		if d.Type() == "Call" {
 			fn := d.Child("func")
 			if fn != nil {
-				if fn.Type() == "Name" && fn.Str("id") == "lru_cache" {
-					continue
+				if fn.Type() == "Name" {
+					switch fn.Str("id") {
+					case "lru_cache", "cache":
+						continue
+					}
 				}
 				if fn.Type() == "Attribute" {
 					recv := fn.Child("value")
-					if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" && fn.Str("attr") == "lru_cache" {
-						continue
+					if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" {
+						switch fn.Str("attr") {
+						case "lru_cache", "cache":
+							continue
+						}
 					}
 				}
 			}

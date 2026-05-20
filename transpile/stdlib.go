@@ -165,8 +165,10 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			// reduce uses an inline lambda for the binary op; dispatch
 			// lives in transpile.go's call() builder.
-			"reduce":  {GoFunc: "__gopy_reduce_unused"},
-			"partial": {GoFunc: "__gopy_partial_unused"},
+			"reduce":          {GoFunc: "__gopy_reduce_unused"},
+			"partial":         {GoFunc: "__gopy_partial_unused"},
+			"cache":           {GoFunc: "__gopy_cache_unused"},
+			"cached_property": {GoFunc: "__gopy_cached_prop_unused"},
 		},
 	},
 	"logging": {
@@ -225,11 +227,14 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"re": {
 		Funcs: map[string]stdlibFunc{
-			"findall": {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall},
-			"search":  {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
-			"match":   {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
-			"sub":     {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub},
-			"compile": {GoFunc: "__gopy_re_compile", GoImport: "regexp", Helper: helperReCompile, RetTag: "__Pattern", ExtraHelpers: map[string]string{"__Pattern": helperPatternType, "__Match": helperMatchType}},
+			"findall":   {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall},
+			"search":    {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
+			"match":     {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
+			"fullmatch": {GoFunc: "__gopy_re_fullmatch", GoImport: "regexp", Helper: helperReFullmatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
+			"sub":       {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub},
+			"split":     {GoFunc: "__gopy_re_split", GoImport: "regexp", Helper: helperReSplit},
+			"escape":    {GoFunc: "regexp.QuoteMeta", GoImport: "regexp", RetKind: "str"},
+			"compile":   {GoFunc: "__gopy_re_compile", GoImport: "regexp", Helper: helperReCompile, RetTag: "__Pattern", ExtraHelpers: map[string]string{"__Pattern": helperPatternType, "__Match": helperMatchType}},
 		},
 	},
 	"csv": {
@@ -465,6 +470,28 @@ const helperReMatch = `func __gopy_re_match(pattern, s string) *__Match {
 const helperReSub = `func __gopy_re_sub(pattern, repl, s string) string {
 	r := regexp.MustCompile(pattern)
 	return r.ReplaceAllString(s, repl)
+}`
+
+// helperReFullmatch anchors at both ends, mirroring re.fullmatch.
+const helperReFullmatch = `func __gopy_re_fullmatch(pattern, s string) *__Match {
+	r := regexp.MustCompile("^(?:" + pattern + ")$")
+	parts := r.FindStringSubmatch(s)
+	if parts == nil {
+		return nil
+	}
+	return &__Match{full: parts[0], groups: parts[1:], names: r.SubexpNames()}
+}`
+
+// helperReSplit splits s on every occurrence of the pattern. Mirrors
+// re.split's default form; the maxsplit argument is not supported (use
+// strings.SplitN with a literal sep for that pattern).
+const helperReSplit = `func __gopy_re_split(pattern, s string) []string {
+	r := regexp.MustCompile(pattern)
+	out := r.Split(s, -1)
+	if out == nil {
+		return []string{}
+	}
+	return out
 }`
 
 // helperPatternType wraps a compiled regexp so re.compile(p).match(s)

@@ -1020,6 +1020,41 @@ const helperGopyBin = `func __gopy_bin(n int64) string {
 	return fmt.Sprintf("0b%b", n)
 }`
 
+// helperStrMaketrans builds the rune→string mapping used by str.translate.
+// 2-arg form: pair from[i] → to[i]. 3-arg form: chars in delete map to "".
+const helperStrMaketrans = `func __gopy_str_maketrans(from, to string, del ...string) map[rune]string {
+	out := map[rune]string{}
+	fr := []rune(from)
+	tr := []rune(to)
+	for i := 0; i < len(fr); i++ {
+		var rep string
+		if i < len(tr) {
+			rep = string(tr[i])
+		}
+		out[fr[i]] = rep
+	}
+	if len(del) > 0 {
+		for _, r := range del[0] {
+			out[r] = ""
+		}
+	}
+	return out
+}`
+
+// helperStrTranslate applies the maketrans table to s. Runes missing from
+// the table pass through unchanged; runes mapped to "" are dropped.
+const helperStrTranslate = `func __gopy_str_translate(s string, table map[rune]string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if rep, ok := table[r]; ok {
+			b.WriteString(rep)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}`
+
 // helperGopyType returns the Python class name of v as a string. Covers
 // primitives directly; for everything else we strip the package prefix
 // off Go's %T formatting so user classes render as plain "Point" rather
@@ -2931,6 +2966,10 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	// to None. Key type comes from the iterable's element type.
 	if n, ok := m.Recv.(*ir.Name); ok && n.N == "dict" && m.Method == "fromkeys" {
 		return g.builtinDictFromkeys(m)
+	}
+	// `str.maketrans(...)` — classmethod-like; build a rune→string map.
+	if n, ok := m.Recv.(*ir.Name); ok && n.N == "str" && m.Method == "maketrans" {
+		return g.builtinStrMaketrans(m)
 	}
 	// Tagged-receiver method dispatch (Match.group, Path.exists, ...).
 	// Tag may come from a Name (varTypes) or from a Call / MethodCall
@@ -4895,6 +4934,37 @@ func (g *gen) builtinJSONDumps(c *ir.Call) error {
 	return nil
 }
 
+// builtinStrMaketrans emits a `str.maketrans(...)` call producing a
+// map[rune]string. Supports both 2-arg (from, to) and 3-arg (from, to,
+// delete) forms — the from/to must be string literals or string-typed
+// expressions of the same length.
+func (g *gen) builtinStrMaketrans(m *ir.MethodCall) error {
+	if len(m.Args) < 1 || len(m.Args) > 3 || len(m.Keywords) != 0 {
+		return fmt.Errorf("str.maketrans() takes (from, to[, delete])")
+	}
+	g.helpers["__gopy_str_maketrans"] = helperStrMaketrans
+	g.writef("__gopy_str_maketrans(")
+	if err := g.expr(m.Args[0]); err != nil {
+		return err
+	}
+	if len(m.Args) >= 2 {
+		g.writef(", ")
+		if err := g.expr(m.Args[1]); err != nil {
+			return err
+		}
+	} else {
+		g.writef(", \"\"")
+	}
+	if len(m.Args) == 3 {
+		g.writef(", ")
+		if err := g.expr(m.Args[2]); err != nil {
+			return err
+		}
+	}
+	g.writef(")")
+	return nil
+}
+
 // builtinDictFromkeys emits `dict.fromkeys(iter, value)` as a typed
 // map literal built from the iterable's elements paired with value.
 // One-arg form defaults value to None (mapped to int64(0) for typed
@@ -6561,6 +6631,22 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.helpers["__gopy_str_zfill"] = helperStrZfill
 		g.writef("__gopy_str_zfill(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "translate":
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.translate() takes 1 argument")
+		}
+		g.helpers["__gopy_str_translate"] = helperStrTranslate
+		g.addImport("strings")
+		g.writef("__gopy_str_translate(")
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
 		}
