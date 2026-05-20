@@ -2062,6 +2062,19 @@ func (t *__Timedelta) String() string {
 		return fmt.Sprintf("%d days, %d:%02d:%02d", days, h, m, s)
 	}
 	return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+}
+
+func (t *__Timedelta) TotalSeconds() float64 {
+	return float64(t.d) / float64(time.Second)
+}
+
+func (t *__Timedelta) Days() int64 {
+	return int64(t.d / (24 * time.Hour))
+}
+
+func (t *__Timedelta) Seconds() int64 {
+	rem := t.d - time.Duration(t.Days())*24*time.Hour
+	return int64(rem / time.Second)
 }`
 
 // helperTimedeltaNew accepts the full Python parameter order:
@@ -2113,6 +2126,24 @@ func (d *__Datetime) Isoformat() string {
 
 func (d *__Datetime) Strftime(layout string) string {
 	return __gopy_datetime_strftime(d.t, layout)
+}
+
+func (d *__Datetime) Weekday() int64 {
+	w := int(d.t.Weekday())
+	// Go: Sunday=0..Saturday=6. Python: Monday=0..Sunday=6.
+	return int64((w + 6) % 7)
+}
+
+func (d *__Datetime) Isoweekday() int64 {
+	w := int(d.t.Weekday())
+	if w == 0 {
+		return 7
+	}
+	return int64(w)
+}
+
+func (d *__Datetime) Timestamp() float64 {
+	return float64(d.t.UnixNano()) / 1e9
 }`
 
 // helperDatetimeNow returns Python's datetime.datetime.now() as a
