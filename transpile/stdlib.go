@@ -197,6 +197,29 @@ var stdlibModules = map[string]stdlibModule{
 			"seed":    {GoFunc: "__gopy_random_seed", GoImport: "math/rand", Helper: helperRandomSeed},
 		},
 	},
+	"statistics": {
+		Funcs: map[string]stdlibFunc{
+			"mean":     {GoFunc: "__gopy_stats_mean", Helper: helperStatsMean, RetKind: "float"},
+			"fmean":    {GoFunc: "__gopy_stats_mean", Helper: helperStatsMean, RetKind: "float"},
+			"median":   {GoFunc: "__gopy_stats_median", GoImport: "sort", Helper: helperStatsMedian, RetKind: "float"},
+			"mode":     {GoFunc: "__gopy_stats_mode", Helper: helperStatsMode, RetKind: "int"},
+			"stdev":    {GoFunc: "__gopy_stats_stdev", GoImport: "math", Helper: helperStatsStdev, RetKind: "float"},
+			"pstdev":   {GoFunc: "__gopy_stats_pstdev", GoImport: "math", Helper: helperStatsPstdev, RetKind: "float"},
+			"variance": {GoFunc: "__gopy_stats_variance", Helper: helperStatsVariance, RetKind: "float"},
+		},
+	},
+	"uuid": {
+		Funcs: map[string]stdlibFunc{
+			"uuid4": {GoFunc: "__gopy_uuid4", GoImport: "crypto/rand", Helper: helperUuid4, RetKind: "str", HelperImports: []string{"fmt"}},
+		},
+	},
+	"textwrap": {
+		Funcs: map[string]stdlibFunc{
+			"dedent": {GoFunc: "__gopy_textwrap_dedent", Helper: helperTextwrapDedent, RetKind: "str", HelperImports: []string{"strings"}},
+			"indent": {GoFunc: "__gopy_textwrap_indent", Helper: helperTextwrapIndent, RetKind: "str", HelperImports: []string{"strings"}},
+			"fill":   {GoFunc: "__gopy_textwrap_fill", Helper: helperTextwrapFill, RetKind: "str", HelperImports: []string{"strings"}},
+		},
+	},
 	"re": {
 		Funcs: map[string]stdlibFunc{
 			"findall": {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall},
@@ -770,6 +793,197 @@ const helperRandint = `func __gopy_randint(a, b int64) int64 {
 }`
 
 const helperRandomSeed = `func __gopy_random_seed(s int64) { rand.Seed(s) }`
+
+// helperStatsMean mirrors statistics.mean / statistics.fmean: arithmetic
+// mean of a non-empty slice, returned as float64.
+const helperStatsMean = `func __gopy_stats_mean(xs []float64) float64 {
+	if len(xs) == 0 {
+		panic(NewException("StatisticsError: mean requires at least one data point"))
+	}
+	var sum float64
+	for _, v := range xs {
+		sum += v
+	}
+	return sum / float64(len(xs))
+}`
+
+const helperStatsMedian = `func __gopy_stats_median(xs []float64) float64 {
+	if len(xs) == 0 {
+		panic(NewException("StatisticsError: median requires at least one data point"))
+	}
+	cp := make([]float64, len(xs))
+	copy(cp, xs)
+	sort.Float64s(cp)
+	n := len(cp)
+	if n%2 == 1 {
+		return cp[n/2]
+	}
+	return (cp[n/2-1] + cp[n/2]) / 2
+}`
+
+// helperStatsMode returns the first-encountered most-frequent value.
+// Python's statistics.mode raises on multi-modal datasets in older 3.x;
+// 3.8+ returns the first mode. Match the 3.8+ behavior.
+const helperStatsMode = `func __gopy_stats_mode(xs []int64) int64 {
+	if len(xs) == 0 {
+		panic(NewException("StatisticsError: mode requires at least one data point"))
+	}
+	counts := map[int64]int{}
+	order := []int64{}
+	for _, v := range xs {
+		if _, ok := counts[v]; !ok {
+			order = append(order, v)
+		}
+		counts[v]++
+	}
+	best := order[0]
+	bestN := counts[best]
+	for _, v := range order[1:] {
+		if counts[v] > bestN {
+			best = v
+			bestN = counts[v]
+		}
+	}
+	return best
+}`
+
+const helperStatsVariance = `func __gopy_stats_variance(xs []float64) float64 {
+	if len(xs) < 2 {
+		panic(NewException("StatisticsError: variance requires at least two data points"))
+	}
+	var sum float64
+	for _, v := range xs {
+		sum += v
+	}
+	mean := sum / float64(len(xs))
+	var ss float64
+	for _, v := range xs {
+		d := v - mean
+		ss += d * d
+	}
+	return ss / float64(len(xs)-1)
+}`
+
+const helperStatsStdev = `func __gopy_stats_stdev(xs []float64) float64 {
+	return math.Sqrt(__gopy_stats_variance(xs))
+}`
+
+const helperStatsPstdev = `func __gopy_stats_pstdev(xs []float64) float64 {
+	if len(xs) == 0 {
+		panic(NewException("StatisticsError: pstdev requires at least one data point"))
+	}
+	var sum float64
+	for _, v := range xs {
+		sum += v
+	}
+	mean := sum / float64(len(xs))
+	var ss float64
+	for _, v := range xs {
+		d := v - mean
+		ss += d * d
+	}
+	return math.Sqrt(ss / float64(len(xs)))
+}`
+
+// helperUuid4 emits a 16-byte random UUID following RFC 4122 v4 layout
+// (version 4, variant 10). Returned as a lowercase hyphenated hex string
+// matching Python's str(uuid.uuid4()).
+const helperUuid4 = `func __gopy_uuid4() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+		b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])
+}`
+
+// helperTextwrapDedent strips the longest common leading whitespace from
+// every non-empty line. Mirrors textwrap.dedent semantics.
+const helperTextwrapDedent = `func __gopy_textwrap_dedent(s string) string {
+	lines := strings.Split(s, "\n")
+	prefix := ""
+	first := true
+	for _, line := range lines {
+		stripped := strings.TrimLeft(line, " \t")
+		if stripped == "" {
+			continue
+		}
+		lead := line[:len(line)-len(stripped)]
+		if first {
+			prefix = lead
+			first = false
+			continue
+		}
+		i := 0
+		for i < len(prefix) && i < len(lead) && prefix[i] == lead[i] {
+			i++
+		}
+		prefix = prefix[:i]
+		if prefix == "" {
+			break
+		}
+	}
+	if prefix == "" {
+		return s
+	}
+	var b strings.Builder
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		if strings.HasPrefix(line, prefix) {
+			b.WriteString(line[len(prefix):])
+		} else {
+			b.WriteString(line)
+		}
+	}
+	return b.String()
+}`
+
+const helperTextwrapIndent = `func __gopy_textwrap_indent(s, prefix string) string {
+	var b strings.Builder
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		if strings.TrimSpace(line) != "" {
+			b.WriteString(prefix)
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}`
+
+// helperTextwrapFill wraps text to width by breaking on spaces. CPython's
+// textwrap is configurable; this shim covers the simple width-only form.
+const helperTextwrapFill = `func __gopy_textwrap_fill(s string, width int64) string {
+	w := int(width)
+	if w <= 0 {
+		return s
+	}
+	words := strings.Fields(s)
+	var b strings.Builder
+	col := 0
+	for i, word := range words {
+		wl := len(word)
+		if i > 0 {
+			if col+1+wl > w {
+				b.WriteByte('\n')
+				col = 0
+			} else {
+				b.WriteByte(' ')
+				col++
+			}
+		}
+		b.WriteString(word)
+		col += wl
+	}
+	return b.String()
+}`
 
 // helperPathType is the runtime Path struct used by pathlib.Path.
 // Mirrors a handful of Path methods sufficient for "open this, check

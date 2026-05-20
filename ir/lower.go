@@ -1645,11 +1645,22 @@ func sameType(a, b *Type) bool {
 
 func lowerConstant(n parser.Node) (Expr, error) {
 	v := n["value"]
+	// Prefer the explicit _const_kind tag the AST dumper adds — it lets us
+	// distinguish `1` (Python int) from `1.0` (Python float), which both
+	// land here as float64 after JSON decode.
+	kind, _ := n["_const_kind"].(string)
 	switch x := v.(type) {
 	case bool:
 		return &BoolLit{V: x, Ty: &Type{Kind: TyBool}}, nil
 	case float64:
-		// JSON has no int/float distinction. Treat integer-valued floats as int.
+		if kind == "float" {
+			return &FloatLit{V: x, Ty: &Type{Kind: TyFloat}}, nil
+		}
+		if kind == "int" {
+			return &IntLit{V: int64(x), Ty: &Type{Kind: TyInt}}, nil
+		}
+		// Fallback when the dumper didn't tag (older trees): integer-valued
+		// floats become int, anything else stays float.
 		if x == float64(int64(x)) {
 			return &IntLit{V: int64(x), Ty: &Type{Kind: TyInt}}, nil
 		}
