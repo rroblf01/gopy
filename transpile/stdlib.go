@@ -305,8 +305,16 @@ const helperTimeSleep = `func __gopy_time_sleep(seconds float64) { time.Sleep(ti
 
 // helperJSONDumps mirrors CPython's json.dumps default separators of
 // `, ` and `: `. Go's encoding/json emits compact JSON, so we reformat
-// the result outside of any string literal.
-const helperJSONDumps = `func __gopy_json_dumps(v any) string {
+// the result outside of any string literal. The variadic indent param
+// matches Python's optional indent=N kwarg (>= 0 enables pretty-print).
+const helperJSONDumps = `func __gopy_json_dumps(v any, indent ...int64) string {
+	if len(indent) > 0 && indent[0] >= 0 {
+		b, err := json.MarshalIndent(v, "", strings.Repeat(" ", int(indent[0])))
+		if err != nil {
+			panic(err)
+		}
+		return string(b)
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		panic(err)

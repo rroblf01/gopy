@@ -108,6 +108,13 @@ func lowerTopLevel(n parser.Node) ([]Decl, error) {
 			return nil, fmt.Errorf("line %d: module-level assignment must be `name = expr`", n.Lineno())
 		}
 		name := targets[0].Str("id")
+		// `Point = namedtuple("Point", ["x", "y"])` → synthesize a Class
+		// with one struct field per name (all typed `any` since the
+		// per-field types aren't known at declaration time). Constructors
+		// route through the standard Class call site.
+		if nt, ok := namedtupleDecl(n.Child("value"), name); ok {
+			return []Decl{nt}, nil
+		}
 		sc := newScope()
 		val, err := lowerExpr(n.Child("value"), sc)
 		if err != nil {
@@ -147,6 +154,91 @@ func lowerTopLevel(n parser.Node) ([]Decl, error) {
 	default:
 		return nil, fmt.Errorf("line %d: unsupported top-level node %q", n.Lineno(), n.Type())
 	}
+}
+
+// namedtupleDecl recognizes the `Name = namedtuple("Name", ["f1", ...])`
+// pattern and synthesizes a Class decl with one any-typed field per name.
+// Returns (nil, false) when the RHS isn't a namedtuple call. The class
+// name is taken from the assignment target so that `Foo = namedtuple("Bar", ...)`
+// still produces a Go type called Foo.
+func namedtupleDecl(val parser.Node, lhsName string) (*Class, bool) {
+	if val == nil || val.Type() != "Call" {
+		return nil, false
+	}
+	fn := val.Child("func")
+	if fn == nil {
+		return nil, false
+	}
+	isNT := false
+	switch fn.Type() {
+	case "Name":
+		if fn.Str("id") == "namedtuple" {
+			isNT = true
+		}
+	case "Attribute":
+		recv := fn.Child("value")
+		if recv != nil && recv.Type() == "Name" && recv.Str("id") == "collections" && fn.Str("attr") == "namedtuple" {
+			isNT = true
+		}
+	}
+	if !isNT {
+		return nil, false
+	}
+	args := val.Children("args")
+	if len(args) < 2 {
+		return nil, false
+	}
+	// Second arg may be a list of name strings or a single space-separated str.
+	var fieldNames []string
+	switch args[1].Type() {
+	case "List", "Tuple":
+		for _, e := range args[1].Children("elts") {
+			if e.Type() != "Constant" {
+				return nil, false
+			}
+			s, _ := e["value"].(string)
+			fieldNames = append(fieldNames, s)
+		}
+	case "Constant":
+		s, _ := args[1]["value"].(string)
+		for _, p := range splitFields(s) {
+			fieldNames = append(fieldNames, p)
+		}
+	default:
+		return nil, false
+	}
+	cls := &Class{Name: lhsName, HasInit: true}
+	for _, f := range fieldNames {
+		ty := &Type{Kind: TyAny}
+		cls.Fields = append(cls.Fields, Param{Name: f, Ty: ty})
+		cls.InitArgs = append(cls.InitArgs, Param{Name: f, Ty: ty})
+		cls.InitBody = append(cls.InitBody, &AssignAttr{
+			Target: &Name{N: "self", Ty: &Type{Kind: TyNamed, Name: lhsName}},
+			Name:   f,
+			Value:  &Name{N: f, Ty: ty},
+		})
+	}
+	return cls, true
+}
+
+// splitFields breaks a namedtuple field-string on whitespace and commas.
+func splitFields(s string) []string {
+	var out []string
+	cur := ""
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == ',' {
+			if cur != "" {
+				out = append(out, cur)
+				cur = ""
+			}
+			continue
+		}
+		cur += string(r)
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
 }
 
 // moduleScopeVars tracks top-level Name → Type so function-body scopes

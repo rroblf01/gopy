@@ -733,6 +733,21 @@ func (g *gen) stmt(s ir.Stmt) error {
 		default:
 			g.writef("%s = ", x.Target)
 		}
+		// Empty list/dict literals on the RHS need the target's typed
+		// shape; otherwise the IR's TyAny element type would produce
+		// `[]any{}` which won't assign to `[]string`.
+		if x.Ty != nil && x.Ty.Kind == ir.TyList {
+			if ll, ok := x.Value.(*ir.ListLit); ok && len(ll.Elems) == 0 {
+				g.writef("%s{}\n", g.goType(x.Ty))
+				return nil
+			}
+		}
+		if x.Ty != nil && x.Ty.Kind == ir.TyDict {
+			if dl, ok := x.Value.(*ir.DictLit); ok && len(dl.Keys) == 0 {
+				g.writef("%s{}\n", g.goType(x.Ty))
+				return nil
+			}
+		}
 		if err := g.expr(x.Value); err != nil {
 			return err
 		}
@@ -1581,6 +1596,18 @@ func (g *gen) forEach(x *ir.ForEach) error {
 			single = true
 		}
 	}
+	// Tag propagation: `for child in recv.iterdir()` should bind child
+	// with the same tag the slice elements carry, so `child.name` etc.
+	// dispatch through taggedPropAttrs.
+	if mc, ok := x.Iter.(*ir.MethodCall); ok && x.Var != "_" {
+		if recvTag := g.exprTag(mc.Recv); recvTag != "" {
+			if elemTags, ok := taggedMethodElemTag[recvTag]; ok {
+				if tag, ok := elemTags[mc.Method]; ok {
+					g.varTypes[x.Var] = tag
+				}
+			}
+		}
+	}
 	switch {
 	case x.Var == "_":
 		g.writef("for range ")
@@ -2214,6 +2241,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinPartial(c)
 			case "datetime.timedelta":
 				return g.builtinTimedelta(c)
+			case "json.dumps":
+				return g.builtinJSONDumps(c)
 			case "itertools.groupby":
 				return g.builtinGroupBy(c)
 			case "logging.basicConfig":
@@ -2799,6 +2828,16 @@ var taggedMethodRetTag = map[string]map[string]string{
 	},
 }
 
+// taggedMethodElemTag tracks methods that return a slice of tagged
+// values. Used to propagate the element tag onto a `for x in recv.m()`
+// loop variable so chained attribute access (e.g. `child.name`) keeps
+// dispatching through the tag tables.
+var taggedMethodElemTag = map[string]map[string]string{
+	"__Path": {
+		"iterdir": "__Path",
+	},
+}
+
 // taggedAttrInfo describes one tagged-value field: the Go field name to
 // emit at the call site plus the IR type its access yields so chained
 // expressions can dispatch correctly (e.g. `result.stdout.strip()`).
@@ -2903,6 +2942,10 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinAccumulate(synth)
 		case "subprocess.run":
 			return g.builtinSubprocessRun(synth)
+		case "json.dumps":
+			return g.builtinJSONDumps(synth)
+		case "datetime.timedelta":
+			return g.builtinTimedelta(synth)
 		}
 		if fn := lookupStdlibFunc(path, m.Method); fn != nil {
 			if fn.GoImport != "" {
@@ -4736,6 +4779,39 @@ func (g *gen) builtinTimedelta(c *ir.Call) error {
 		if needCast {
 			g.writef(")")
 		}
+	}
+	g.writef(")")
+	return nil
+}
+
+// builtinJSONDumps emits a json.dumps call optionally honoring the
+// indent= kwarg. Other kwargs (sort_keys, separators, default) are not
+// supported yet — they error at the call site so users notice rather
+// than silently get the default formatting.
+func (g *gen) builtinJSONDumps(c *ir.Call) error {
+	if len(c.Args) != 1 {
+		return fmt.Errorf("json.dumps() takes 1 positional argument")
+	}
+	var indent ir.Expr
+	for _, kw := range c.Keywords {
+		if kw.Name != "indent" {
+			return fmt.Errorf("json.dumps(): unsupported keyword %q", kw.Name)
+		}
+		indent = kw.Value
+	}
+	g.addImport("encoding/json")
+	g.addImport("strings")
+	g.helpers["__gopy_json_dumps"] = helperJSONDumps
+	g.writef("__gopy_json_dumps(")
+	if err := g.boxedExpr(c.Args[0]); err != nil {
+		return err
+	}
+	if indent != nil {
+		g.writef(", int64(")
+		if err := g.expr(indent); err != nil {
+			return err
+		}
+		g.writef(")")
 	}
 	g.writef(")")
 	return nil
