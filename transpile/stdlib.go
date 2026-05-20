@@ -129,8 +129,14 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"base64": {
 		Funcs: map[string]stdlibFunc{
-			"b64encode": {GoFunc: "__gopy_b64encode", GoImport: "encoding/base64", Helper: helperB64Encode, RetKind: "str"},
-			"b64decode": {GoFunc: "__gopy_b64decode", GoImport: "encoding/base64", Helper: helperB64Decode, RetKind: "str"},
+			"b64encode":         {GoFunc: "__gopy_b64encode", GoImport: "encoding/base64", Helper: helperB64Encode, RetKind: "str"},
+			"b64decode":         {GoFunc: "__gopy_b64decode", GoImport: "encoding/base64", Helper: helperB64Decode, RetKind: "str"},
+			"urlsafe_b64encode": {GoFunc: "__gopy_b64urlencode", GoImport: "encoding/base64", Helper: helperB64URLEncode, RetKind: "str"},
+			"urlsafe_b64decode": {GoFunc: "__gopy_b64urldecode", GoImport: "encoding/base64", Helper: helperB64URLDecode, RetKind: "str"},
+			"b32encode":         {GoFunc: "__gopy_b32encode", GoImport: "encoding/base32", Helper: helperB32Encode, RetKind: "str"},
+			"b32decode":         {GoFunc: "__gopy_b32decode", GoImport: "encoding/base32", Helper: helperB32Decode, RetKind: "str"},
+			"b16encode":         {GoFunc: "__gopy_b16encode", GoImport: "encoding/hex", Helper: helperB16Encode, HelperImports: []string{"strings"}, RetKind: "str"},
+			"b16decode":         {GoFunc: "__gopy_b16decode", GoImport: "encoding/hex", Helper: helperB16Decode, RetKind: "str"},
 		},
 	},
 	"urllib": {
@@ -162,6 +168,7 @@ var stdlibModules = map[string]stdlibModule{
 		},
 		Funcs: map[string]stdlibFunc{
 			"Template": {GoFunc: "__gopy_string_template_new", Helper: helperStringTemplateNew, RetTag: "__Template", ExtraHelpers: map[string]string{"__Template": helperStringTemplateType}, HelperImports: []string{"strings", "fmt"}},
+			"capwords": {GoFunc: "__gopy_string_capwords", Helper: helperStringCapwords, HelperImports: []string{"strings"}, RetKind: "str"},
 		},
 	},
 	"collections": {
@@ -808,6 +815,43 @@ const helperB64Decode = `func __gopy_b64decode(s string) string {
 	return string(out)
 }`
 
+const helperB64URLEncode = `func __gopy_b64urlencode(s string) string {
+	return base64.URLEncoding.EncodeToString([]byte(s))
+}`
+
+const helperB64URLDecode = `func __gopy_b64urldecode(s string) string {
+	out, err := base64.URLEncoding.DecodeString(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(out)
+}`
+
+const helperB32Encode = `func __gopy_b32encode(s string) string {
+	return base32.StdEncoding.EncodeToString([]byte(s))
+}`
+
+const helperB32Decode = `func __gopy_b32decode(s string) string {
+	out, err := base32.StdEncoding.DecodeString(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(out)
+}`
+
+// helperB16Encode mirrors CPython's base64.b16encode (uppercase hex).
+const helperB16Encode = `func __gopy_b16encode(s string) string {
+	return strings.ToUpper(hex.EncodeToString([]byte(s)))
+}`
+
+const helperB16Decode = `func __gopy_b16decode(s string) string {
+	out, err := hex.DecodeString(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(out)
+}`
+
 // helperURLQuote mirrors CPython's urllib.parse.quote default safe=/:
 // only ASCII letters, digits, and `_.-~/` pass through unescaped; every
 // other byte renders as %XX. Go's net/url functions either turn space
@@ -1429,6 +1473,33 @@ func (t *__Template) SafeSubstitute(mapping any) string {
 
 const helperStringTemplateNew = `func __gopy_string_template_new(s string) *__Template {
 	return &__Template{tmpl: s}
+}`
+
+// helperStringCapwords mirrors string.capwords: split on whitespace,
+// title-case each word, join with single space.
+const helperStringCapwords = `func __gopy_string_capwords(args ...string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	s := args[0]
+	sep := " "
+	parts := strings.Fields(s)
+	if len(args) > 1 {
+		sep = args[1]
+		parts = strings.Split(s, sep)
+	}
+	for i, w := range parts {
+		if w == "" {
+			continue
+		}
+		first := w[0]
+		if first >= 'a' && first <= 'z' {
+			first -= 32
+		}
+		rest := strings.ToLower(w[1:])
+		parts[i] = string(first) + rest
+	}
+	return strings.Join(parts, sep)
 }`
 
 const helperTextwrapFill = `func __gopy_textwrap_fill(s string, width int64) string {

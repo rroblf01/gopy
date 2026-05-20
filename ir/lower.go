@@ -754,6 +754,13 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			return &Type{Kind: TyBool}, nil
 		case "None":
 			return &Type{Kind: TyNone}, nil
+		case "Any", "Callable", "Iterable", "Iterator", "Sequence":
+			// typing bare aliases — lower to `any` so user code can pass
+			// values around without further annotation.
+			return &Type{Kind: TyAny}, nil
+		case "bytes":
+			// gopy treats bytes as Go's string.
+			return &Type{Kind: TyStr}, nil
 		default:
 			return &Type{Kind: TyNamed, Name: n.Str("id")}, nil
 		}
@@ -804,12 +811,38 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			// typing.Union[...] — same lowering as the `|` operator
 			// form: collapse to any. Components are not tracked.
 			return &Type{Kind: TyAny}, nil
-		case "List":
+		case "List", "Iterable", "Sequence", "Set", "FrozenSet":
 			elem, err := lowerAnnotation(n.Child("slice"))
 			if err != nil {
 				return nil, err
 			}
 			return &Type{Kind: TyList, Elem: elem}, nil
+		case "Tuple":
+			// typing.Tuple[T, U, ...] — match the lowercase tuple[...] path.
+			sl := n.Child("slice")
+			if sl == nil {
+				return nil, fmt.Errorf("Tuple annotation requires component types")
+			}
+			var elts []parser.Node
+			if sl.Type() == "Tuple" {
+				elts = sl.Children("elts")
+			} else {
+				elts = []parser.Node{sl}
+			}
+			out := &Type{Kind: TyTuple}
+			for _, e := range elts {
+				et, err := lowerAnnotation(e)
+				if err != nil {
+					return nil, err
+				}
+				out.Tuple = append(out.Tuple, et)
+			}
+			return out, nil
+		case "Callable":
+			// `Callable[[A, B], R]` — gopy lowers to `any` since first-class
+			// function values flow through interface{}. The signature info
+			// is intentionally dropped.
+			return &Type{Kind: TyAny}, nil
 		case "Dict":
 			sl := n.Child("slice")
 			if sl.Type() != "Tuple" {
