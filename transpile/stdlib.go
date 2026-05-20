@@ -193,6 +193,7 @@ var stdlibModules = map[string]stdlibModule{
 			"permutations": {GoFunc: "__gopy_permutations_unused"},
 			"islice":       {GoFunc: "__gopy_islice_unused"},
 			"repeat":       {GoFunc: "__gopy_repeat_unused"},
+			"starmap":      {GoFunc: "__gopy_starmap_unused"},
 		},
 	},
 	"random": {
@@ -200,6 +201,12 @@ var stdlibModules = map[string]stdlibModule{
 			"random":  {GoFunc: "__gopy_random", GoImport: "math/rand", Helper: helperRandomFloat},
 			"randint": {GoFunc: "__gopy_randint", GoImport: "math/rand", Helper: helperRandint},
 			"seed":    {GoFunc: "__gopy_random_seed", GoImport: "math/rand", Helper: helperRandomSeed},
+			"uniform": {GoFunc: "__gopy_random_uniform", GoImport: "math/rand", Helper: helperRandomUniform, RetKind: "float"},
+			// choice / shuffle / sample dispatch per-element type from
+			// transpile.go's call() builders below.
+			"choice":  {GoFunc: "__gopy_random_choice_unused"},
+			"shuffle": {GoFunc: "__gopy_random_shuffle_unused"},
+			"sample":  {GoFunc: "__gopy_random_sample_unused"},
 		},
 	},
 	"statistics": {
@@ -831,6 +838,10 @@ const helperRandint = `func __gopy_randint(a, b int64) int64 {
 }`
 
 const helperRandomSeed = `func __gopy_random_seed(s int64) { rand.Seed(s) }`
+
+const helperRandomUniform = `func __gopy_random_uniform(a, b float64) float64 {
+	return a + rand.Float64()*(b-a)
+}`
 
 // helperStatsMean mirrors statistics.mean / statistics.fmean: arithmetic
 // mean of a non-empty slice, returned as float64.

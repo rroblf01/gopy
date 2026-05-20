@@ -1574,8 +1574,17 @@ func (g *gen) forEach(x *ir.ForEach) error {
 		g.indent++
 		g.writeIndent()
 		// Promote Go's int index to int64 so downstream arithmetic
-		// matches Python's integer model.
-		g.writef("%s := int64(__i); _ = %s\n", x.Var, x.Var)
+		// matches Python's integer model. The optional `start=` kwarg
+		// (parked in Iter2) shifts the index without an extra var.
+		if x.Iter2 != nil {
+			g.writef("%s := int64(__i) + ", x.Var)
+			if err := g.expr(x.Iter2); err != nil {
+				return err
+			}
+			g.writef("; _ = %s\n", x.Var)
+		} else {
+			g.writef("%s := int64(__i); _ = %s\n", x.Var, x.Var)
+		}
 		g.indent--
 		return g.forEachBody(x)
 	case "zip":
@@ -2287,6 +2296,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinIslice(c)
 			case "itertools.repeat":
 				return g.builtinRepeat(c)
+			case "itertools.starmap":
+				return g.builtinStarmap(c)
 			case "subprocess.run":
 				return g.builtinSubprocessRun(c)
 			case "collections.deque":
@@ -2299,6 +2310,12 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinTimedelta(c)
 			case "json.dumps":
 				return g.builtinJSONDumps(c)
+			case "random.choice":
+				return g.builtinRandomChoice(c)
+			case "random.shuffle":
+				return g.builtinRandomShuffle(c)
+			case "random.sample":
+				return g.builtinRandomSample(c)
 			case "itertools.groupby":
 				return g.builtinGroupBy(c)
 			case "logging.basicConfig":
@@ -3018,6 +3035,12 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinJSONDumps(synth)
 		case "datetime.timedelta":
 			return g.builtinTimedelta(synth)
+		case "random.choice":
+			return g.builtinRandomChoice(synth)
+		case "random.shuffle":
+			return g.builtinRandomShuffle(synth)
+		case "random.sample":
+			return g.builtinRandomSample(synth)
 		}
 		if fn := lookupStdlibFunc(path, m.Method); fn != nil {
 			if fn.GoImport != "" {
@@ -4901,6 +4924,129 @@ func (g *gen) builtinTimedelta(c *ir.Call) error {
 	return nil
 }
 
+// builtinRandomChoice emits an IIFE that picks a random element from
+// the typed slice. Panics IndexError on empty input.
+func (g *gen) builtinRandomChoice(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("random.choice() takes one positional argument")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("random.choice(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.addImport("math/rand")
+	g.needsException = true
+	g.writef("func() %s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("if len(__src) == 0 { panic(NewException(\"IndexError: cannot choose from empty sequence\")) }\n")
+	g.writeIndent()
+	g.writef("return __src[rand.Intn(len(__src))]\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinRandomShuffle emits an in-place Fisher-Yates shuffle. Like the
+// other list mutators, the receiver must be an addressable expression.
+func (g *gen) builtinRandomShuffle(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("random.shuffle() takes one positional argument")
+	}
+	if _, err := listElemTypeOf(c.Args[0]); err != nil {
+		return fmt.Errorf("random.shuffle(): %w", err)
+	}
+	g.addImport("math/rand")
+	g.writef("for __i := len(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(") - 1; __i > 0; __i-- {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__j := rand.Intn(__i + 1)\n")
+	g.writeIndent()
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__i], ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__j] = ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__j], ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__i]\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}")
+	return nil
+}
+
+// builtinRandomSample emits k unique elements drawn from the input list.
+// Copies the slice, partial-shuffles, returns the first k.
+func (g *gen) builtinRandomSample(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("random.sample() takes (population, k)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("random.sample(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.addImport("math/rand")
+	g.needsException = true
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__k := int(")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("if __k < 0 || __k > len(__src) { panic(NewException(\"ValueError: sample larger than population\")) }\n")
+	g.writeIndent()
+	g.writef("__cp := make([]%s, len(__src))\n", elemGo)
+	g.writeIndent()
+	g.writef("copy(__cp, __src)\n")
+	g.writeIndent()
+	g.writef("for __i := len(__cp) - 1; __i > len(__cp)-__k-1 && __i > 0; __i-- {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__j := rand.Intn(__i + 1)\n")
+	g.writeIndent()
+	g.writef("__cp[__i], __cp[__j] = __cp[__j], __cp[__i]\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __cp[len(__cp)-__k:]\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 // builtinJSONDumps emits a json.dumps call optionally honoring the
 // indent= kwarg. Other kwargs (sort_keys, separators, default) are not
 // supported yet — they error at the call site so users notice rather
@@ -5010,6 +5156,75 @@ func (g *gen) builtinDictFromkeys(m *ir.MethodCall) error {
 		g.writeIndent()
 		g.writef("for _, __k := range __src { __out[__k] = __v }\n")
 	}
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinStarmap emits `starmap(fn, iterable)` where iterable is a list
+// of pair-lists (tuples lowered to slices). The lambda body is re-lowered
+// with the inner element type for both params so arithmetic typechecks.
+// Only 2-arg lambdas are supported — matches our tuple-as-slice shape.
+func (g *gen) builtinStarmap(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("starmap() takes (fn, iterable)")
+	}
+	lam, ok := c.Args[0].(*ir.Lambda)
+	if !ok {
+		return fmt.Errorf("starmap(): first arg must be an inline lambda")
+	}
+	if len(lam.Params) != 2 {
+		return fmt.Errorf("starmap(): lambda must take 2 arguments (pair-tuples only)")
+	}
+	outer, err := listElemTypeOf(c.Args[1])
+	if err != nil {
+		return fmt.Errorf("starmap(): %w", err)
+	}
+	if outer.Kind != ir.TyList {
+		return fmt.Errorf("starmap(): iterable must be a list of pair-tuples")
+	}
+	innerElem := outer.Elem
+	body, err := ir.LowerLambdaBody(lam, []*ir.Type{innerElem, innerElem})
+	if err != nil {
+		return fmt.Errorf("starmap(): %w", err)
+	}
+	retTy := body.TypeOf()
+	if retTy == nil || retTy.Kind == ir.TyUnknown {
+		retTy = innerElem
+	}
+	retGo := g.goType(retTy)
+	p0, p1 := lam.Params[0].Name, lam.Params[1].Name
+	g.writef("func() []%s {\n", retGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := make([]%s, 0, len(__src))\n", retGo)
+	g.writeIndent()
+	g.writef("for _, __pair := range __src {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("%s := __pair[0]\n", p0)
+	g.writeIndent()
+	g.writef("%s := __pair[1]\n", p1)
+	g.writeIndent()
+	g.writef("_, _ = %s, %s\n", p0, p1)
+	g.writeIndent()
+	g.writef("__out = append(__out, ")
+	if err := g.expr(body); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
 	g.writeIndent()
 	g.writef("return __out\n")
 	g.indent--

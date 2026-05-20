@@ -2415,12 +2415,27 @@ func lowerForTuple(n parser.Node, sc *scope, v1, v2 string, iter parser.Node) (S
 		fn := iter.Child("func")
 		if fn.Type() == "Name" && fn.Str("id") == "enumerate" {
 			args := iter.Children("args")
-			if len(args) != 1 {
-				return nil, fmt.Errorf("line %d: enumerate() takes 1 argument", n.Lineno())
+			if len(args) < 1 || len(args) > 2 {
+				return nil, fmt.Errorf("line %d: enumerate() takes 1 or 2 positional arguments", n.Lineno())
 			}
 			seq, err := lowerExpr(args[0], sc)
 			if err != nil {
 				return nil, err
+			}
+			var startExpr Expr
+			if len(args) == 2 {
+				startExpr, err = lowerExpr(args[1], sc)
+				if err != nil {
+					return nil, err
+				}
+			}
+			for _, kw := range iter.Children("keywords") {
+				if kw.Str("arg") == "start" {
+					startExpr, err = lowerExpr(kw.Child("value"), sc)
+					if err != nil {
+						return nil, err
+					}
+				}
 			}
 			var elemTy *Type
 			if t := seq.TypeOf(); t != nil && t.Kind == TyList {
@@ -2433,7 +2448,7 @@ func lowerForTuple(n parser.Node, sc *scope, v1, v2 string, iter parser.Node) (S
 			if err != nil {
 				return nil, err
 			}
-			return &ForEach{Var: v1, Var2: v2, Iter: seq, ElemTy: elemTy, Kind: "enum", Body: body}, nil
+			return &ForEach{Var: v1, Var2: v2, Iter: seq, Iter2: startExpr, ElemTy: elemTy, Kind: "enum", Body: body}, nil
 		}
 		if fn.Type() == "Name" && fn.Str("id") == "zip" {
 			args := iter.Children("args")
