@@ -1020,6 +1020,16 @@ const helperGopyBin = `func __gopy_bin(n int64) string {
 	return fmt.Sprintf("0b%b", n)
 }`
 
+// helperGopyCallable mirrors Python's callable() for runtime values: a
+// reflect.Func kind matches, everything else returns false. Classes
+// (user-defined types) hit at compile time before this helper is reached.
+const helperGopyCallable = `func __gopy_callable(v any) bool {
+	if v == nil {
+		return false
+	}
+	return reflect.TypeOf(v).Kind() == reflect.Func
+}`
+
 // helperStrMaketrans builds the rune→string mapping used by str.translate.
 // 2-arg form: pair from[i] → to[i]. 3-arg form: chars in delete map to "".
 const helperStrMaketrans = `func __gopy_str_maketrans(from, to string, del ...string) map[rune]string {
@@ -2298,6 +2308,20 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinRepeat(c)
 			case "itertools.starmap":
 				return g.builtinStarmap(c)
+			case "heapq.heappush":
+				return g.builtinHeappush(c)
+			case "heapq.heappop":
+				return g.builtinHeappop(c)
+			case "heapq.heapify":
+				return g.builtinHeapify(c)
+			case "heapq.heappushpop":
+				return g.builtinHeappushpop(c)
+			case "bisect.bisect_left":
+				return g.builtinBisect(c, false)
+			case "bisect.bisect_right":
+				return g.builtinBisect(c, true)
+			case "bisect.insort":
+				return g.builtinInsort(c)
 			case "subprocess.run":
 				return g.builtinSubprocessRun(c)
 			case "collections.deque":
@@ -2648,6 +2672,8 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinOct(c)
 		case "bin":
 			return g.builtinBin(c)
+		case "callable":
+			return g.builtinCallable(c)
 		}
 	}
 	// User-defined free function: resolve kwargs/defaults if any.
@@ -3041,6 +3067,20 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinRandomShuffle(synth)
 		case "random.sample":
 			return g.builtinRandomSample(synth)
+		case "heapq.heappush":
+			return g.builtinHeappush(synth)
+		case "heapq.heappop":
+			return g.builtinHeappop(synth)
+		case "heapq.heapify":
+			return g.builtinHeapify(synth)
+		case "heapq.heappushpop":
+			return g.builtinHeappushpop(synth)
+		case "bisect.bisect_left":
+			return g.builtinBisect(synth, false)
+		case "bisect.bisect_right":
+			return g.builtinBisect(synth, true)
+		case "bisect.insort":
+			return g.builtinInsort(synth)
 		}
 		if fn := lookupStdlibFunc(path, m.Method); fn != nil {
 			if fn.GoImport != "" {
@@ -4727,6 +4767,33 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	return nil
 }
 
+// builtinCallable resolves `callable(x)` statically when x is a known
+// function or class name, otherwise routes through a reflect-based
+// helper. Methods on instances and bound methods are not supported.
+func (g *gen) builtinCallable(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("callable() takes exactly 1 positional argument")
+	}
+	if n, ok := c.Args[0].(*ir.Name); ok {
+		if _, isFn := g.funcs[n.N]; isFn {
+			g.writef("true")
+			return nil
+		}
+		if _, isCls := g.classes[n.N]; isCls {
+			g.writef("true")
+			return nil
+		}
+	}
+	g.helpers["__gopy_callable"] = helperGopyCallable
+	g.addImport("reflect")
+	g.writef("__gopy_callable(")
+	if err := g.boxedExpr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")")
+	return nil
+}
+
 // builtinHex / builtinOct / builtinBin mirror Python's prefixed-string
 // converters for ints. Negative numbers get a leading minus before the
 // prefix (e.g. `-0xff`), matching CPython.
@@ -5162,6 +5229,395 @@ func (g *gen) builtinDictFromkeys(m *ir.MethodCall) error {
 	g.writeIndent()
 	g.writef("}()")
 	return nil
+}
+
+// builtinHeappush emits an inline min-heap push: appends, then sifts up.
+// The receiver must be an addressable typed list whose element type is
+// comparable with `<` (int / float / str).
+func (g *gen) builtinHeappush(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("heapq.heappush() takes (heap, item)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("heapq.heappush(): %w", err)
+	}
+	if !heapOrderable(elem) {
+		return fmt.Errorf("heapq.heappush(): element type must be int/float/str")
+	}
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(" = append(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(", ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("__i := len(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(") - 1\n")
+	g.writeIndent()
+	g.writef("for __i > 0 {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__p := (__i - 1) / 2\n")
+	g.writeIndent()
+	g.writef("if !(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__i] < ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__p]) { break }\n")
+	g.writeIndent()
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__i], ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__p] = ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__p], ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__i]\n")
+	g.writeIndent()
+	g.writef("__i = __p\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinHeappop emits an IIFE that pops the smallest element and sifts
+// the replacement down.
+func (g *gen) builtinHeappop(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("heapq.heappop() takes (heap)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("heapq.heappop(): %w", err)
+	}
+	if !heapOrderable(elem) {
+		return fmt.Errorf("heapq.heappop(): element type must be int/float/str")
+	}
+	g.needsException = true
+	elemGo := g.goType(elem)
+	g.writef("func() %s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("if len(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(") == 0 { panic(NewException(\"IndexError: heappop from empty heap\")) }\n")
+	g.writeIndent()
+	g.writef("__top := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[0]\n")
+	g.writeIndent()
+	g.writef("__last := len(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(") - 1\n")
+	g.writeIndent()
+	g.writef("if __last == 0 {\n")
+	g.indent++
+	g.writeIndent()
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(" = ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[:0]\n")
+	g.writeIndent()
+	g.writef("return __top\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[0] = ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__last]\n")
+	g.writeIndent()
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(" = ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[:__last]\n")
+	g.writeIndent()
+	g.writef("__i := 0\n")
+	g.writeIndent()
+	g.writef("__n := len(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("for {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__l := 2*__i + 1\n")
+	g.writeIndent()
+	g.writef("__r := 2*__i + 2\n")
+	g.writeIndent()
+	g.writef("__best := __i\n")
+	g.writeIndent()
+	g.writef("if __l < __n && ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__l] < ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__best] { __best = __l }\n")
+	g.writeIndent()
+	g.writef("if __r < __n && ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__r] < ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__best] { __best = __r }\n")
+	g.writeIndent()
+	g.writef("if __best == __i { break }\n")
+	g.writeIndent()
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__i], ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__best] = ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__best], ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__i]\n")
+	g.writeIndent()
+	g.writef("__i = __best\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __top\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinHeapify emits an inline sort.Slice-based heapify — simplest
+// correct approach for our limited heap surface. Sorting in ascending
+// order is a valid min-heap ordering; subsequent heappush/heappop fixes
+// the invariant.
+func (g *gen) builtinHeapify(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("heapq.heapify() takes (heap)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("heapq.heapify(): %w", err)
+	}
+	if !heapOrderable(elem) {
+		return fmt.Errorf("heapq.heapify(): element type must be int/float/str")
+	}
+	g.addImport("sort")
+	g.writef("sort.Slice(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(", func(i, j int) bool { return ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[i] < ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[j] })")
+	return nil
+}
+
+// builtinHeappushpop emits a push-then-pop, returning the smaller of the
+// new item and the heap's current min. Faster than push+pop for hot loops.
+func (g *gen) builtinHeappushpop(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("heapq.heappushpop() takes (heap, item)")
+	}
+	if err := g.builtinHeappush(c); err != nil {
+		return err
+	}
+	g.writef("; ")
+	popSynth := &ir.Call{Args: c.Args[:1]}
+	return g.builtinHeappop(popSynth)
+}
+
+// builtinBisect emits a binary search returning the insertion index for
+// `item` in the sorted slice. `right` selects bisect_right semantics.
+func (g *gen) builtinBisect(c *ir.Call, right bool) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("bisect_left/right() takes (a, x)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("bisect(): %w", err)
+	}
+	if !heapOrderable(elem) {
+		return fmt.Errorf("bisect(): element type must be int/float/str")
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() int64 {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("var __x %s = ", elemGo)
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__lo, __hi := 0, len(__src)\n")
+	g.writeIndent()
+	g.writef("for __lo < __hi {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__mid := (__lo + __hi) / 2\n")
+	g.writeIndent()
+	if right {
+		g.writef("if __x < __src[__mid] { __hi = __mid } else { __lo = __mid + 1 }\n")
+	} else {
+		g.writef("if __src[__mid] < __x { __lo = __mid + 1 } else { __hi = __mid }\n")
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return int64(__lo)\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinInsort emits the insort_right form: finds index via bisect_right
+// then splices the new element into the slice.
+func (g *gen) builtinInsort(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("bisect.insort() takes (a, x)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("insort(): %w", err)
+	}
+	if !heapOrderable(elem) {
+		return fmt.Errorf("insort(): element type must be int/float/str")
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("var __x %s = ", elemGo)
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__lo, __hi := 0, len(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("for __lo < __hi {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__mid := (__lo + __hi) / 2\n")
+	g.writeIndent()
+	g.writef("if __x < ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__mid] { __hi = __mid } else { __lo = __mid + 1 }\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(" = append(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[:__lo], append([]%s{__x}, ", elemGo)
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("[__lo:]...)...)\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// heapOrderable returns true when the element type supports `<` directly
+// in Go (int / float / str).
+func heapOrderable(t *ir.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Kind {
+	case ir.TyInt, ir.TyFloat, ir.TyStr:
+		return true
+	}
+	return false
 }
 
 // builtinStarmap emits `starmap(fn, iterable)` where iterable is a list

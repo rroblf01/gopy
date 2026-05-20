@@ -181,6 +181,22 @@ var stdlibModules = map[string]stdlibModule{
 			"basicConfig": {GoFunc: "__gopy_log_basicConfig", Helper: helperLogBasicConfig},
 		},
 	},
+	"heapq": {
+		Funcs: map[string]stdlibFunc{
+			// Dispatched per-element-type in transpile.go's call() builders.
+			"heappush":    {GoFunc: "__gopy_heappush_unused"},
+			"heappop":     {GoFunc: "__gopy_heappop_unused"},
+			"heapify":     {GoFunc: "__gopy_heapify_unused"},
+			"heappushpop": {GoFunc: "__gopy_heappushpop_unused"},
+		},
+	},
+	"bisect": {
+		Funcs: map[string]stdlibFunc{
+			"bisect_left":  {GoFunc: "__gopy_bisect_left_unused"},
+			"bisect_right": {GoFunc: "__gopy_bisect_right_unused"},
+			"insort":       {GoFunc: "__gopy_insort_unused"},
+		},
+	},
 	"itertools": {
 		Funcs: map[string]stdlibFunc{
 			"chain":        {GoFunc: "__gopy_chain_unused"},
