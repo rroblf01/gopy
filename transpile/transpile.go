@@ -1666,6 +1666,12 @@ func (g *gen) expr(e ir.Expr) error {
 					g.writef("))")
 					return nil
 				}
+				if lTy.Kind == ir.TyList && rTy.Kind == ir.TyInt {
+					return g.emitListRepeat(x.L, x.R, lTy.Elem)
+				}
+				if lTy.Kind == ir.TyInt && rTy.Kind == ir.TyList {
+					return g.emitListRepeat(x.R, x.L, rTy.Elem)
+				}
 			}
 		}
 		op := x.Op
@@ -2145,6 +2151,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinReduceFn(c)
 			case "functools.partial":
 				return g.builtinPartial(c)
+			case "datetime.timedelta":
+				return g.builtinTimedelta(c)
 			case "itertools.groupby":
 				return g.builtinGroupBy(c)
 			case "logging.basicConfig":
@@ -4530,6 +4538,102 @@ func (g *gen) builtinSet(c *ir.Call) error {
 	g.writef("__out := []%s{}\n", elemGo)
 	g.writeIndent()
 	g.writef("for _, __v := range __src { if !__seen[__v] { __seen[__v] = true; __out = append(__out, __v) } }\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinTimedelta resolves Python's `timedelta(days, seconds, ...)`
+// constructor against the 7 named parameters and emits a call to
+// __gopy_timedelta_new with each slot filled (0 default). Both positional
+// and keyword forms are supported, mixed with defaults.
+func (g *gen) builtinTimedelta(c *ir.Call) error {
+	g.addImport("time")
+	g.helpers["__gopy_timedelta_new"] = helperTimedeltaNew
+	g.helpers["__Timedelta"] = helperTimedeltaType
+	g.addImport("fmt")
+	params := []string{"days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks"}
+	values := make([]ir.Expr, len(params))
+	if len(c.Args) > len(params) {
+		return fmt.Errorf("timedelta() takes at most 7 positional arguments")
+	}
+	for i, a := range c.Args {
+		values[i] = a
+	}
+	for _, kw := range c.Keywords {
+		idx := -1
+		for i, p := range params {
+			if p == kw.Name {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return fmt.Errorf("timedelta(): unknown keyword %q", kw.Name)
+		}
+		if values[idx] != nil {
+			return fmt.Errorf("timedelta(): duplicate keyword %q (also passed positionally)", kw.Name)
+		}
+		values[idx] = kw.Value
+	}
+	g.writef("__gopy_timedelta_new(")
+	for i, v := range values {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if v == nil {
+			g.writef("0")
+			continue
+		}
+		// Cast int operands to float64 so the variadic helper signature
+		// stays consistent.
+		t := v.TypeOf()
+		needCast := t == nil || t.Kind == ir.TyInt
+		if needCast {
+			g.writef("float64(")
+		}
+		if err := g.expr(v); err != nil {
+			return err
+		}
+		if needCast {
+			g.writef(")")
+		}
+	}
+	g.writef(")")
+	return nil
+}
+
+// emitListRepeat emits an IIFE that repeats `list` (the typed slice
+// expression) `n` times, mirroring Python's `xs * 3`. Element type comes
+// from the static IR type so the returned slice keeps its concrete shape.
+func (g *gen) emitListRepeat(list, n ir.Expr, elem *ir.Type) error {
+	elemGo := "any"
+	if elem != nil {
+		elemGo = g.goType(elem)
+	}
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(list); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__n := int(")
+	if err := g.expr(n); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("if __n <= 0 { return []%s{} }\n", elemGo)
+	g.writeIndent()
+	g.writef("__out := make([]%s, 0, len(__src)*__n)\n", elemGo)
+	g.writeIndent()
+	g.writef("for __i := 0; __i < __n; __i++ { __out = append(__out, __src...) }\n")
 	g.writeIndent()
 	g.writef("return __out\n")
 	g.indent--

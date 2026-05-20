@@ -23,11 +23,19 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"os": {
+		Attrs: map[string]stdlibAttr{
+			"sep":    {GoExpr: `string(os.PathSeparator)`, GoImport: "os"},
+			"linesep": {GoExpr: `"\n"`},
+		},
 		Funcs: map[string]stdlibFunc{
-			"getenv":  {GoFunc: "os.Getenv", GoImport: "os"},
-			"getcwd":  {GoFunc: "__gopy_os_getcwd", GoImport: "os", Helper: helperOsGetcwd, RetKind: "str"},
-			"listdir": {GoFunc: "__gopy_os_listdir", GoImport: "os", Helper: helperOsListdir},
+			"getenv":   {GoFunc: "os.Getenv", GoImport: "os"},
+			"getcwd":   {GoFunc: "__gopy_os_getcwd", GoImport: "os", Helper: helperOsGetcwd, RetKind: "str"},
+			"listdir":  {GoFunc: "__gopy_os_listdir", GoImport: "os", Helper: helperOsListdir},
 			"makedirs": {GoFunc: "__gopy_os_makedirs", GoImport: "os", Helper: helperOsMakedirs},
+			"remove":   {GoFunc: "__gopy_os_remove", GoImport: "os", Helper: helperOsRemove},
+			"rename":   {GoFunc: "__gopy_os_rename", GoImport: "os", Helper: helperOsRename},
+			"mkdir":    {GoFunc: "__gopy_os_mkdir", GoImport: "os", Helper: helperOsMkdir},
+			"rmdir":    {GoFunc: "__gopy_os_rmdir", GoImport: "os", Helper: helperOsRmdir},
 		},
 		Subs: map[string]stdlibModule{
 			"path": {
@@ -40,6 +48,9 @@ var stdlibModules = map[string]stdlibModule{
 					"dirname":  {GoFunc: "filepath.Dir", GoImport: "path/filepath", RetKind: "str"},
 					"splitext": {GoFunc: "__gopy_path_splitext", GoImport: "path/filepath", Helper: helperPathSplitext},
 					"abspath":  {GoFunc: "__gopy_path_abspath", GoImport: "path/filepath", Helper: helperPathAbspath, RetKind: "str"},
+					"split":    {GoFunc: "__gopy_path_split", GoImport: "path/filepath", Helper: helperPathSplit},
+					"relpath":  {GoFunc: "__gopy_path_relpath", GoImport: "path/filepath", Helper: helperPathRelpath, RetKind: "str"},
+					"getsize":  {GoFunc: "__gopy_path_getsize", GoImport: "os", Helper: helperPathGetsize, RetKind: "int"},
 				},
 			},
 		},
@@ -843,6 +854,61 @@ const helperPathAbspath = `func __gopy_path_abspath(p string) string {
 	return a
 }`
 
+const helperOsRemove = `func __gopy_os_remove(p string) {
+	if err := os.Remove(p); err != nil {
+		panic(err)
+	}
+}`
+
+const helperOsRename = `func __gopy_os_rename(src, dst string) {
+	if err := os.Rename(src, dst); err != nil {
+		panic(err)
+	}
+}`
+
+const helperOsMkdir = `func __gopy_os_mkdir(p string) {
+	if err := os.Mkdir(p, 0o755); err != nil {
+		panic(err)
+	}
+}`
+
+const helperOsRmdir = `func __gopy_os_rmdir(p string) {
+	if err := os.Remove(p); err != nil {
+		panic(err)
+	}
+}`
+
+// helperPathSplit mirrors Python's os.path.split: returns [head, tail].
+// CPython splits on the last separator; filepath.Split keeps the trailing
+// slash on head, which we strip to match the Python output.
+const helperPathSplit = `func __gopy_path_split(p string) []string {
+	d, f := filepath.Split(p)
+	if len(d) > 1 && d[len(d)-1] == filepath.Separator {
+		d = d[:len(d)-1]
+	}
+	return []string{d, f}
+}`
+
+const helperPathRelpath = `func __gopy_path_relpath(target string, base ...string) string {
+	b := "."
+	if len(base) > 0 {
+		b = base[0]
+	}
+	r, err := filepath.Rel(b, target)
+	if err != nil {
+		return target
+	}
+	return r
+}`
+
+const helperPathGetsize = `func __gopy_path_getsize(p string) int64 {
+	i, err := os.Stat(p)
+	if err != nil {
+		panic(err)
+	}
+	return i.Size()
+}`
+
 // helperTimedeltaType mirrors Python's str(timedelta(days=...)) output
 // so cross-runtime fixtures can print the value directly. Supports
 // only the positional-days constructor in F6-fix; richer kwargs land
@@ -865,8 +931,18 @@ func (t *__Timedelta) String() string {
 	return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 }`
 
-const helperTimedeltaNew = `func __gopy_timedelta_new(days int64) *__Timedelta {
-	return &__Timedelta{d: time.Duration(days) * 24 * time.Hour}
+// helperTimedeltaNew accepts the full Python parameter order:
+// (days, seconds, microseconds, milliseconds, minutes, hours, weeks).
+// All are float64 so fractional days / hours work like CPython.
+const helperTimedeltaNew = `func __gopy_timedelta_new(days, seconds, microseconds, milliseconds, minutes, hours, weeks float64) *__Timedelta {
+	total := days * float64(24*time.Hour)
+	total += seconds * float64(time.Second)
+	total += microseconds * float64(time.Microsecond)
+	total += milliseconds * float64(time.Millisecond)
+	total += minutes * float64(time.Minute)
+	total += hours * float64(time.Hour)
+	total += weeks * 7 * float64(24*time.Hour)
+	return &__Timedelta{d: time.Duration(total)}
 }`
 
 // helperDatetimeType is the runtime Datetime struct used by

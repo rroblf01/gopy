@@ -2443,6 +2443,12 @@ func promoteOp(op string, a, b *Type) *Type {
 		if (a.Kind == TyStr && b.Kind == TyInt) || (a.Kind == TyInt && b.Kind == TyStr) {
 			return &Type{Kind: TyStr}
 		}
+		if a.Kind == TyList && b.Kind == TyInt {
+			return &Type{Kind: TyList, Elem: a.Elem}
+		}
+		if a.Kind == TyInt && b.Kind == TyList {
+			return &Type{Kind: TyList, Elem: b.Elem}
+		}
 	}
 	return t
 }
