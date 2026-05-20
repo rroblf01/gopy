@@ -27,6 +27,12 @@ def node_to_dict(node):
                 result["_const_kind"] = "float"
             elif isinstance(v, str):
                 result["_const_kind"] = "str"
+            elif isinstance(v, bytes):
+                # Pass bytes literals through as str — gopy uses Go's
+                # string for both. Replace the value field so the lowerer
+                # sees a plain string.
+                result["_const_kind"] = "str"
+                result["value"] = v.decode("utf-8", "replace")
             elif v is None:
                 result["_const_kind"] = "none"
         return result

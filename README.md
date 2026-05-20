@@ -35,7 +35,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - `str.format("{} ...")` with positional `{}` placeholders
 - `dict.keys()` / `dict.values()` standalone return slices; `.items()` only via for-loop unpacking
 - Multi-file projects in a single directory (each `.py` → sibling `.go`, shared `package main`)
-- Stdlib shims: `sys.argv`, `sys.exit(n)`, `os.getenv(k)`, `time.time()`, `time.sleep(s)`, `json.dumps(x)`, `json.loads(s)`, `datetime.datetime.now()` returns a Datetime supporting `.year/.month/.day/.hour/.minute/.second/.isoformat()` and `+ timedelta` / `- timedelta` / `dt - dt` arithmetic, `datetime.timedelta(days)`, `pathlib.Path(...)` with `.exists()` / `.is_file()` / `.is_dir()` / `.read_text()` / `.write_text(s)`, `re.findall(p, s)`, `re.search(p, s)`, `re.match(p, s)`, `re.sub(p, repl, s)` — `search` and `match` return a Match object exposing `.group([n])` and `.groups()`; `x is None` / `x is not None` and truthy `if m:` checks work on these nullable returns; `csv.reader(lines)` parses a list of CSV lines into a `list[list[str]]`; `math` (`pi`, `e`, `inf`, `sqrt`, `floor`, `ceil`, `log`, `log2`, `log10`, `exp`, `sin`, `cos`, `tan`, `atan`, `atan2`, `pow`); `random.random()` / `random.randint(a, b)` / `random.seed(n)` (CPython and Go use different PRNGs, so deterministic-output fixtures must compare ranges, not values); `hashlib.sha256(b).hexdigest()` and `hashlib.md5(b).hexdigest()`; `base64.b64encode(b)` / `base64.b64decode(s)` (str in/out — `.encode()` / `.decode()` are no-ops); `from urllib.parse import quote, unquote`; `from collections import Counter` (typed dict-of-counts inline); `from itertools import chain, accumulate` (eagerly materialized as lists); `str.encode()` / `bytes.decode()` (no-op pass-through, since gopy uses `string` for both); `urllib.parse.urlencode(d)` for `dict[str, str]` (keys sorted for deterministic output); `string` constants (`ascii_lowercase`, `ascii_uppercase`, `ascii_letters`, `digits`, `hexdigits`, `octdigits`, `punctuation`, `whitespace`); `collections.defaultdict(factory)` when the assignment carries a `dict[K, V]` annotation (the factory is ignored — Go's zero value covers missing keys); `subprocess.run(["cmd", ...])` returning a `CompletedProcess` with `returncode` / `stdout` / `stderr` attributes (CPython kwargs like `capture_output=True` / `text=True` are accepted at the call site and silently ignored)
+- Stdlib shims: `sys.argv`, `sys.exit(n)`, `os.getenv(k)`, `time.time()`, `time.sleep(s)`, `json.dumps(x)`, `json.loads(s)`, `datetime.datetime.now()` returns a Datetime supporting `.year/.month/.day/.hour/.minute/.second/.isoformat()` and `+ timedelta` / `- timedelta` / `dt - dt` arithmetic, `datetime.timedelta(days)`, `pathlib.Path(...)` with `.exists()` / `.is_file()` / `.is_dir()` / `.read_text()` / `.write_text(s)`, `re.findall(p, s)`, `re.search(p, s)`, `re.match(p, s)`, `re.sub(p, repl, s)` — `search` and `match` return a Match object exposing `.group([n])` and `.groups()`; `x is None` / `x is not None` and truthy `if m:` checks work on these nullable returns; `csv.reader(lines)` parses a list of CSV lines into a `list[list[str]]`; `math` (`pi`, `e`, `inf`, `sqrt`, `floor`, `ceil`, `log`, `log2`, `log10`, `exp`, `sin`, `cos`, `tan`, `atan`, `atan2`, `pow`); `random.random()` / `random.randint(a, b)` / `random.seed(n)` (CPython and Go use different PRNGs, so deterministic-output fixtures must compare ranges, not values); `hashlib.sha256(b).hexdigest()` / `hashlib.sha1(b).hexdigest()` / `hashlib.sha512(b).hexdigest()` / `hashlib.md5(b).hexdigest()`; `base64.b64encode(b)` / `base64.b64decode(s)` (str in/out — `.encode()` / `.decode()` are no-ops); `from urllib.parse import quote, unquote`; `from collections import Counter` (typed dict-of-counts inline); `from itertools import chain, accumulate` (eagerly materialized as lists); `str.encode()` / `bytes.decode()` (no-op pass-through, since gopy uses `string` for both); `urllib.parse.urlencode(d)` for `dict[str, str]` (keys sorted for deterministic output); `string` constants (`ascii_lowercase`, `ascii_uppercase`, `ascii_letters`, `digits`, `hexdigits`, `octdigits`, `punctuation`, `whitespace`); `collections.defaultdict(factory)` when the assignment carries a `dict[K, V]` annotation (the factory is ignored — Go's zero value covers missing keys); `subprocess.run(["cmd", ...])` returning a `CompletedProcess` with `returncode` / `stdout` / `stderr` attributes (CPython kwargs like `capture_output=True` / `text=True` are accepted at the call site and silently ignored)
 - Context manager: `with open(path[, mode]) as fh:` — `fh.read()` and `fh.write(s)`
 - Decorators: `@staticmethod` on free functions (no-op), `@property` on class methods (call sites emit `instance.attr` as a method invocation; properties are inherited via base lookup), `@classmethod` (emits a free `<Class>_<method>` function; calls of the form `Class.method(...)` dispatch to it, and `cls(...)` inside the body routes through the class's constructor)
 - Default parameter values: `def f(a: int, b: int = 5)` — defaults are evaluated at every call site (so mutable defaults can't leak between calls)
@@ -160,13 +160,13 @@ CPython 3.x vs. the `gopy`-transpiled Go binary, on identical CPU-bound workload
 
 <!-- BENCH_START -->
 
-_Generated by `scripts/update_bench.sh` on 2026-05-20T09:25:05Z._
+_Generated by `scripts/update_bench.sh` on 2026-05-20T09:31:09Z._
 
 | Benchmark | CPython (ms) | gopy Go (ms) | Speedup | Python RSS (MB) | gopy RSS (MB) | RSS save |
 |-----------|-------------:|-------------:|--------:|----------------:|--------------:|---------:|
-| bench_class | 46.97 | 1.58 | 29.7x | 12.93 | 4.75 | 2.72x |
-| bench_fib | 135.67 | 5.51 | 24.6x | 12.83 | 4.42 | 2.90x |
-| bench_loop | 107.75 | 1.95 | 55.3x | 12.84 | 4.57 | 2.81x |
+| bench_class | 50.43 | 1.74 | 29.0x | 12.92 | 4.50 | 2.87x |
+| bench_fib | 135.74 | 5.47 | 24.8x | 12.78 | 4.54 | 2.81x |
+| bench_loop | 102.75 | 1.97 | 52.2x | 12.88 | 4.76 | 2.71x |
 
 _Hardware: Linux 6.18.31-1-lts x86_64. Go: go1.26.3-X:nodwarf5. Python: 3.14.5._
 
@@ -281,6 +281,9 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] `bisect` (`bisect_left`, `bisect_right`, `insort`) — typed binary search / insertion
 - [x] `uuid.uuid4()` returns a hyphenated lowercase hex string (RFC 4122 v4 layout)
 - [x] `textwrap.dedent`, `textwrap.indent(s, prefix)`, `textwrap.fill(s, width)` (width-only form)
+- [x] `secrets.token_hex([n])`, `secrets.token_urlsafe([n])`, `secrets.token_bytes([n])` (CSPRNG via `crypto/rand`)
+- [x] `time.monotonic()`, `time.perf_counter()`, `time.time_ns()` (monotonic nanosecond reading)
+- [x] `b"..."` bytes literals pass through as `str` (gopy uses Go's `string` for both)
 - [x] `string` constants (`ascii_letters`, `digits`, `punctuation`, ...)
 - [x] `s.format(...)` positional `{}` placeholders + format specs (`{:5d}`, `{:05d}`, `{:.2f}`, `{:>10}`, `{:<10}`, `{:^10}`, `{:*>6}`, `{:x}`, `{:08x}`, `{:b}`)
 - [x] f-string format specs (`f"{x:.2f}"`, `f"{n:05d}"`, etc.) and `!r` / `!s` / `!a` conversions

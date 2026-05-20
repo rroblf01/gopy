@@ -57,8 +57,11 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"time": {
 		Funcs: map[string]stdlibFunc{
-			"time":  {GoFunc: "__gopy_time_now_seconds", GoImport: "time", Helper: helperTimeNowSeconds},
-			"sleep": {GoFunc: "__gopy_time_sleep", GoImport: "time", Helper: helperTimeSleep},
+			"time":         {GoFunc: "__gopy_time_now_seconds", GoImport: "time", Helper: helperTimeNowSeconds, RetKind: "float"},
+			"sleep":        {GoFunc: "__gopy_time_sleep", GoImport: "time", Helper: helperTimeSleep},
+			"monotonic":    {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
+			"perf_counter": {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
+			"time_ns":      {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
 		},
 	},
 	"json": {
@@ -111,8 +114,17 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"hashlib": {
 		Funcs: map[string]stdlibFunc{
-			"sha256": {GoFunc: "__gopy_hashlib_sha256", GoImport: "crypto/sha256", Helper: helperHashlibSha256, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5"}},
-			"md5":    {GoFunc: "__gopy_hashlib_md5", GoImport: "crypto/md5", Helper: helperHashlibMd5, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/sha256"}},
+			"sha256": {GoFunc: "__gopy_hashlib_sha256", GoImport: "crypto/sha256", Helper: helperHashlibSha256, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha1", "crypto/sha512"}},
+			"md5":    {GoFunc: "__gopy_hashlib_md5", GoImport: "crypto/md5", Helper: helperHashlibMd5, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/sha256", "crypto/sha1", "crypto/sha512"}},
+			"sha1":   {GoFunc: "__gopy_hashlib_sha1", GoImport: "crypto/sha1", Helper: helperHashlibSha1, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha256", "crypto/sha512"}},
+			"sha512": {GoFunc: "__gopy_hashlib_sha512", GoImport: "crypto/sha512", Helper: helperHashlibSha512, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha256", "crypto/sha1"}},
+		},
+	},
+	"secrets": {
+		Funcs: map[string]stdlibFunc{
+			"token_hex":     {GoFunc: "__gopy_secrets_token_hex", GoImport: "crypto/rand", Helper: helperSecretsTokenHex, HelperImports: []string{"encoding/hex"}, RetKind: "str"},
+			"token_urlsafe": {GoFunc: "__gopy_secrets_token_urlsafe", GoImport: "crypto/rand", Helper: helperSecretsTokenUrl, HelperImports: []string{"encoding/base64"}, RetKind: "str"},
+			"token_bytes":   {GoFunc: "__gopy_secrets_token_bytes", GoImport: "crypto/rand", Helper: helperSecretsTokenBytes, RetKind: "str"},
 		},
 	},
 	"base64": {
@@ -355,6 +367,13 @@ type stdlibFunc struct {
 const helperTimeNowSeconds = `func __gopy_time_now_seconds() float64 { return float64(time.Now().UnixNano()) / 1e9 }`
 
 const helperTimeSleep = `func __gopy_time_sleep(seconds float64) { time.Sleep(time.Duration(seconds * float64(time.Second))) }`
+
+// helperTimeMonotonic / helperTimeNs mirror Python's monotonic clocks.
+// Go's time.Now is monotonic by default; we expose the nanosecond reading
+// converted to seconds (float) or kept as int64 ns.
+const helperTimeMonotonic = `func __gopy_time_monotonic() float64 { return float64(time.Now().UnixNano()) / 1e9 }`
+
+const helperTimeNs = `func __gopy_time_ns() int64 { return time.Now().UnixNano() }`
 
 // helperJSONDumps mirrors CPython's json.dumps default separators of
 // `, ` and `: `. Go's encoding/json emits compact JSON, so we reformat
@@ -696,9 +715,9 @@ const helperCSVWriter = `func __gopy_csv_writer(rows [][]string) string {
 	return b.String()
 }`
 
-// helperHasherType bridges hashlib's hash objects. Both sha256 and md5
-// build the same shape; the algo string drives Hexdigest's dispatch so
-// fixtures can compare hex strings across CPython and Go.
+// helperHasherType bridges hashlib's hash objects. The algo string drives
+// Hexdigest's dispatch so fixtures can compare hex strings across CPython
+// and Go for any of the SHA / MD5 variants.
 const helperHasherType = `type __Hasher struct {
 	data []byte
 	algo string
@@ -708,6 +727,12 @@ func (h *__Hasher) Hexdigest() string {
 	switch h.algo {
 	case "sha256":
 		sum := sha256.Sum256(h.data)
+		return hex.EncodeToString(sum[:])
+	case "sha512":
+		sum := sha512.Sum512(h.data)
+		return hex.EncodeToString(sum[:])
+	case "sha1":
+		sum := sha1.Sum(h.data)
 		return hex.EncodeToString(sum[:])
 	case "md5":
 		sum := md5.Sum(h.data)
@@ -720,8 +745,52 @@ const helperHashlibSha256 = `func __gopy_hashlib_sha256(data string) *__Hasher {
 	return &__Hasher{data: []byte(data), algo: "sha256"}
 }`
 
+const helperHashlibSha512 = `func __gopy_hashlib_sha512(data string) *__Hasher {
+	return &__Hasher{data: []byte(data), algo: "sha512"}
+}`
+
+const helperHashlibSha1 = `func __gopy_hashlib_sha1(data string) *__Hasher {
+	return &__Hasher{data: []byte(data), algo: "sha1"}
+}`
+
 const helperHashlibMd5 = `func __gopy_hashlib_md5(data string) *__Hasher {
 	return &__Hasher{data: []byte(data), algo: "md5"}
+}`
+
+const helperSecretsTokenHex = `func __gopy_secrets_token_hex(args ...int64) string {
+	n := int64(32)
+	if len(args) > 0 {
+		n = args[0]
+	}
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}`
+
+const helperSecretsTokenUrl = `func __gopy_secrets_token_urlsafe(args ...int64) string {
+	n := int64(32)
+	if len(args) > 0 {
+		n = args[0]
+	}
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}`
+
+const helperSecretsTokenBytes = `func __gopy_secrets_token_bytes(args ...int64) string {
+	n := int64(32)
+	if len(args) > 0 {
+		n = args[0]
+	}
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return string(b)
 }`
 
 // helperB64Encode / helperB64Decode mirror Python's base64.b64encode /
