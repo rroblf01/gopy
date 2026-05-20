@@ -2946,6 +2946,10 @@ var taggedMethodRename = map[string]map[string]string{
 	"__Hasher": {
 		"hexdigest": "Hexdigest",
 	},
+	"__Hmac": {
+		"hexdigest": "Hexdigest",
+		"update":    "Update",
+	},
 	"__Deque": {
 		"append":     "Append",
 		"appendleft": "Appendleft",

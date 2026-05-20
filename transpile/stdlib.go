@@ -182,6 +182,27 @@ var stdlibModules = map[string]stdlibModule{
 			"deque":       {GoFunc: "__gopy_deque_unused", RetTag: "__Deque"},
 		},
 	},
+	"shutil": {
+		Funcs: map[string]stdlibFunc{
+			"rmtree":   {GoFunc: "__gopy_shutil_rmtree", GoImport: "os", Helper: helperShutilRmtree},
+			"copy":     {GoFunc: "__gopy_shutil_copy", GoImport: "io", Helper: helperShutilCopy, HelperImports: []string{"os"}},
+			"copyfile": {GoFunc: "__gopy_shutil_copy", GoImport: "io", Helper: helperShutilCopy, HelperImports: []string{"os"}},
+			"move":     {GoFunc: "__gopy_shutil_move", GoImport: "os", Helper: helperShutilMove},
+		},
+	},
+	"tempfile": {
+		Funcs: map[string]stdlibFunc{
+			"mkdtemp":     {GoFunc: "__gopy_tempfile_mkdtemp", GoImport: "os", Helper: helperTempfileMkdtemp, RetKind: "str"},
+			"gettempdir":  {GoFunc: "os.TempDir", GoImport: "os", RetKind: "str"},
+			"mkstemp":     {GoFunc: "__gopy_tempfile_mkstemp", GoImport: "os", Helper: helperTempfileMkstemp},
+		},
+	},
+	"hmac": {
+		Funcs: map[string]stdlibFunc{
+			"new":     {GoFunc: "__gopy_hmac_new", GoImport: "crypto/hmac", Helper: helperHmacNew, RetTag: "__Hmac", ExtraHelpers: map[string]string{"__Hmac": helperHmacType}, HelperImports: []string{"crypto/sha1", "crypto/sha256", "crypto/sha512", "crypto/md5", "hash", "encoding/hex"}},
+			"compare_digest": {GoFunc: "__gopy_hmac_cmp", GoImport: "crypto/hmac", Helper: helperHmacCompare, RetKind: "bool"},
+		},
+	},
 	"subprocess": {
 		// run() needs to ignore Python kwargs (capture_output, text, ...)
 		// that don't have a Go equivalent. Dispatch lives in transpile.go.
@@ -1005,6 +1026,123 @@ const helperLogWarning = `func __gopy_log_warning(msg string) { fmt.Fprintln(os.
 const helperLogError = `func __gopy_log_error(msg string) { fmt.Fprintln(os.Stderr, "ERROR:root:"+msg) }`
 const helperLogCritical = `func __gopy_log_critical(msg string) { fmt.Fprintln(os.Stderr, "CRITICAL:root:"+msg) }`
 const helperLogBasicConfig = `func __gopy_log_basicConfig() {}`
+
+const helperShutilRmtree = `func __gopy_shutil_rmtree(p string) {
+	if err := os.RemoveAll(p); err != nil {
+		panic(err)
+	}
+}`
+
+const helperShutilCopy = `func __gopy_shutil_copy(src, dst string) string {
+	in, err := os.Open(src)
+	if err != nil {
+		panic(err)
+	}
+	defer in.Close()
+	si, err := os.Stat(dst)
+	if err == nil && si.IsDir() {
+		base := src
+		for i := len(src) - 1; i >= 0; i-- {
+			if src[i] == '/' {
+				base = src[i+1:]
+				break
+			}
+		}
+		if len(dst) > 0 && dst[len(dst)-1] != '/' {
+			dst = dst + "/" + base
+		} else {
+			dst = dst + base
+		}
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		panic(err)
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		panic(err)
+	}
+	return dst
+}`
+
+const helperShutilMove = `func __gopy_shutil_move(src, dst string) string {
+	if err := os.Rename(src, dst); err != nil {
+		panic(err)
+	}
+	return dst
+}`
+
+const helperTempfileMkdtemp = `func __gopy_tempfile_mkdtemp(args ...string) string {
+	prefix := ""
+	if len(args) > 0 {
+		prefix = args[0]
+	}
+	d, err := os.MkdirTemp("", prefix)
+	if err != nil {
+		panic(err)
+	}
+	return d
+}`
+
+const helperTempfileMkstemp = `func __gopy_tempfile_mkstemp(args ...string) []any {
+	prefix := ""
+	if len(args) > 0 {
+		prefix = args[0]
+	}
+	f, err := os.CreateTemp("", prefix)
+	if err != nil {
+		panic(err)
+	}
+	name := f.Name()
+	fd := int64(f.Fd())
+	f.Close()
+	return []any{fd, name}
+}`
+
+// helperHmacType wraps a stdlib hash.Hash plus the key/algo so .hexdigest()
+// can build the HMAC tag on demand. Algo string drives the underlying hash
+// constructor; algo "" defaults to sha256.
+const helperHmacType = `type __Hmac struct {
+	key  []byte
+	algo string
+	data []byte
+}
+
+func (h *__Hmac) Update(data string) { h.data = append(h.data, []byte(data)...) }
+
+func (h *__Hmac) Hexdigest() string {
+	var mac hash.Hash
+	switch h.algo {
+	case "sha1":
+		mac = hmac.New(sha1.New, h.key)
+	case "sha512":
+		mac = hmac.New(sha512.New, h.key)
+	case "md5":
+		mac = hmac.New(md5.New, h.key)
+	default:
+		mac = hmac.New(sha256.New, h.key)
+	}
+	mac.Write(h.data)
+	return hex.EncodeToString(mac.Sum(nil))
+}`
+
+const helperHmacNew = `func __gopy_hmac_new(args ...string) *__Hmac {
+	h := &__Hmac{}
+	if len(args) > 0 {
+		h.key = []byte(args[0])
+	}
+	if len(args) > 1 {
+		h.data = []byte(args[1])
+	}
+	if len(args) > 2 {
+		h.algo = args[2]
+	}
+	return h
+}`
+
+const helperHmacCompare = `func __gopy_hmac_cmp(a, b string) bool {
+	return hmac.Equal([]byte(a), []byte(b))
+}`
 
 // helperCompletedProcessType + helperSubprocessRun bridge Python's
 // subprocess.run to Go's os/exec. We always capture stdout / stderr;
