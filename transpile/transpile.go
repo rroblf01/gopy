@@ -2379,6 +2379,12 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinTimedelta(c)
 			case "json.dumps":
 				return g.builtinJSONDumps(c)
+			case "dataclasses.asdict":
+				return g.builtinAsdict(c)
+			case "dataclasses.astuple":
+				return g.builtinAstuple(c)
+			case "dataclasses.replace":
+				return g.builtinReplace(c)
 			case "random.choice":
 				return g.builtinRandomChoice(c)
 			case "random.shuffle":
@@ -5211,6 +5217,138 @@ func (g *gen) builtinRandomSample(c *ir.Call) error {
 	g.writef("}()")
 	return nil
 }
+
+// builtinAsdict emits a `map[string]any{...}` populated from the
+// instance's typed fields. Requires the receiver to be a Name with a
+// known user-class type (or any expression whose effectiveType is TyNamed
+// and resolves to a registered class).
+func (g *gen) builtinAsdict(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("dataclasses.asdict() takes 1 positional argument")
+	}
+	cls, err := g.dataclassFor(c.Args[0])
+	if err != nil {
+		return err
+	}
+	g.writef("func() map[string]any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__obj := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("return map[string]any{\n")
+	g.indent++
+	for _, f := range cls.Fields {
+		g.writeIndent()
+		g.writef("%q: __obj.%s,\n", f.Name, exportedField(f.Name))
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinAstuple emits an `[]any{...}` with the instance's fields in
+// declaration order.
+func (g *gen) builtinAstuple(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("dataclasses.astuple() takes 1 positional argument")
+	}
+	cls, err := g.dataclassFor(c.Args[0])
+	if err != nil {
+		return err
+	}
+	g.writef("func() []any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__obj := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("return []any{")
+	for i, f := range cls.Fields {
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("__obj.%s", exportedField(f.Name))
+	}
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinReplace emits a fresh constructor call seeded from the existing
+// instance, overriding any fields listed in the kwargs.
+func (g *gen) builtinReplace(c *ir.Call) error {
+	if len(c.Args) != 1 {
+		return fmt.Errorf("dataclasses.replace() takes (instance, **kwargs)")
+	}
+	cls, err := g.dataclassFor(c.Args[0])
+	if err != nil {
+		return err
+	}
+	kw := map[string]ir.Expr{}
+	for _, k := range c.Keywords {
+		kw[k.Name] = k.Value
+	}
+	g.writef("func() *%s {\n", cls.Name)
+	g.indent++
+	g.writeIndent()
+	g.writef("__obj := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("return New%s(", cls.Name)
+	for i, f := range cls.Fields {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if v, ok := kw[f.Name]; ok {
+			if err := g.expr(v); err != nil {
+				return err
+			}
+		} else {
+			g.writef("__obj.%s", exportedField(f.Name))
+		}
+	}
+	g.writef(")\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// dataclassFor resolves an expression to its underlying user-class decl.
+// Returns an error when the expression has no statically-known TyNamed
+// type or the class isn't registered.
+func (g *gen) dataclassFor(e ir.Expr) (*ir.Class, error) {
+	t := g.effectiveType(e)
+	if t == nil || t.Kind != ir.TyNamed {
+		return nil, fmt.Errorf("dataclasses helper: receiver type unknown — add a class annotation")
+	}
+	cls, ok := g.classes[t.Name]
+	if !ok {
+		return nil, fmt.Errorf("dataclasses helper: %s is not a registered class", t.Name)
+	}
+	return cls, nil
+}
+
+// exportedField returns the Go field name for a Python attribute. gopy
+// emits struct fields with the original Python casing, so this is the
+// identity function — wrapped to make intent explicit at call sites.
+func exportedField(name string) string { return name }
 
 // builtinJSONDumps emits a json.dumps call optionally honoring the
 // indent= kwarg. Other kwargs (sort_keys, separators, default) are not
@@ -8566,6 +8704,12 @@ func (g *gen) userCallRetType(e ir.Expr) *ir.Type {
 		if n, ok := x.Func.(*ir.Name); ok {
 			if fn, ok := g.funcs[n.N]; ok {
 				return fn.Ret
+			}
+			// `Point(...)` where Point is a registered class — the
+			// constructor returns *Point, surfaced as TyNamed so later
+			// attribute access (and dataclass helpers) resolve.
+			if _, ok := g.classes[n.N]; ok {
+				return &ir.Type{Kind: ir.TyNamed, Name: n.N}
 			}
 		}
 	case *ir.MethodCall:

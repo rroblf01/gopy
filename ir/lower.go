@@ -658,7 +658,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 	for _, d := range n.Children("decorator_list") {
 		if d.Type() == "Name" {
 			switch d.Str("id") {
-			case "staticmethod", "lru_cache", "cache", "cached_property":
+			case "staticmethod", "lru_cache", "cache", "cached_property", "wraps", "singledispatch":
 				continue
 			}
 		}
@@ -666,7 +666,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 			recv := d.Child("value")
 			if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" {
 				switch d.Str("attr") {
-				case "lru_cache", "cache", "cached_property":
+				case "lru_cache", "cache", "cached_property", "wraps", "singledispatch":
 					continue
 				}
 			}
@@ -676,7 +676,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 			if fn != nil {
 				if fn.Type() == "Name" {
 					switch fn.Str("id") {
-					case "lru_cache", "cache":
+					case "lru_cache", "cache", "wraps":
 						continue
 					}
 				}
@@ -684,7 +684,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 					recv := fn.Child("value")
 					if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" {
 						switch fn.Str("attr") {
-						case "lru_cache", "cache":
+						case "lru_cache", "cache", "wraps":
 							continue
 						}
 					}

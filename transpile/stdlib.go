@@ -240,6 +240,16 @@ var stdlibModules = map[string]stdlibModule{
 			"getfqdn":     {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
 		},
 	},
+	"dataclasses": {
+		// asdict / astuple / replace dispatched per-class in transpile.go's
+		// call() builders; the entries below are stubs so alias resolution
+		// succeeds for the call expressions.
+		Funcs: map[string]stdlibFunc{
+			"asdict":  {GoFunc: "__gopy_asdict_unused"},
+			"astuple": {GoFunc: "__gopy_astuple_unused"},
+			"replace": {GoFunc: "__gopy_replace_unused"},
+		},
+	},
 	"hmac": {
 		Funcs: map[string]stdlibFunc{
 			"new":     {GoFunc: "__gopy_hmac_new", GoImport: "crypto/hmac", Helper: helperHmacNew, RetTag: "__Hmac", ExtraHelpers: map[string]string{"__Hmac": helperHmacType}, HelperImports: []string{"crypto/sha1", "crypto/sha256", "crypto/sha512", "crypto/md5", "hash", "encoding/hex"}},
@@ -261,6 +271,8 @@ var stdlibModules = map[string]stdlibModule{
 			"partial":         {GoFunc: "__gopy_partial_unused"},
 			"cache":           {GoFunc: "__gopy_cache_unused"},
 			"cached_property": {GoFunc: "__gopy_cached_prop_unused"},
+			"wraps":           {GoFunc: "__gopy_wraps_unused"},
+			"singledispatch":  {GoFunc: "__gopy_singledispatch_unused"},
 		},
 	},
 	"logging": {
