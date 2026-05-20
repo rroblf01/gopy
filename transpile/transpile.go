@@ -773,6 +773,26 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("\n")
 		return nil
 	case *ir.AssignSub:
+		// User-class __setitem__: route `recv[k] = v` to `recv.Setitem(k, v)`.
+		if tTy := g.effectiveType(x.Target); tTy != nil && tTy.Kind == ir.TyNamed {
+			if fn := g.lookupMethod(tTy.Name, "__setitem__"); fn != nil {
+				_ = fn
+				g.writeIndent()
+				if err := g.expr(x.Target); err != nil {
+					return err
+				}
+				g.writef(".Setitem(")
+				if err := g.expr(x.Index); err != nil {
+					return err
+				}
+				g.writef(", ")
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef(")\n")
+				return nil
+			}
+		}
 		g.writeIndent()
 		if err := g.expr(x.Target); err != nil {
 			return err
@@ -2126,6 +2146,23 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		g.writef(".%s", x.Name)
 	case *ir.Subscript:
+		// User-class `__getitem__` dispatch — emit `recv.Getitem(idx)`
+		// instead of `recv[idx]` when the receiver is a known class with
+		// the method.
+		if vTy := g.effectiveType(x.Value); vTy != nil && vTy.Kind == ir.TyNamed {
+			if fn := g.lookupMethod(vTy.Name, "__getitem__"); fn != nil {
+				_ = fn
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef(".Getitem(")
+				if err := g.expr(x.Index); err != nil {
+					return err
+				}
+				g.writef(")")
+				return nil
+			}
+		}
 		if err := g.expr(x.Value); err != nil {
 			return err
 		}
@@ -5885,6 +5922,16 @@ func exportedDunder(name string) string {
 		return "Ne"
 	case "__contains__":
 		return "Contains"
+	case "__getitem__":
+		return "Getitem"
+	case "__setitem__":
+		return "Setitem"
+	case "__bool__":
+		return "Bool"
+	case "__iter__":
+		return "Iter"
+	case "__next__":
+		return "Next"
 	}
 	return name
 }
@@ -9176,6 +9223,27 @@ func __gopy_fmt_spec(spec string, v any) string {
 func (g *gen) emitInOp(x *ir.CmpOp) error {
 	rt := g.effectiveType(x.R)
 	negate := x.Op == "notin"
+	// User-class `__contains__` dispatch: `needle in container` routes
+	// through `container.Contains(needle)`.
+	if rt != nil && rt.Kind == ir.TyNamed {
+		if fn := g.lookupMethod(rt.Name, "__contains__"); fn != nil {
+			if negate {
+				g.writef("(!")
+			}
+			if err := g.expr(x.R); err != nil {
+				return err
+			}
+			g.writef(".Contains(")
+			if err := g.expr(x.L); err != nil {
+				return err
+			}
+			g.writef(")")
+			if negate {
+				g.writef(")")
+			}
+			return nil
+		}
+	}
 	if rt != nil {
 		switch rt.Kind {
 		case ir.TyStr:
