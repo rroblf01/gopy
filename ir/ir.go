@@ -435,10 +435,21 @@ type ListComp struct {
 	Cond   Expr // optional filter
 	ElemTy *Type
 	Ty     *Type
+	// Extra holds any additional `for V in ITER [if COND]` generators
+	// beyond the primary one above; codegen nests one loop per entry.
+	Extra []CompGen
+}
+
+// CompGen is one `for V in ITER [if COND]` clause inside a comprehension.
+type CompGen struct {
+	Var    string
+	Iter   Expr
+	Cond   Expr
+	ElemTy *Type
 }
 
 // DictComp is `{ Key: Val for Var in Iter [if Cond] }`. Same restrictions
-// as ListComp.
+// as ListComp; Extra carries nested `for V in I [if C]` clauses.
 type DictComp struct {
 	Key   Expr
 	Val   Expr
@@ -448,6 +459,7 @@ type DictComp struct {
 	KeyTy *Type
 	ValTy *Type
 	Ty    *Type
+	Extra []CompGen
 }
 
 // IfExpr is the ternary `then if cond else else_`. Codegen emits an IIFE

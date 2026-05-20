@@ -102,6 +102,9 @@ var stdlibModules = map[string]stdlibModule{
 			"factorial": {GoFunc: "__gopy_math_factorial", Helper: helperMathFactorial, RetKind: "int"},
 			"comb":      {GoFunc: "__gopy_math_comb", Helper: helperMathComb, RetKind: "int"},
 			"perm":      {GoFunc: "__gopy_math_perm", Helper: helperMathPerm, RetKind: "int"},
+			"dist":      {GoFunc: "__gopy_math_dist", GoImport: "math", Helper: helperMathDist, RetKind: "float"},
+			"prod":      {GoFunc: "__gopy_math_prod", Helper: helperMathProd, RetKind: "int"},
+			"remainder": {GoFunc: "math.Remainder", GoImport: "math", RetKind: "float"},
 		},
 	},
 	"hashlib": {
@@ -188,6 +191,8 @@ var stdlibModules = map[string]stdlibModule{
 			"heappop":     {GoFunc: "__gopy_heappop_unused"},
 			"heapify":     {GoFunc: "__gopy_heapify_unused"},
 			"heappushpop": {GoFunc: "__gopy_heappushpop_unused"},
+			"nsmallest":   {GoFunc: "__gopy_nsmallest_unused"},
+			"nlargest":    {GoFunc: "__gopy_nlargest_unused"},
 		},
 	},
 	"bisect": {
@@ -251,13 +256,13 @@ var stdlibModules = map[string]stdlibModule{
 	"re": {
 		Funcs: map[string]stdlibFunc{
 			"findall":   {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall},
-			"search":    {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
-			"match":     {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
-			"fullmatch": {GoFunc: "__gopy_re_fullmatch", GoImport: "regexp", Helper: helperReFullmatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType}},
+			"search":    {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
+			"match":     {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
+			"fullmatch": {GoFunc: "__gopy_re_fullmatch", GoImport: "regexp", Helper: helperReFullmatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
 			"sub":       {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub},
 			"split":     {GoFunc: "__gopy_re_split", GoImport: "regexp", Helper: helperReSplit},
 			"escape":    {GoFunc: "regexp.QuoteMeta", GoImport: "regexp", RetKind: "str"},
-			"compile":   {GoFunc: "__gopy_re_compile", GoImport: "regexp", Helper: helperReCompile, RetTag: "__Pattern", ExtraHelpers: map[string]string{"__Pattern": helperPatternType, "__Match": helperMatchType}},
+			"compile":   {GoFunc: "__gopy_re_compile", GoImport: "regexp", Helper: helperReCompile, RetTag: "__Pattern", ExtraHelpers: map[string]string{"__Pattern": helperPatternType, "__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
 		},
 	},
 	"csv": {
@@ -416,6 +421,57 @@ const helperMatchType = `type __Match struct {
 	full   string
 	groups []string
 	names  []string
+	idx    []int
+}
+
+func (m *__Match) Start(args ...any) int64 {
+	n := 0
+	if len(args) > 0 {
+		switch a := args[0].(type) {
+		case int:
+			n = a
+		case int64:
+			n = int(a)
+		case string:
+			for i, nm := range m.names {
+				if nm == a {
+					n = i
+					break
+				}
+			}
+		}
+	}
+	if n*2+1 >= len(m.idx) {
+		return -1
+	}
+	return int64(m.idx[n*2])
+}
+
+func (m *__Match) End(args ...any) int64 {
+	n := 0
+	if len(args) > 0 {
+		switch a := args[0].(type) {
+		case int:
+			n = a
+		case int64:
+			n = int(a)
+		case string:
+			for i, nm := range m.names {
+				if nm == a {
+					n = i
+					break
+				}
+			}
+		}
+	}
+	if n*2+1 >= len(m.idx) {
+		return -1
+	}
+	return int64(m.idx[n*2+1])
+}
+
+func (m *__Match) Span(args ...any) []int64 {
+	return []int64{m.Start(args...), m.End(args...)}
 }
 
 func (m *__Match) Group(args ...any) string {
@@ -471,22 +527,33 @@ func (m *__Match) String() string { return m.full }`
 // work because the codegen rewrites them to a nil comparison.
 const helperReSearch = `func __gopy_re_search(pattern, s string) *__Match {
 	r := regexp.MustCompile(pattern)
-	parts := r.FindStringSubmatch(s)
-	if parts == nil {
-		return nil
-	}
-	return &__Match{full: parts[0], groups: parts[1:], names: r.SubexpNames()}
+	return __gopy_match_build(r, s, false)
 }`
 
 // helperReMatch anchors the pattern to the start of the string, matching
 // Python's re.match semantics. Returns nil on miss.
 const helperReMatch = `func __gopy_re_match(pattern, s string) *__Match {
 	r := regexp.MustCompile("^(?:" + pattern + ")")
-	parts := r.FindStringSubmatch(s)
-	if parts == nil {
+	return __gopy_match_build(r, s, false)
+}`
+
+// helperMatchBuild centralizes the FindStringSubmatchIndex → __Match
+// conversion so search / match / compile share the same position data.
+const helperMatchBuild = `func __gopy_match_build(r *regexp.Regexp, s string, _ bool) *__Match {
+	idx := r.FindStringSubmatchIndex(s)
+	if idx == nil {
 		return nil
 	}
-	return &__Match{full: parts[0], groups: parts[1:], names: r.SubexpNames()}
+	full := s[idx[0]:idx[1]]
+	groups := make([]string, 0, len(idx)/2-1)
+	for i := 1; i < len(idx)/2; i++ {
+		if idx[i*2] < 0 {
+			groups = append(groups, "")
+		} else {
+			groups = append(groups, s[idx[i*2]:idx[i*2+1]])
+		}
+	}
+	return &__Match{full: full, groups: groups, names: r.SubexpNames(), idx: idx}
 }`
 
 // helperReSub replaces every match of pattern with repl.
@@ -498,11 +565,7 @@ const helperReSub = `func __gopy_re_sub(pattern, repl, s string) string {
 // helperReFullmatch anchors at both ends, mirroring re.fullmatch.
 const helperReFullmatch = `func __gopy_re_fullmatch(pattern, s string) *__Match {
 	r := regexp.MustCompile("^(?:" + pattern + ")$")
-	parts := r.FindStringSubmatch(s)
-	if parts == nil {
-		return nil
-	}
-	return &__Match{full: parts[0], groups: parts[1:], names: r.SubexpNames()}
+	return __gopy_match_build(r, s, false)
 }`
 
 // helperReSplit splits s on every occurrence of the pattern. Mirrors
@@ -526,19 +589,11 @@ const helperPatternType = `type __Pattern struct {
 }
 
 func (p *__Pattern) Match(s string) *__Match {
-	m := p.anchor.FindStringSubmatch(s)
-	if m == nil {
-		return nil
-	}
-	return &__Match{full: m[0], groups: m[1:], names: p.r.SubexpNames()}
+	return __gopy_match_build(p.anchor, s, false)
 }
 
 func (p *__Pattern) Search(s string) *__Match {
-	m := p.r.FindStringSubmatch(s)
-	if m == nil {
-		return nil
-	}
-	return &__Match{full: m[0], groups: m[1:], names: p.r.SubexpNames()}
+	return __gopy_match_build(p.r, s, false)
 }
 
 func (p *__Pattern) Findall(s string) []string {
@@ -817,6 +872,30 @@ const helperMathComb = `func __gopy_math_comb(n, k int64) int64 {
 	out := int64(1)
 	for i := int64(0); i < k; i++ {
 		out = out * (n - i) / (i + 1)
+	}
+	return out
+}`
+
+// helperMathDist computes the Euclidean distance between two same-length
+// numeric coordinate slices (Python 3.8+). Panics on length mismatch.
+const helperMathDist = `func __gopy_math_dist(a, b []float64) float64 {
+	if len(a) != len(b) {
+		panic(NewException("ValueError: dist() coordinates differ in length"))
+	}
+	var s float64
+	for i := range a {
+		d := a[i] - b[i]
+		s += d * d
+	}
+	return math.Sqrt(s)
+}`
+
+// helperMathProd multiplies every int64 in the slice; returns 1 on empty
+// input (matches CPython's math.prod default start).
+const helperMathProd = `func __gopy_math_prod(xs []int64) int64 {
+	out := int64(1)
+	for _, v := range xs {
+		out *= v
 	}
 	return out
 }`

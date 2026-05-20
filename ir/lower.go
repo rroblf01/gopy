@@ -2053,46 +2053,55 @@ func subExpr(e Expr, from, to string) Expr {
 // F7 supports exactly one generator and at most one filter.
 func lowerListComp(n parser.Node, sc *scope) (Expr, error) {
 	gens := n.Children("generators")
-	if len(gens) != 1 {
-		return nil, fmt.Errorf("line %d: only single-generator comprehensions supported (F7)", n.Lineno())
+	if len(gens) < 1 {
+		return nil, fmt.Errorf("line %d: comprehension requires at least one generator", n.Lineno())
 	}
-	g := gens[0]
-	tgt := g.Child("target")
-	if tgt.Type() != "Name" {
-		return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
-	}
-	iter, err := lowerExpr(g.Child("iter"), sc)
-	if err != nil {
-		return nil, err
-	}
-	varName := tgt.Str("id")
 	innerSc := &scope{vars: copyVars(sc.vars)}
-	var elemTy *Type
-	if t := iter.TypeOf(); t != nil {
-		switch t.Kind {
-		case TyList:
-			elemTy = t.Elem
-		case TyDict:
-			elemTy = t.Key
-		case TyStr:
-			elemTy = &Type{Kind: TyStr}
+	var primary CompGen
+	var extra []CompGen
+	for gi, g := range gens {
+		tgt := g.Child("target")
+		if tgt.Type() != "Name" {
+			return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
 		}
-	}
-	innerSc.declare(varName, elemTy)
-	elt, err := lowerExpr(n.Child("elt"), innerSc)
-	if err != nil {
-		return nil, err
-	}
-	var cond Expr
-	if ifs := g.Children("ifs"); len(ifs) > 0 {
-		if len(ifs) > 1 {
-			return nil, fmt.Errorf("line %d: only one if-filter supported", n.Lineno())
-		}
-		c, err := lowerExpr(ifs[0], innerSc)
+		iter, err := lowerExpr(g.Child("iter"), innerSc)
 		if err != nil {
 			return nil, err
 		}
-		cond = c
+		varName := tgt.Str("id")
+		var elemTy *Type
+		if t := iter.TypeOf(); t != nil {
+			switch t.Kind {
+			case TyList:
+				elemTy = t.Elem
+			case TyDict:
+				elemTy = t.Key
+			case TyStr:
+				elemTy = &Type{Kind: TyStr}
+			}
+		}
+		innerSc.declare(varName, elemTy)
+		var cond Expr
+		if ifs := g.Children("ifs"); len(ifs) > 0 {
+			if len(ifs) > 1 {
+				return nil, fmt.Errorf("line %d: only one if-filter per generator supported", n.Lineno())
+			}
+			c, err := lowerExpr(ifs[0], innerSc)
+			if err != nil {
+				return nil, err
+			}
+			cond = c
+		}
+		gen := CompGen{Var: varName, Iter: iter, Cond: cond, ElemTy: elemTy}
+		if gi == 0 {
+			primary = gen
+		} else {
+			extra = append(extra, gen)
+		}
+	}
+	elt, err := lowerExpr(n.Child("elt"), innerSc)
+	if err != nil {
+		return nil, err
 	}
 	resultElemTy := elt.TypeOf()
 	if resultElemTy == nil {
@@ -2100,43 +2109,64 @@ func lowerListComp(n parser.Node, sc *scope) (Expr, error) {
 	}
 	return &ListComp{
 		Elt:    elt,
-		Var:    varName,
-		Iter:   iter,
-		Cond:   cond,
+		Var:    primary.Var,
+		Iter:   primary.Iter,
+		Cond:   primary.Cond,
 		ElemTy: resultElemTy,
 		Ty:     &Type{Kind: TyList, Elem: resultElemTy},
+		Extra:  extra,
 	}, nil
 }
 
 // lowerDictComp lowers `{K: V for Var in Iter if Cond}`.
 func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
 	gens := n.Children("generators")
-	if len(gens) != 1 {
-		return nil, fmt.Errorf("line %d: only single-generator dict comprehensions supported (F7)", n.Lineno())
+	if len(gens) < 1 {
+		return nil, fmt.Errorf("line %d: dict comprehension requires at least one generator", n.Lineno())
 	}
-	g := gens[0]
-	tgt := g.Child("target")
-	if tgt.Type() != "Name" {
-		return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
-	}
-	iter, err := lowerExpr(g.Child("iter"), sc)
-	if err != nil {
-		return nil, err
-	}
-	varName := tgt.Str("id")
 	innerSc := &scope{vars: copyVars(sc.vars)}
-	var elemTy *Type
-	if t := iter.TypeOf(); t != nil {
-		switch t.Kind {
-		case TyList:
-			elemTy = t.Elem
-		case TyDict:
-			elemTy = t.Key
-		case TyStr:
-			elemTy = &Type{Kind: TyStr}
+	var primary CompGen
+	var extra []CompGen
+	for gi, g := range gens {
+		tgt := g.Child("target")
+		if tgt.Type() != "Name" {
+			return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
+		}
+		iter, err := lowerExpr(g.Child("iter"), innerSc)
+		if err != nil {
+			return nil, err
+		}
+		varName := tgt.Str("id")
+		var elemTy *Type
+		if t := iter.TypeOf(); t != nil {
+			switch t.Kind {
+			case TyList:
+				elemTy = t.Elem
+			case TyDict:
+				elemTy = t.Key
+			case TyStr:
+				elemTy = &Type{Kind: TyStr}
+			}
+		}
+		innerSc.declare(varName, elemTy)
+		var cond Expr
+		if ifs := g.Children("ifs"); len(ifs) > 0 {
+			if len(ifs) > 1 {
+				return nil, fmt.Errorf("line %d: only one if-filter per generator supported", n.Lineno())
+			}
+			c, err := lowerExpr(ifs[0], innerSc)
+			if err != nil {
+				return nil, err
+			}
+			cond = c
+		}
+		gen := CompGen{Var: varName, Iter: iter, Cond: cond, ElemTy: elemTy}
+		if gi == 0 {
+			primary = gen
+		} else {
+			extra = append(extra, gen)
 		}
 	}
-	innerSc.declare(varName, elemTy)
 	key, err := lowerExpr(n.Child("key"), innerSc)
 	if err != nil {
 		return nil, err
@@ -2144,17 +2174,6 @@ func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
 	val, err := lowerExpr(n.Child("value"), innerSc)
 	if err != nil {
 		return nil, err
-	}
-	var cond Expr
-	if ifs := g.Children("ifs"); len(ifs) > 0 {
-		if len(ifs) > 1 {
-			return nil, fmt.Errorf("line %d: only one if-filter supported", n.Lineno())
-		}
-		c, err := lowerExpr(ifs[0], innerSc)
-		if err != nil {
-			return nil, err
-		}
-		cond = c
 	}
 	kt := key.TypeOf()
 	if kt == nil {
@@ -2167,12 +2186,13 @@ func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
 	return &DictComp{
 		Key:   key,
 		Val:   val,
-		Var:   varName,
-		Iter:  iter,
-		Cond:  cond,
+		Var:   primary.Var,
+		Iter:  primary.Iter,
+		Cond:  primary.Cond,
 		KeyTy: kt,
 		ValTy: vt,
 		Ty:    &Type{Kind: TyDict, Key: kt, Val: vt},
+		Extra: extra,
 	}, nil
 }
 

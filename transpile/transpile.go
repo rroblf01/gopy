@@ -2099,7 +2099,8 @@ func (g *gen) expr(e ir.Expr) error {
 
 // listComp emits an IIFE that builds the result slice in-place. The
 // element-collection variable is named __out so it never collides with
-// user code; the user's loop variable keeps its Python name.
+// user code; the user's loop variable keeps its Python name. Multiple
+// `for V in ITER` clauses (Extra) nest the loops in source order.
 func (g *gen) listComp(c *ir.ListComp) error {
 	elem := g.goType(c.ElemTy)
 	if elem == "" || elem == "any" {
@@ -2109,31 +2110,42 @@ func (g *gen) listComp(c *ir.ListComp) error {
 	g.indent++
 	g.writeIndent()
 	g.writef("__out := []%s{}\n", elem)
-	g.writeIndent()
-	iterTy := c.Iter.TypeOf()
-	if iterTy != nil && iterTy.Kind == ir.TyDict {
-		g.writef("for %s := range ", c.Var)
-	} else {
-		g.writef("for _, %s := range ", c.Var)
-	}
-	if err := g.expr(c.Iter); err != nil {
-		return err
-	}
-	g.writef(" {\n")
-	g.indent++
-	if c.Cond != nil {
+	openLoop := func(varName string, cond ir.Expr, iter ir.Expr) error {
 		g.writeIndent()
-		g.writef("if !(")
-		if err := g.expr(c.Cond); err != nil {
+		iterTy := iter.TypeOf()
+		if iterTy != nil && iterTy.Kind == ir.TyDict {
+			g.writef("for %s := range ", varName)
+		} else {
+			g.writef("for _, %s := range ", varName)
+		}
+		if err := g.expr(iter); err != nil {
 			return err
 		}
-		g.writef(") {\n")
+		g.writef(" {\n")
 		g.indent++
-		g.writeIndent()
-		g.writef("continue\n")
-		g.indent--
-		g.writeIndent()
-		g.writef("}\n")
+		if cond != nil {
+			g.writeIndent()
+			g.writef("if !(")
+			if err := g.expr(cond); err != nil {
+				return err
+			}
+			g.writef(") {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("continue\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}\n")
+		}
+		return nil
+	}
+	if err := openLoop(c.Var, c.Cond, c.Iter); err != nil {
+		return err
+	}
+	for _, gn := range c.Extra {
+		if err := openLoop(gn.Var, gn.Cond, gn.Iter); err != nil {
+			return err
+		}
 	}
 	g.writeIndent()
 	g.writef("__out = append(__out, ")
@@ -2141,6 +2153,11 @@ func (g *gen) listComp(c *ir.ListComp) error {
 		return err
 	}
 	g.writef(")\n")
+	for range c.Extra {
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
 	g.indent--
 	g.writeIndent()
 	g.writef("}\n")
@@ -2166,31 +2183,42 @@ func (g *gen) dictComp(c *ir.DictComp) error {
 	g.indent++
 	g.writeIndent()
 	g.writef("__out := map[%s]%s{}\n", kt, vt)
-	g.writeIndent()
-	iterTy := c.Iter.TypeOf()
-	if iterTy != nil && iterTy.Kind == ir.TyDict {
-		g.writef("for %s := range ", c.Var)
-	} else {
-		g.writef("for _, %s := range ", c.Var)
-	}
-	if err := g.expr(c.Iter); err != nil {
-		return err
-	}
-	g.writef(" {\n")
-	g.indent++
-	if c.Cond != nil {
+	openLoop := func(varName string, cond ir.Expr, iter ir.Expr) error {
 		g.writeIndent()
-		g.writef("if !(")
-		if err := g.expr(c.Cond); err != nil {
+		iterTy := iter.TypeOf()
+		if iterTy != nil && iterTy.Kind == ir.TyDict {
+			g.writef("for %s := range ", varName)
+		} else {
+			g.writef("for _, %s := range ", varName)
+		}
+		if err := g.expr(iter); err != nil {
 			return err
 		}
-		g.writef(") {\n")
+		g.writef(" {\n")
 		g.indent++
-		g.writeIndent()
-		g.writef("continue\n")
-		g.indent--
-		g.writeIndent()
-		g.writef("}\n")
+		if cond != nil {
+			g.writeIndent()
+			g.writef("if !(")
+			if err := g.expr(cond); err != nil {
+				return err
+			}
+			g.writef(") {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("continue\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}\n")
+		}
+		return nil
+	}
+	if err := openLoop(c.Var, c.Cond, c.Iter); err != nil {
+		return err
+	}
+	for _, gn := range c.Extra {
+		if err := openLoop(gn.Var, gn.Cond, gn.Iter); err != nil {
+			return err
+		}
 	}
 	g.writeIndent()
 	g.writef("__out[")
@@ -2202,6 +2230,11 @@ func (g *gen) dictComp(c *ir.DictComp) error {
 		return err
 	}
 	g.writef("\n")
+	for range c.Extra {
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
 	g.indent--
 	g.writeIndent()
 	g.writef("}\n")
@@ -2316,6 +2349,10 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinHeapify(c)
 			case "heapq.heappushpop":
 				return g.builtinHeappushpop(c)
+			case "heapq.nsmallest":
+				return g.builtinNsmallest(c, false)
+			case "heapq.nlargest":
+				return g.builtinNsmallest(c, true)
 			case "bisect.bisect_left":
 				return g.builtinBisect(c, false)
 			case "bisect.bisect_right":
@@ -2875,6 +2912,9 @@ var taggedMethodRename = map[string]map[string]string{
 		"group":     "Group",
 		"groups":    "Groups",
 		"groupdict": "Groupdict",
+		"start":     "Start",
+		"end":       "End",
+		"span":      "Span",
 	},
 	"__Path": {
 		"exists":     "Exists",
@@ -3075,6 +3115,10 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinHeapify(synth)
 		case "heapq.heappushpop":
 			return g.builtinHeappushpop(synth)
+		case "heapq.nsmallest":
+			return g.builtinNsmallest(synth, false)
+		case "heapq.nlargest":
+			return g.builtinNsmallest(synth, true)
 		case "bisect.bisect_left":
 			return g.builtinBisect(synth, false)
 		case "bisect.bisect_right":
@@ -3665,6 +3709,36 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 				return err
 			}
 			g.writef("; __out := make(%s, len(__src)); for __k, __v := range __src { __out[__k] = __v }; return __out }()", mapGo)
+			return nil
+		case "popitem":
+			if len(m.Args) != 0 {
+				return fmt.Errorf("dict.popitem() takes no arguments")
+			}
+			keyGo, valGo := g.goType(rt.Key), g.goType(rt.Val)
+			g.needsException = true
+			g.writef("func() []any {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("__d := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("if len(__d) == 0 { panic(NewException(\"KeyError: dictionary is empty\")) }\n")
+			g.writeIndent()
+			g.writef("var __k %s\n", keyGo)
+			g.writeIndent()
+			g.writef("var __v %s\n", valGo)
+			g.writeIndent()
+			g.writef("for __k, __v = range __d { break }\n")
+			g.writeIndent()
+			g.writef("delete(__d, __k)\n")
+			g.writeIndent()
+			g.writef("return []any{__k, __v}\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
 			return nil
 		}
 	}
@@ -5225,6 +5299,59 @@ func (g *gen) builtinDictFromkeys(m *ir.MethodCall) error {
 	}
 	g.writeIndent()
 	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinNsmallest emits an IIFE that sorts a copy of the iterable and
+// returns the first n elements. `largest=true` reverses the sort to give
+// the n largest. Matches CPython's heapq.nsmallest / nlargest output for
+// typed int/float/str slices.
+func (g *gen) builtinNsmallest(c *ir.Call, largest bool) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("heapq.%s() takes (n, iterable)", map[bool]string{false: "nsmallest", true: "nlargest"}[largest])
+	}
+	elem, err := listElemTypeOf(c.Args[1])
+	if err != nil {
+		return fmt.Errorf("heapq.nsmallest(): %w", err)
+	}
+	if !heapOrderable(elem) {
+		return fmt.Errorf("heapq.nsmallest(): element type must be int/float/str")
+	}
+	elemGo := g.goType(elem)
+	g.addImport("sort")
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__n := int(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("if __n < 0 { __n = 0 }\n")
+	g.writeIndent()
+	g.writef("if __n > len(__src) { __n = len(__src) }\n")
+	g.writeIndent()
+	g.writef("__cp := make([]%s, len(__src))\n", elemGo)
+	g.writeIndent()
+	g.writef("copy(__cp, __src)\n")
+	g.writeIndent()
+	op := "<"
+	if largest {
+		op = ">"
+	}
+	g.writef("sort.Slice(__cp, func(i, j int) bool { return __cp[i] %s __cp[j] })\n", op)
+	g.writeIndent()
+	g.writef("return __cp[:__n]\n")
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
@@ -7311,6 +7438,48 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef(")")
 		return true, nil
+	case "casefold":
+		if len(m.Args) != 0 {
+			return true, fmt.Errorf("str.casefold() takes no arguments")
+		}
+		g.addImport("strings")
+		g.writef("strings.ToLower(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "swapcase":
+		if len(m.Args) != 0 {
+			return true, fmt.Errorf("str.swapcase() takes no arguments")
+		}
+		g.helpers["__gopy_str_swapcase"] = helperStrSwapcase
+		g.writef("__gopy_str_swapcase(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "expandtabs":
+		if len(m.Args) > 1 {
+			return true, fmt.Errorf("str.expandtabs() takes 0 or 1 arguments")
+		}
+		g.helpers["__gopy_str_expandtabs"] = helperStrExpandtabs
+		g.addImport("strings")
+		g.writef("__gopy_str_expandtabs(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		if len(m.Args) == 1 {
+			g.writef(", ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return true, err
+			}
+		} else {
+			g.writef(", 8")
+		}
+		g.writef(")")
+		return true, nil
 	case "translate":
 		if len(m.Args) != 1 {
 			return true, fmt.Errorf("str.translate() takes 1 argument")
@@ -7504,6 +7673,50 @@ const helperStrZfill = `func __gopy_str_zfill(s string, width int64) string {
 	}
 	out = append(out, rs...)
 	return string(out)
+}`
+
+// helperStrSwapcase flips case rune by rune (ASCII subset). Non-letter
+// runes pass through unchanged.
+const helperStrSwapcase = `func __gopy_str_swapcase(s string) string {
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' {
+			out = append(out, r-32)
+		} else if r >= 'A' && r <= 'Z' {
+			out = append(out, r+32)
+		} else {
+			out = append(out, r)
+		}
+	}
+	return string(out)
+}`
+
+// helperStrExpandtabs replaces each tab with spaces aligning to the next
+// tabstop. Matches CPython's str.expandtabs(tabsize) semantics including
+// resetting the column counter at newlines.
+const helperStrExpandtabs = `func __gopy_str_expandtabs(s string, tabsize int64) string {
+	var b strings.Builder
+	col := int64(0)
+	for _, r := range s {
+		if r == '\t' {
+			step := tabsize
+			if tabsize > 0 {
+				step = tabsize - (col % tabsize)
+			}
+			for i := int64(0); i < step; i++ {
+				b.WriteByte(' ')
+			}
+			col += step
+			continue
+		}
+		b.WriteRune(r)
+		if r == '\n' || r == '\r' {
+			col = 0
+		} else {
+			col++
+		}
+	}
+	return b.String()
 }`
 
 // helperStrSplitlines mirrors Python's str.splitlines: splits on \n, \r,
