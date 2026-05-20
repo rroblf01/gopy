@@ -532,7 +532,24 @@ func (g *gen) fn(fn *ir.Func) error {
 	if fn.Receiver != nil {
 		g.writef("(%s *%s) ", fn.Receiver.Name, fn.Receiver.Ty.Name)
 	}
-	g.writef("%s(", fn.Name)
+	// Python dunder methods that map onto Go interfaces — rename so the
+	// generated method matches what fmt / sort / etc. dispatch through.
+	methodName := fn.Name
+	if fn.Receiver != nil {
+		switch fn.Name {
+		case "__str__":
+			methodName = "String"
+		case "__repr__":
+			methodName = "Repr"
+		case "__len__":
+			methodName = "Len"
+		case "__eq__":
+			methodName = "Eq"
+		case "__hash__":
+			methodName = "Hash"
+		}
+	}
+	g.writef("%s(", methodName)
 	for i, p := range fn.Params {
 		if i > 0 {
 			g.writef(", ")
@@ -4101,7 +4118,20 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	if err := g.expr(m.Recv); err != nil {
 		return err
 	}
-	g.writef(".%s(", m.Method)
+	mname := m.Method
+	switch mname {
+	case "__str__":
+		mname = "String"
+	case "__repr__":
+		mname = "Repr"
+	case "__len__":
+		mname = "Len"
+	case "__eq__":
+		mname = "Eq"
+	case "__hash__":
+		mname = "Hash"
+	}
+	g.writef(".%s(", mname)
 	for i, a := range m.Args {
 		if i > 0 {
 			g.writef(", ")
