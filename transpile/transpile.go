@@ -1635,6 +1635,39 @@ func (g *gen) expr(e ir.Expr) error {
 		case lt == "__Path" && x.Op == "/":
 			return g.emitMethodOp(x.L, "Join", x.R)
 		}
+		// `"ab" * 3` / `3 * "ab"` → strings.Repeat. Same shape for list*int
+		// would need element-type knowledge; skip for now.
+		if x.Op == "*" {
+			lTy, rTy := x.L.TypeOf(), x.R.TypeOf()
+			if lTy != nil && rTy != nil {
+				if lTy.Kind == ir.TyStr && rTy.Kind == ir.TyInt {
+					g.addImport("strings")
+					g.writef("strings.Repeat(")
+					if err := g.expr(x.L); err != nil {
+						return err
+					}
+					g.writef(", int(")
+					if err := g.expr(x.R); err != nil {
+						return err
+					}
+					g.writef("))")
+					return nil
+				}
+				if lTy.Kind == ir.TyInt && rTy.Kind == ir.TyStr {
+					g.addImport("strings")
+					g.writef("strings.Repeat(")
+					if err := g.expr(x.R); err != nil {
+						return err
+					}
+					g.writef(", int(")
+					if err := g.expr(x.L); err != nil {
+						return err
+					}
+					g.writef("))")
+					return nil
+				}
+			}
+		}
 		op := x.Op
 		if op == "//" {
 			if x.L.TypeOf() != nil && x.L.TypeOf().Kind == ir.TyInt &&
@@ -5162,9 +5195,36 @@ func (g *gen) builtinAbs(c *ir.Call) error {
 }
 
 // builtinRound emits math.Round semantics for floats; ints pass through.
+// The 2-arg form `round(x, ndigits)` rounds to ndigits decimal places and
+// returns a float (Python returns float when ndigits is given).
 func (g *gen) builtinRound(c *ir.Call) error {
-	if len(c.Args) != 1 || len(c.Keywords) != 0 {
-		return fmt.Errorf("round() in F11+ takes one positional argument (digits not supported)")
+	if len(c.Keywords) != 0 {
+		return fmt.Errorf("round() takes no keyword arguments")
+	}
+	if len(c.Args) == 2 {
+		g.addImport("math")
+		g.writef("func() float64 { __m := math.Pow(10, float64(")
+		if err := g.expr(c.Args[1]); err != nil {
+			return err
+		}
+		g.writef(")); return math.Round(")
+		t := c.Args[0].TypeOf()
+		if t != nil && t.Kind == ir.TyInt {
+			g.writef("float64(")
+			if err := g.expr(c.Args[0]); err != nil {
+				return err
+			}
+			g.writef(")")
+		} else {
+			if err := g.expr(c.Args[0]); err != nil {
+				return err
+			}
+		}
+		g.writef(" * __m) / __m }()")
+		return nil
+	}
+	if len(c.Args) != 1 {
+		return fmt.Errorf("round() takes 1 or 2 arguments")
 	}
 	t := c.Args[0].TypeOf()
 	if t != nil && t.Kind == ir.TyInt {

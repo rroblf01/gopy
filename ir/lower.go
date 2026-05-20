@@ -2439,5 +2439,10 @@ func promoteOp(op string, a, b *Type) *Type {
 	if op == "/" && t != nil && t.Kind == TyInt {
 		return &Type{Kind: TyFloat}
 	}
+	if op == "*" && a != nil && b != nil {
+		if (a.Kind == TyStr && b.Kind == TyInt) || (a.Kind == TyInt && b.Kind == TyStr) {
+			return &Type{Kind: TyStr}
+		}
+	}
 	return t
 }

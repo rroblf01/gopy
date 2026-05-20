@@ -24,7 +24,24 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"os": {
 		Funcs: map[string]stdlibFunc{
-			"getenv": {GoFunc: "os.Getenv", GoImport: "os"},
+			"getenv":  {GoFunc: "os.Getenv", GoImport: "os"},
+			"getcwd":  {GoFunc: "__gopy_os_getcwd", GoImport: "os", Helper: helperOsGetcwd, RetKind: "str"},
+			"listdir": {GoFunc: "__gopy_os_listdir", GoImport: "os", Helper: helperOsListdir},
+			"makedirs": {GoFunc: "__gopy_os_makedirs", GoImport: "os", Helper: helperOsMakedirs},
+		},
+		Subs: map[string]stdlibModule{
+			"path": {
+				Funcs: map[string]stdlibFunc{
+					"join":     {GoFunc: "__gopy_path_join", GoImport: "path/filepath", Helper: helperPathJoin, RetKind: "str"},
+					"exists":   {GoFunc: "__gopy_path_exists", GoImport: "os", Helper: helperPathExists, RetKind: "bool"},
+					"isfile":   {GoFunc: "__gopy_path_isfile", GoImport: "os", Helper: helperPathIsfile, RetKind: "bool"},
+					"isdir":    {GoFunc: "__gopy_path_isdir", GoImport: "os", Helper: helperPathIsdir, RetKind: "bool"},
+					"basename": {GoFunc: "filepath.Base", GoImport: "path/filepath", RetKind: "str"},
+					"dirname":  {GoFunc: "filepath.Dir", GoImport: "path/filepath", RetKind: "str"},
+					"splitext": {GoFunc: "__gopy_path_splitext", GoImport: "path/filepath", Helper: helperPathSplitext},
+					"abspath":  {GoFunc: "__gopy_path_abspath", GoImport: "path/filepath", Helper: helperPathAbspath, RetKind: "str"},
+				},
+			},
 		},
 	},
 	"time": {
@@ -41,24 +58,36 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"math": {
 		Attrs: map[string]stdlibAttr{
-			"pi": {GoExpr: "math.Pi", GoImport: "math"},
-			"e":  {GoExpr: "math.E", GoImport: "math"},
+			"pi":  {GoExpr: "math.Pi", GoImport: "math"},
+			"e":   {GoExpr: "math.E", GoImport: "math"},
 			"inf": {GoExpr: "math.Inf(1)", GoImport: "math"},
+			"nan": {GoExpr: "math.NaN()", GoImport: "math"},
+			"tau": {GoExpr: "math.Pi * 2", GoImport: "math"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"sqrt":  {GoFunc: "math.Sqrt", GoImport: "math"},
-			"floor": {GoFunc: "__gopy_math_floor", GoImport: "math", Helper: helperMathFloor},
-			"ceil":  {GoFunc: "__gopy_math_ceil", GoImport: "math", Helper: helperMathCeil},
-			"log":   {GoFunc: "math.Log", GoImport: "math"},
-			"log2":  {GoFunc: "math.Log2", GoImport: "math"},
-			"log10": {GoFunc: "math.Log10", GoImport: "math"},
-			"exp":   {GoFunc: "math.Exp", GoImport: "math"},
-			"sin":   {GoFunc: "math.Sin", GoImport: "math"},
-			"cos":   {GoFunc: "math.Cos", GoImport: "math"},
-			"tan":   {GoFunc: "math.Tan", GoImport: "math"},
-			"atan":  {GoFunc: "math.Atan", GoImport: "math"},
-			"atan2": {GoFunc: "math.Atan2", GoImport: "math"},
-			"pow":   {GoFunc: "math.Pow", GoImport: "math"},
+			"sqrt":     {GoFunc: "math.Sqrt", GoImport: "math"},
+			"floor":    {GoFunc: "__gopy_math_floor", GoImport: "math", Helper: helperMathFloor, RetKind: "int"},
+			"ceil":     {GoFunc: "__gopy_math_ceil", GoImport: "math", Helper: helperMathCeil, RetKind: "int"},
+			"log":      {GoFunc: "math.Log", GoImport: "math"},
+			"log2":     {GoFunc: "math.Log2", GoImport: "math"},
+			"log10":    {GoFunc: "math.Log10", GoImport: "math"},
+			"exp":      {GoFunc: "math.Exp", GoImport: "math"},
+			"sin":      {GoFunc: "math.Sin", GoImport: "math"},
+			"cos":      {GoFunc: "math.Cos", GoImport: "math"},
+			"tan":      {GoFunc: "math.Tan", GoImport: "math"},
+			"atan":     {GoFunc: "math.Atan", GoImport: "math"},
+			"atan2":    {GoFunc: "math.Atan2", GoImport: "math"},
+			"pow":      {GoFunc: "math.Pow", GoImport: "math"},
+			"trunc":    {GoFunc: "__gopy_math_trunc", GoImport: "math", Helper: helperMathTrunc, RetKind: "int"},
+			"fmod":     {GoFunc: "math.Mod", GoImport: "math", RetKind: "float"},
+			"gcd":      {GoFunc: "__gopy_math_gcd", Helper: helperMathGcd, RetKind: "int"},
+			"isnan":    {GoFunc: "math.IsNaN", GoImport: "math", RetKind: "bool"},
+			"isinf":    {GoFunc: "__gopy_math_isinf", GoImport: "math", Helper: helperMathIsInf, RetKind: "bool"},
+			"isfinite": {GoFunc: "__gopy_math_isfinite", GoImport: "math", Helper: helperMathIsFinite, RetKind: "bool"},
+			"copysign": {GoFunc: "math.Copysign", GoImport: "math"},
+			"hypot":    {GoFunc: "math.Hypot", GoImport: "math"},
+			"degrees":  {GoFunc: "__gopy_math_degrees", GoImport: "math", Helper: helperMathDegrees},
+			"radians":  {GoFunc: "__gopy_math_radians", GoImport: "math", Helper: helperMathRadians},
 		},
 	},
 	"hashlib": {
@@ -633,6 +662,35 @@ const helperSubprocessRun = `func __gopy_subprocess_run(args []string) *__Comple
 const helperMathFloor = `func __gopy_math_floor(x float64) int64 { return int64(math.Floor(x)) }`
 const helperMathCeil = `func __gopy_math_ceil(x float64) int64 { return int64(math.Ceil(x)) }`
 
+// helperMathTrunc returns the integer part (toward zero) as int64, matching
+// Python's math.trunc.
+const helperMathTrunc = `func __gopy_math_trunc(x float64) int64 { return int64(math.Trunc(x)) }`
+
+// helperMathIsInf in CPython is a single predicate (sign-agnostic).
+// Go's math.IsInf takes a sign; pass 0 to accept ±∞.
+const helperMathIsInf = `func __gopy_math_isinf(x float64) bool { return math.IsInf(x, 0) }`
+
+// helperMathIsFinite mirrors Python's math.isfinite: not NaN and not ±∞.
+const helperMathIsFinite = `func __gopy_math_isfinite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }`
+
+// helperMathGcd mirrors Python's math.gcd for two int64 args (Python 3.9+
+// accepts a variadic form; gopy keeps the 2-arg shape for simplicity).
+const helperMathGcd = `func __gopy_math_gcd(a, b int64) int64 {
+	if a < 0 {
+		a = -a
+	}
+	if b < 0 {
+		b = -b
+	}
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}`
+
+const helperMathDegrees = `func __gopy_math_degrees(r float64) float64 { return r * 180 / math.Pi }`
+const helperMathRadians = `func __gopy_math_radians(d float64) float64 { return d * math.Pi / 180 }`
+
 // helperRandomFloat / helperRandint / helperRandomSeed bridge Python's
 // random module to Go's math/rand. We use the package-level rand source
 // so callers can seed deterministically.
@@ -713,6 +771,77 @@ func (p *__Path) WriteText(s string) {
 func (p *__Path) String() string { return p.p }`
 
 const helperPathNew = `func __gopy_path_new(s string) *__Path { return &__Path{p: s} }`
+
+const helperOsGetcwd = `func __gopy_os_getcwd() string {
+	d, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return d
+}`
+
+const helperOsListdir = `func __gopy_os_listdir(p string) []string {
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		panic(err)
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Name())
+	}
+	return out
+}`
+
+const helperOsMakedirs = `func __gopy_os_makedirs(p string, args ...bool) {
+	exist_ok := false
+	if len(args) > 0 {
+		exist_ok = args[0]
+	}
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		if !exist_ok {
+			panic(err)
+		}
+	}
+}`
+
+// os.path.join: Python's join treats absolute parts as resets (later
+// absolute path wins). filepath.Join does the same on Unix; on Windows
+// the semantics differ for drive letters but we target Unix.
+const helperPathJoin = `func __gopy_path_join(parts ...string) string {
+	return filepath.Join(parts...)
+}`
+
+const helperPathExists = `func __gopy_path_exists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}`
+
+const helperPathIsfile = `func __gopy_path_isfile(p string) bool {
+	i, err := os.Stat(p)
+	return err == nil && !i.IsDir()
+}`
+
+const helperPathIsdir = `func __gopy_path_isdir(p string) bool {
+	i, err := os.Stat(p)
+	return err == nil && i.IsDir()
+}`
+
+const helperPathSplitext = `func __gopy_path_splitext(p string) []string {
+	ext := filepath.Ext(p)
+	base := p
+	if ext != "" {
+		base = p[:len(p)-len(ext)]
+	}
+	return []string{base, ext}
+}`
+
+const helperPathAbspath = `func __gopy_path_abspath(p string) string {
+	a, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return a
+}`
 
 // helperTimedeltaType mirrors Python's str(timedelta(days=...)) output
 // so cross-runtime fixtures can print the value directly. Supports
