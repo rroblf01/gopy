@@ -543,10 +543,12 @@ func (g *gen) fn(fn *ir.Func) error {
 			methodName = "Repr"
 		case "__len__":
 			methodName = "Len"
-		case "__eq__":
-			methodName = "Eq"
 		case "__hash__":
 			methodName = "Hash"
+		default:
+			if mapped := exportedDunder(fn.Name); mapped != fn.Name {
+				methodName = mapped
+			}
 		}
 	}
 	g.writef("%s(", methodName)
@@ -1824,6 +1826,17 @@ func (g *gen) expr(e ir.Expr) error {
 		case lt == "__Path" && x.Op == "/":
 			return g.emitMethodOp(x.L, "Join", x.R)
 		}
+		// User-class operator overloading: when L's effective type is a
+		// registered TyNamed class with a matching __op__ method, route
+		// the binop through it.
+		if lTy := g.effectiveType(x.L); lTy != nil && lTy.Kind == ir.TyNamed {
+			dunder := opDunderName(x.Op)
+			if dunder != "" {
+				if fn := g.lookupMethod(lTy.Name, dunder); fn != nil {
+					return g.emitMethodOp(x.L, exportedDunder(dunder), x.R)
+				}
+			}
+		}
 		// `s % args` printf-style string formatting. Python's % format
 		// codes mostly overlap with Go's fmt; we pass the string through
 		// unchanged and rely on Go fmt to do the substitution.
@@ -1983,6 +1996,15 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.CmpOp:
 		if x.Op == "in" || x.Op == "notin" {
 			return g.emitInOp(x)
+		}
+		// User-class comparison dispatch: route through __lt__ / __eq__
+		// etc. when the LHS is a known TyNamed class with the method.
+		if lTy := g.effectiveType(x.L); lTy != nil && lTy.Kind == ir.TyNamed {
+			if dunder := opDunderName(x.Op); dunder != "" {
+				if fn := g.lookupMethod(lTy.Name, dunder); fn != nil {
+					return g.emitMethodOp(x.L, exportedDunder(dunder), x.R)
+				}
+			}
 		}
 		g.writef("(")
 		if err := g.expr(x.L); err != nil {
@@ -4126,10 +4148,12 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		mname = "Repr"
 	case "__len__":
 		mname = "Len"
-	case "__eq__":
-		mname = "Eq"
 	case "__hash__":
 		mname = "Hash"
+	default:
+		if mapped := exportedDunder(mname); mapped != mname {
+			mname = mapped
+		}
 	}
 	g.writef(".%s(", mname)
 	for i, a := range m.Args {
@@ -5793,6 +5817,77 @@ func (g *gen) dataclassFor(e ir.Expr) (*ir.Class, error) {
 // emits struct fields with the original Python casing, so this is the
 // identity function — wrapped to make intent explicit at call sites.
 func exportedField(name string) string { return name }
+
+// opDunderName maps a Python binary operator to the dunder method name
+// CPython would dispatch through. Empty string when the operator has no
+// dunder analogue we surface.
+func opDunderName(op string) string {
+	switch op {
+	case "+":
+		return "__add__"
+	case "-":
+		return "__sub__"
+	case "*":
+		return "__mul__"
+	case "/":
+		return "__truediv__"
+	case "//":
+		return "__floordiv__"
+	case "%":
+		return "__mod__"
+	case "**":
+		return "__pow__"
+	case "<":
+		return "__lt__"
+	case "<=":
+		return "__le__"
+	case ">":
+		return "__gt__"
+	case ">=":
+		return "__ge__"
+	case "==":
+		return "__eq__"
+	case "!=":
+		return "__ne__"
+	}
+	return ""
+}
+
+// exportedDunder returns the Go method name gopy emits for a Python
+// dunder method. Matches the renames performed at method-def time.
+func exportedDunder(name string) string {
+	switch name {
+	case "__add__":
+		return "Add"
+	case "__sub__":
+		return "Sub"
+	case "__mul__":
+		return "Mul"
+	case "__truediv__":
+		return "Truediv"
+	case "__floordiv__":
+		return "Floordiv"
+	case "__mod__":
+		return "Mod"
+	case "__pow__":
+		return "Pow"
+	case "__lt__":
+		return "Lt"
+	case "__le__":
+		return "Le"
+	case "__gt__":
+		return "Gt"
+	case "__ge__":
+		return "Ge"
+	case "__eq__":
+		return "Eq"
+	case "__ne__":
+		return "Ne"
+	case "__contains__":
+		return "Contains"
+	}
+	return name
+}
 
 // builtinJSONDumps emits a json.dumps call optionally honoring the
 // indent= kwarg. Other kwargs (sort_keys, separators, default) are not
