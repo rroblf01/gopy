@@ -3229,6 +3229,17 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			}
 			g.writef("[:0]")
 			return nil
+		case "copy":
+			if len(m.Args) != 0 {
+				return fmt.Errorf("list.copy() takes no arguments")
+			}
+			elemGo := g.goType(rt.Elem)
+			g.writef("func() []%s { __src := ", elemGo)
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("; __out := make([]%s, len(__src)); copy(__out, __src); return __out }()", elemGo)
+			return nil
 		case "sort":
 			// Only naive ascending sort. reverse=True flips the comparator.
 			reverse := false
@@ -3453,6 +3464,17 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 				return err
 			}
 			g.writef(", __k) }")
+			return nil
+		case "copy":
+			if len(m.Args) != 0 {
+				return fmt.Errorf("dict.copy() takes no arguments")
+			}
+			mapGo := g.goType(rt)
+			g.writef("func() %s { __src := ", mapGo)
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("; __out := make(%s, len(__src)); for __k, __v := range __src { __out[__k] = __v }; return __out }()", mapGo)
 			return nil
 		}
 	}
@@ -5594,14 +5616,31 @@ func (g *gen) builtinMinMaxArgs(c *ir.Call, kind string) error {
 }
 
 func (g *gen) builtinReduce(c *ir.Call, kind string) error {
-	if len(c.Keywords) != 0 {
-		return fmt.Errorf("%s(): keyword arguments not supported", kind)
+	// `min(xs, key=lambda x: ...)` / `max(...)` re-lower the lambda body with
+	// the iterable's element type and pick the element with the min/max key.
+	var keyLam *ir.Lambda
+	for _, kw := range c.Keywords {
+		if (kind == "min" || kind == "max") && kw.Name == "key" {
+			lam, ok := kw.Value.(*ir.Lambda)
+			if !ok {
+				return fmt.Errorf("%s(key=...): only inline lambda supported", kind)
+			}
+			if len(lam.Params) != 1 {
+				return fmt.Errorf("%s(key=...): lambda must take one argument", kind)
+			}
+			keyLam = lam
+		} else {
+			return fmt.Errorf("%s(): keyword arguments not supported", kind)
+		}
 	}
 	// Multi-arg form (min/max only): `min(a, b)` / `min(a, b, c)`.
 	// Reject for any / all / sum which only make sense over an iterable.
 	if len(c.Args) > 1 {
 		if kind != "min" && kind != "max" {
 			return fmt.Errorf("%s() takes one iterable; got %d arguments", kind, len(c.Args))
+		}
+		if keyLam != nil {
+			return fmt.Errorf("%s(): key= cannot combine with multi-positional form", kind)
 		}
 		return g.builtinMinMaxArgs(c, kind)
 	}
@@ -5613,6 +5652,65 @@ func (g *gen) builtinReduce(c *ir.Call, kind string) error {
 		return fmt.Errorf("%s(): %w", kind, err)
 	}
 	elemGo := g.goType(elem)
+	if keyLam != nil && (kind == "min" || kind == "max") {
+		body, err := ir.LowerLambdaBody(keyLam, []*ir.Type{elem})
+		if err != nil {
+			return fmt.Errorf("%s(): %w", kind, err)
+		}
+		keyTy := body.TypeOf()
+		if keyTy == nil || keyTy.Kind == ir.TyUnknown {
+			keyTy = elem
+		}
+		keyGo := g.goType(keyTy)
+		paramName := keyLam.Params[0].Name
+		op := "<"
+		if kind == "max" {
+			op = ">"
+		}
+		g.writef("func() %s {\n", elemGo)
+		g.indent++
+		g.writeIndent()
+		g.writef("__src := ")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("if len(__src) == 0 { panic(NewException(\"%s() of empty sequence\")) }\n", kind)
+		g.needsException = true
+		g.writeIndent()
+		g.writef("var __best %s = __src[0]\n", elemGo)
+		g.writeIndent()
+		g.writef("%s := __src[0]\n", paramName)
+		g.writeIndent()
+		g.writef("var __bestK %s = ", keyGo)
+		if err := g.expr(body); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("for __i := 1; __i < len(__src); __i++ {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("%s = __src[__i]\n", paramName)
+		g.writeIndent()
+		g.writef("__k := ")
+		if err := g.expr(body); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("if __k %s __bestK { __bestK = __k; __best = __src[__i] }\n", op)
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+		g.writeIndent()
+		g.writef("return __best\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()")
+		return nil
+	}
 	emit := func(retGo, init, loopBody string) error {
 		g.writef("func() %s {\n", retGo)
 		g.indent++
@@ -5821,12 +5919,43 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef(")")
 		return true, nil
-	case "startswith":
+	case "startswith", "endswith":
 		if len(m.Args) != 1 {
-			return true, fmt.Errorf("str.startswith() takes one argument")
+			return true, fmt.Errorf("str.%s() takes one argument", m.Method)
+		}
+		fn := "HasPrefix"
+		if m.Method == "endswith" {
+			fn = "HasSuffix"
 		}
 		g.addImport("strings")
-		g.writef("strings.HasPrefix(")
+		// Tuple argument: Python tries each candidate; emit a chained ||
+		// expression so short-circuit semantics carry over.
+		if lit, ok := m.Args[0].(*ir.ListLit); ok {
+			// Python's tuple lit lowers to ListLit too.
+			g.writef("func() bool {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("__s := ")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef("\n")
+			for _, e := range lit.Elems {
+				g.writeIndent()
+				g.writef("if strings.%s(__s, ", fn)
+				if err := g.expr(e); err != nil {
+					return true, err
+				}
+				g.writef(") { return true }\n")
+			}
+			g.writeIndent()
+			g.writef("return false\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return true, nil
+		}
+		g.writef("strings.%s(", fn)
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
 		}
@@ -5836,12 +5965,16 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef(")")
 		return true, nil
-	case "endswith":
+	case "removeprefix", "removesuffix":
 		if len(m.Args) != 1 {
-			return true, fmt.Errorf("str.endswith() takes one argument")
+			return true, fmt.Errorf("str.%s() takes one argument", m.Method)
+		}
+		fn := "TrimPrefix"
+		if m.Method == "removesuffix" {
+			fn = "TrimSuffix"
 		}
 		g.addImport("strings")
-		g.writef("strings.HasSuffix(")
+		g.writef("strings.%s(", fn)
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
 		}
