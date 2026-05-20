@@ -97,8 +97,11 @@ var stdlibModules = map[string]stdlibModule{
 			"isfinite": {GoFunc: "__gopy_math_isfinite", GoImport: "math", Helper: helperMathIsFinite, RetKind: "bool"},
 			"copysign": {GoFunc: "math.Copysign", GoImport: "math"},
 			"hypot":    {GoFunc: "math.Hypot", GoImport: "math"},
-			"degrees":  {GoFunc: "__gopy_math_degrees", GoImport: "math", Helper: helperMathDegrees},
-			"radians":  {GoFunc: "__gopy_math_radians", GoImport: "math", Helper: helperMathRadians},
+			"degrees":   {GoFunc: "__gopy_math_degrees", GoImport: "math", Helper: helperMathDegrees},
+			"radians":   {GoFunc: "__gopy_math_radians", GoImport: "math", Helper: helperMathRadians},
+			"factorial": {GoFunc: "__gopy_math_factorial", Helper: helperMathFactorial, RetKind: "int"},
+			"comb":      {GoFunc: "__gopy_math_comb", Helper: helperMathComb, RetKind: "int"},
+			"perm":      {GoFunc: "__gopy_math_perm", Helper: helperMathPerm, RetKind: "int"},
 		},
 	},
 	"hashlib": {
@@ -182,6 +185,9 @@ var stdlibModules = map[string]stdlibModule{
 			"combinations": {GoFunc: "__gopy_combinations_unused"},
 			"product":      {GoFunc: "__gopy_product_unused"},
 			"groupby":      {GoFunc: "__gopy_groupby_unused"},
+			"permutations": {GoFunc: "__gopy_permutations_unused"},
+			"islice":       {GoFunc: "__gopy_islice_unused"},
+			"repeat":       {GoFunc: "__gopy_repeat_unused"},
 		},
 	},
 	"random": {
@@ -702,6 +708,56 @@ const helperMathGcd = `func __gopy_math_gcd(a, b int64) int64 {
 
 const helperMathDegrees = `func __gopy_math_degrees(r float64) float64 { return r * 180 / math.Pi }`
 const helperMathRadians = `func __gopy_math_radians(d float64) float64 { return d * math.Pi / 180 }`
+
+const helperMathFactorial = `func __gopy_math_factorial(n int64) int64 {
+	if n < 0 {
+		panic(NewException("ValueError: factorial() not defined for negative values"))
+	}
+	out := int64(1)
+	for i := int64(2); i <= n; i++ {
+		out *= i
+	}
+	return out
+}`
+
+const helperMathComb = `func __gopy_math_comb(n, k int64) int64 {
+	if k < 0 || n < 0 {
+		panic(NewException("ValueError: comb() requires non-negative inputs"))
+	}
+	if k > n {
+		return 0
+	}
+	if k > n-k {
+		k = n - k
+	}
+	out := int64(1)
+	for i := int64(0); i < k; i++ {
+		out = out * (n - i) / (i + 1)
+	}
+	return out
+}`
+
+const helperMathPerm = `func __gopy_math_perm(args ...int64) int64 {
+	if len(args) == 0 {
+		panic(NewException("TypeError: perm() requires at least one argument"))
+	}
+	n := args[0]
+	k := n
+	if len(args) > 1 {
+		k = args[1]
+	}
+	if k < 0 || n < 0 {
+		panic(NewException("ValueError: perm() requires non-negative inputs"))
+	}
+	if k > n {
+		return 0
+	}
+	out := int64(1)
+	for i := int64(0); i < k; i++ {
+		out *= n - i
+	}
+	return out
+}`
 
 // helperRandomFloat / helperRandint / helperRandomSeed bridge Python's
 // random module to Go's math/rand. We use the package-level rand source

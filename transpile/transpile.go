@@ -2198,6 +2198,12 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinCombinations(c)
 			case "itertools.product":
 				return g.builtinProduct(c)
+			case "itertools.permutations":
+				return g.builtinPermutations(c)
+			case "itertools.islice":
+				return g.builtinIslice(c)
+			case "itertools.repeat":
+				return g.builtinRepeat(c)
 			case "subprocess.run":
 				return g.builtinSubprocessRun(c)
 			case "collections.deque":
@@ -2848,6 +2854,12 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 }
 
 func (g *gen) methodCall(m *ir.MethodCall) error {
+	// `dict.fromkeys(iter, value)` — classmethod-like; build a typed map
+	// from the iterable. Value type comes from the second arg or defaults
+	// to None. Key type comes from the iterable's element type.
+	if n, ok := m.Recv.(*ir.Name); ok && n.N == "dict" && m.Method == "fromkeys" {
+		return g.builtinDictFromkeys(m)
+	}
 	// Tagged-receiver method dispatch (Match.group, Path.exists, ...).
 	// Tag may come from a Name (varTypes) or from a Call / MethodCall
 	// whose declared stdlib return tag is recorded in the registry.
@@ -4726,6 +4738,225 @@ func (g *gen) builtinTimedelta(c *ir.Call) error {
 		}
 	}
 	g.writef(")")
+	return nil
+}
+
+// builtinDictFromkeys emits `dict.fromkeys(iter, value)` as a typed
+// map literal built from the iterable's elements paired with value.
+// One-arg form defaults value to None (mapped to int64(0) for typed
+// dicts; users that want None should pass an explicit None literal).
+func (g *gen) builtinDictFromkeys(m *ir.MethodCall) error {
+	if len(m.Args) < 1 || len(m.Args) > 2 || len(m.Keywords) != 0 {
+		return fmt.Errorf("dict.fromkeys() takes (iterable[, value])")
+	}
+	elem, err := listElemTypeOf(m.Args[0])
+	if err != nil {
+		return fmt.Errorf("dict.fromkeys(): %w", err)
+	}
+	keyGo := g.goType(elem)
+	var valTy *ir.Type
+	if len(m.Args) == 2 {
+		valTy = m.Args[1].TypeOf()
+	}
+	if valTy == nil || valTy.Kind == ir.TyUnknown || valTy.Kind == ir.TyNone {
+		valTy = &ir.Type{Kind: ir.TyAny}
+	}
+	valGo := g.goType(valTy)
+	g.writef("func() map[%s]%s {\n", keyGo, valGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(m.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := make(map[%s]%s, len(__src))\n", keyGo, valGo)
+	g.writeIndent()
+	if len(m.Args) == 2 {
+		g.writef("var __v %s = ", valGo)
+		if err := g.expr(m.Args[1]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("for _, __k := range __src { __out[__k] = __v }\n")
+	} else {
+		g.writef("var __v %s\n", valGo)
+		g.writeIndent()
+		g.writef("for _, __k := range __src { __out[__k] = __v }\n")
+	}
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinPermutations emits an IIFE producing every r-length ordered
+// arrangement of the input list. F+ supports the fixed r=2 form to match
+// builtinCombinations' shape; richer r values need recursion that would
+// blow up the helper surface.
+func (g *gen) builtinPermutations(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("permutations() takes (iterable, r); F+ accepts r=2 only")
+	}
+	rLit, ok := c.Args[1].(*ir.IntLit)
+	if !ok || rLit.V != 2 {
+		return fmt.Errorf("permutations(): r must be the literal 2")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("permutations(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() [][]%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := [][]%s{}\n", elemGo)
+	g.writeIndent()
+	g.writef("for __i := 0; __i < len(__src); __i++ {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("for __j := 0; __j < len(__src); __j++ {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("if __i == __j { continue }\n")
+	g.writeIndent()
+	g.writef("__out = append(__out, []%s{__src[__i], __src[__j]})\n", elemGo)
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinIslice slices an already-materialized iterable. Supports both
+// `islice(it, stop)` and `islice(it, start, stop[, step])` — step defaults
+// to 1, all bounds are int literals or names with int type.
+func (g *gen) builtinIslice(c *ir.Call) error {
+	if len(c.Args) < 2 || len(c.Args) > 4 || len(c.Keywords) != 0 {
+		return fmt.Errorf("islice() takes (iterable, stop) or (iterable, start, stop[, step])")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("islice(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	var startExpr, stopExpr, stepExpr ir.Expr
+	if len(c.Args) == 2 {
+		stopExpr = c.Args[1]
+	} else {
+		startExpr = c.Args[1]
+		stopExpr = c.Args[2]
+		if len(c.Args) == 4 {
+			stepExpr = c.Args[3]
+		}
+	}
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("var __start int64 = 0\n")
+	if startExpr != nil {
+		g.writeIndent()
+		g.writef("__start = int64(")
+		if err := g.expr(startExpr); err != nil {
+			return err
+		}
+		g.writef(")\n")
+	}
+	g.writeIndent()
+	g.writef("var __stop int64 = int64(")
+	if err := g.expr(stopExpr); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("var __step int64 = 1\n")
+	if stepExpr != nil {
+		g.writeIndent()
+		g.writef("__step = int64(")
+		if err := g.expr(stepExpr); err != nil {
+			return err
+		}
+		g.writef(")\n")
+	}
+	g.writeIndent()
+	g.writef("if __step <= 0 { panic(NewException(\"islice(): step must be > 0\")) }\n")
+	g.needsException = true
+	g.writeIndent()
+	g.writef("__n := int64(len(__src))\n")
+	g.writeIndent()
+	g.writef("if __stop > __n { __stop = __n }\n")
+	g.writeIndent()
+	g.writef("__out := []%s{}\n", elemGo)
+	g.writeIndent()
+	g.writef("for __i := __start; __i < __stop; __i += __step { __out = append(__out, __src[__i]) }\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinRepeat emits a slice of n copies of the value. CPython's
+// itertools.repeat is unbounded if `n` is omitted; gopy requires `n`
+// since the consumers we support all materialize the result.
+func (g *gen) builtinRepeat(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("repeat() takes (value, n); unbounded form not supported")
+	}
+	elemTy := c.Args[0].TypeOf()
+	if elemTy == nil {
+		elemTy = &ir.Type{Kind: ir.TyAny}
+	}
+	elemGo := g.goType(elemTy)
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__v := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__n := int(")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("if __n <= 0 { return []%s{} }\n", elemGo)
+	g.writeIndent()
+	g.writef("__out := make([]%s, __n)\n", elemGo)
+	g.writeIndent()
+	g.writef("for __i := 0; __i < __n; __i++ { __out[__i] = __v }\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
 	return nil
 }
 
