@@ -2341,6 +2341,12 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinRepeat(c)
 			case "itertools.starmap":
 				return g.builtinStarmap(c)
+			case "itertools.filterfalse":
+				return g.builtinFilterfalse(c)
+			case "itertools.compress":
+				return g.builtinCompress(c)
+			case "itertools.count":
+				return g.builtinCount(c)
 			case "heapq.heappush":
 				return g.builtinHeappush(c)
 			case "heapq.heappop":
@@ -5297,6 +5303,180 @@ func (g *gen) builtinDictFromkeys(m *ir.MethodCall) error {
 		g.writeIndent()
 		g.writef("for _, __k := range __src { __out[__k] = __v }\n")
 	}
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinFilterfalse emits filter(not pred(x), xs) — keeps elements for
+// which the lambda predicate returns false. Lambda re-lowered with the
+// iterable's element type.
+func (g *gen) builtinFilterfalse(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("filterfalse() takes (predicate, iterable)")
+	}
+	lam, ok := c.Args[0].(*ir.Lambda)
+	if !ok {
+		return fmt.Errorf("filterfalse(): first arg must be an inline lambda")
+	}
+	if len(lam.Params) != 1 {
+		return fmt.Errorf("filterfalse(): lambda must take 1 argument")
+	}
+	elem, err := listElemTypeOf(c.Args[1])
+	if err != nil {
+		return fmt.Errorf("filterfalse(): %w", err)
+	}
+	body, err := ir.LowerLambdaBody(lam, []*ir.Type{elem})
+	if err != nil {
+		return fmt.Errorf("filterfalse(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__out := []%s{}\n", elemGo)
+	g.writeIndent()
+	g.writef("for _, %s := range ", lam.Params[0].Name)
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(" {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("if !(")
+	if err := g.expr(body); err != nil {
+		return err
+	}
+	g.writef(") { __out = append(__out, %s) }\n", lam.Params[0].Name)
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinCompress emits Python's compress(data, selectors) — keeps each
+// data[i] whose corresponding selectors[i] is truthy.
+func (g *gen) builtinCompress(c *ir.Call) error {
+	if len(c.Args) != 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("compress() takes (data, selectors)")
+	}
+	elem, err := listElemTypeOf(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("compress(): %w", err)
+	}
+	selElem, err := listElemTypeOf(c.Args[1])
+	if err != nil {
+		return fmt.Errorf("compress(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__data := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__sel := ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__n := len(__data)\n")
+	g.writeIndent()
+	g.writef("if len(__sel) < __n { __n = len(__sel) }\n")
+	g.writeIndent()
+	g.writef("__out := []%s{}\n", elemGo)
+	g.writeIndent()
+	g.writef("for __i := 0; __i < __n; __i++ {\n")
+	g.indent++
+	g.writeIndent()
+	switch selElem.Kind {
+	case ir.TyBool:
+		g.writef("if __sel[__i] { __out = append(__out, __data[__i]) }\n")
+	case ir.TyInt:
+		g.writef("if __sel[__i] != 0 { __out = append(__out, __data[__i]) }\n")
+	default:
+		g.writef("if __sel[__i] != 0 { __out = append(__out, __data[__i]) }\n")
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinCount emits a bounded form of itertools.count: count(start, step, n).
+// CPython's count is infinite; gopy requires an explicit `n` element limit
+// (passed as the third positional arg) since consumers we support all
+// materialize.
+func (g *gen) builtinCount(c *ir.Call) error {
+	if len(c.Args) < 1 || len(c.Args) > 3 || len(c.Keywords) != 0 {
+		return fmt.Errorf("count() takes (start, step, n); gopy requires explicit n")
+	}
+	var startE, stepE, nE ir.Expr
+	startE = c.Args[0]
+	if len(c.Args) >= 2 {
+		stepE = c.Args[1]
+	}
+	if len(c.Args) == 3 {
+		nE = c.Args[2]
+	}
+	if nE == nil {
+		return fmt.Errorf("count(): unbounded form not supported — pass n as the third arg")
+	}
+	// Pick int64 / float64 from start's type.
+	tStart := startE.TypeOf()
+	if tStart == nil || (tStart.Kind != ir.TyInt && tStart.Kind != ir.TyFloat) {
+		return fmt.Errorf("count(): start must be int or float")
+	}
+	elemGo := g.goType(tStart)
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("var __start %s = ", elemGo)
+	if err := g.expr(startE); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("var __step %s = ", elemGo)
+	if stepE != nil {
+		if err := g.expr(stepE); err != nil {
+			return err
+		}
+	} else {
+		g.writef("1")
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__n := int(")
+	if err := g.expr(nE); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("if __n < 0 { __n = 0 }\n")
+	g.writeIndent()
+	g.writef("__out := make([]%s, __n)\n", elemGo)
+	g.writeIndent()
+	g.writef("__v := __start\n")
+	g.writeIndent()
+	g.writef("for __i := 0; __i < __n; __i++ { __out[__i] = __v; __v += __step }\n")
 	g.writeIndent()
 	g.writef("return __out\n")
 	g.indent--

@@ -215,6 +215,9 @@ var stdlibModules = map[string]stdlibModule{
 			"islice":       {GoFunc: "__gopy_islice_unused"},
 			"repeat":       {GoFunc: "__gopy_repeat_unused"},
 			"starmap":      {GoFunc: "__gopy_starmap_unused"},
+			"filterfalse":  {GoFunc: "__gopy_filterfalse_unused"},
+			"compress":     {GoFunc: "__gopy_compress_unused"},
+			"count":        {GoFunc: "__gopy_count_unused"},
 		},
 	},
 	"random": {
@@ -232,13 +235,17 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"statistics": {
 		Funcs: map[string]stdlibFunc{
-			"mean":     {GoFunc: "__gopy_stats_mean", Helper: helperStatsMean, RetKind: "float"},
-			"fmean":    {GoFunc: "__gopy_stats_mean", Helper: helperStatsMean, RetKind: "float"},
-			"median":   {GoFunc: "__gopy_stats_median", GoImport: "sort", Helper: helperStatsMedian, RetKind: "float"},
-			"mode":     {GoFunc: "__gopy_stats_mode", Helper: helperStatsMode, RetKind: "int"},
-			"stdev":    {GoFunc: "__gopy_stats_stdev", GoImport: "math", Helper: helperStatsStdev, RetKind: "float"},
-			"pstdev":   {GoFunc: "__gopy_stats_pstdev", GoImport: "math", Helper: helperStatsPstdev, RetKind: "float"},
-			"variance": {GoFunc: "__gopy_stats_variance", Helper: helperStatsVariance, RetKind: "float"},
+			"mean":          {GoFunc: "__gopy_stats_mean", Helper: helperStatsMean, RetKind: "float"},
+			"fmean":         {GoFunc: "__gopy_stats_mean", Helper: helperStatsMean, RetKind: "float"},
+			"median":        {GoFunc: "__gopy_stats_median", GoImport: "sort", Helper: helperStatsMedian, RetKind: "float"},
+			"mode":          {GoFunc: "__gopy_stats_mode", Helper: helperStatsMode, RetKind: "int"},
+			"stdev":         {GoFunc: "__gopy_stats_stdev", GoImport: "math", Helper: helperStatsStdev, RetKind: "float"},
+			"pstdev":        {GoFunc: "__gopy_stats_pstdev", GoImport: "math", Helper: helperStatsPstdev, RetKind: "float"},
+			"variance":      {GoFunc: "__gopy_stats_variance", Helper: helperStatsVariance, RetKind: "float"},
+			"median_low":    {GoFunc: "__gopy_stats_median_low", GoImport: "sort", Helper: helperStatsMedianLow, RetKind: "float"},
+			"median_high":   {GoFunc: "__gopy_stats_median_high", GoImport: "sort", Helper: helperStatsMedianHigh, RetKind: "float"},
+			"harmonic_mean": {GoFunc: "__gopy_stats_harmonic", Helper: helperStatsHarmonic, RetKind: "float"},
+			"pvariance":     {GoFunc: "__gopy_stats_pvariance", Helper: helperStatsPvariance, RetKind: "float"},
 		},
 	},
 	"uuid": {
@@ -260,6 +267,7 @@ var stdlibModules = map[string]stdlibModule{
 			"match":     {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
 			"fullmatch": {GoFunc: "__gopy_re_fullmatch", GoImport: "regexp", Helper: helperReFullmatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
 			"sub":       {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub},
+			"subn":      {GoFunc: "__gopy_re_subn", GoImport: "regexp", Helper: helperReSubn},
 			"split":     {GoFunc: "__gopy_re_split", GoImport: "regexp", Helper: helperReSplit},
 			"escape":    {GoFunc: "regexp.QuoteMeta", GoImport: "regexp", RetKind: "str"},
 			"compile":   {GoFunc: "__gopy_re_compile", GoImport: "regexp", Helper: helperReCompile, RetTag: "__Pattern", ExtraHelpers: map[string]string{"__Pattern": helperPatternType, "__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
@@ -560,6 +568,14 @@ const helperMatchBuild = `func __gopy_match_build(r *regexp.Regexp, s string, _ 
 const helperReSub = `func __gopy_re_sub(pattern, repl, s string) string {
 	r := regexp.MustCompile(pattern)
 	return r.ReplaceAllString(s, repl)
+}`
+
+// helperReSubn returns []any{result_string, n_substitutions} so callers
+// can unpack via positional indexing. Mirrors Python's re.subn tuple.
+const helperReSubn = `func __gopy_re_subn(pattern, repl, s string) []any {
+	r := regexp.MustCompile(pattern)
+	count := int64(len(r.FindAllStringIndex(s, -1)))
+	return []any{r.ReplaceAllString(s, repl), count}
 }`
 
 // helperReFullmatch anchors at both ends, mirroring re.fullmatch.
@@ -1010,6 +1026,61 @@ const helperStatsVariance = `func __gopy_stats_variance(xs []float64) float64 {
 
 const helperStatsStdev = `func __gopy_stats_stdev(xs []float64) float64 {
 	return math.Sqrt(__gopy_stats_variance(xs))
+}`
+
+const helperStatsMedianLow = `func __gopy_stats_median_low(xs []float64) float64 {
+	if len(xs) == 0 {
+		panic(NewException("StatisticsError: median_low requires at least one data point"))
+	}
+	cp := make([]float64, len(xs))
+	copy(cp, xs)
+	sort.Float64s(cp)
+	n := len(cp)
+	if n%2 == 1 {
+		return cp[n/2]
+	}
+	return cp[n/2-1]
+}`
+
+const helperStatsMedianHigh = `func __gopy_stats_median_high(xs []float64) float64 {
+	if len(xs) == 0 {
+		panic(NewException("StatisticsError: median_high requires at least one data point"))
+	}
+	cp := make([]float64, len(xs))
+	copy(cp, xs)
+	sort.Float64s(cp)
+	return cp[len(cp)/2]
+}`
+
+const helperStatsHarmonic = `func __gopy_stats_harmonic(xs []float64) float64 {
+	if len(xs) == 0 {
+		panic(NewException("StatisticsError: harmonic_mean requires at least one data point"))
+	}
+	var s float64
+	for _, v := range xs {
+		if v <= 0 {
+			panic(NewException("StatisticsError: harmonic_mean requires positive values"))
+		}
+		s += 1.0 / v
+	}
+	return float64(len(xs)) / s
+}`
+
+const helperStatsPvariance = `func __gopy_stats_pvariance(xs []float64) float64 {
+	if len(xs) == 0 {
+		panic(NewException("StatisticsError: pvariance requires at least one data point"))
+	}
+	var sum float64
+	for _, v := range xs {
+		sum += v
+	}
+	mean := sum / float64(len(xs))
+	var ss float64
+	for _, v := range xs {
+		d := v - mean
+		ss += d * d
+	}
+	return ss / float64(len(xs))
 }`
 
 const helperStatsPstdev = `func __gopy_stats_pstdev(xs []float64) float64 {
