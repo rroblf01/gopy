@@ -65,6 +65,8 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"dumps": {GoFunc: "__gopy_json_dumps", GoImport: "encoding/json", Helper: helperJSONDumps, HelperImports: []string{"strings"}},
 			"loads": {GoFunc: "__gopy_json_loads", GoImport: "encoding/json", Helper: helperJSONLoads},
+			"load":  {GoFunc: "__gopy_json_load", GoImport: "encoding/json", Helper: helperJSONLoad, HelperImports: []string{"io"}},
+			"dump":  {GoFunc: "__gopy_json_dump", GoImport: "encoding/json", Helper: helperJSONDump, HelperImports: []string{"strings"}},
 		},
 	},
 	"math": {
@@ -123,10 +125,14 @@ var stdlibModules = map[string]stdlibModule{
 		Subs: map[string]stdlibModule{
 			"parse": {
 				Funcs: map[string]stdlibFunc{
-					"quote":     {GoFunc: "__gopy_url_quote", GoImport: "net/url", Helper: helperURLQuote, HelperImports: []string{"strings", "fmt"}, RetKind: "str"},
-					"unquote":   {GoFunc: "__gopy_url_unquote", GoImport: "net/url", Helper: helperURLUnquote, RetKind: "str"},
-					"urlencode": {GoFunc: "__gopy_url_urlencode", GoImport: "net/url", Helper: helperURLUrlencode, HelperImports: []string{"strings"}, RetKind: "str"},
-					"urlparse":  {GoFunc: "__gopy_url_urlparse", GoImport: "net/url", Helper: helperURLUrlparse, RetTag: "__URLParseResult", ExtraHelpers: map[string]string{"__URLParseResult": helperURLParseResultType}},
+					"quote":        {GoFunc: "__gopy_url_quote", GoImport: "net/url", Helper: helperURLQuote, HelperImports: []string{"strings", "fmt"}, RetKind: "str"},
+					"quote_plus":   {GoFunc: "__gopy_url_quote_plus", GoImport: "net/url", Helper: helperURLQuotePlus, HelperImports: []string{"strings", "fmt"}, RetKind: "str"},
+					"unquote":      {GoFunc: "__gopy_url_unquote", GoImport: "net/url", Helper: helperURLUnquote, RetKind: "str"},
+					"unquote_plus": {GoFunc: "__gopy_url_unquote_plus", GoImport: "net/url", Helper: helperURLUnquotePlus, HelperImports: []string{"strings"}, RetKind: "str"},
+					"urlencode":    {GoFunc: "__gopy_url_urlencode", GoImport: "net/url", Helper: helperURLUrlencode, HelperImports: []string{"strings"}, RetKind: "str"},
+					"urlparse":     {GoFunc: "__gopy_url_urlparse", GoImport: "net/url", Helper: helperURLUrlparse, RetTag: "__URLParseResult", ExtraHelpers: map[string]string{"__URLParseResult": helperURLParseResultType}},
+					"parse_qs":     {GoFunc: "__gopy_url_parse_qs", GoImport: "net/url", Helper: helperURLParseQs},
+					"parse_qsl":    {GoFunc: "__gopy_url_parse_qsl", GoImport: "net/url", Helper: helperURLParseQsl},
 				},
 			},
 		},
@@ -295,8 +301,11 @@ var stdlibModules = map[string]stdlibModule{
 					// __Datetime methods reference __Timedelta (for Add/Sub),
 					// so we always emit both types whenever datetime.now() is
 					// used; otherwise Go would error on the undefined type.
-					"now":      {GoFunc: "__gopy_datetime_now", GoImport: "time", Helper: helperDatetimeNow, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
-					"strptime": {GoFunc: "__gopy_datetime_strptime", GoImport: "time", Helper: helperDatetimeStrptime, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat}, HelperImports: []string{"fmt", "strings"}},
+					"now":            {GoFunc: "__gopy_datetime_now", GoImport: "time", Helper: helperDatetimeNow, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
+					"strptime":       {GoFunc: "__gopy_datetime_strptime", GoImport: "time", Helper: helperDatetimeStrptime, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat}, HelperImports: []string{"fmt", "strings"}},
+					"fromtimestamp":  {GoFunc: "__gopy_datetime_fromts", GoImport: "time", Helper: helperDatetimeFromTs, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
+					"fromisoformat":  {GoFunc: "__gopy_datetime_fromiso", GoImport: "time", Helper: helperDatetimeFromIso, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
+					"utcnow":         {GoFunc: "__gopy_datetime_utcnow", GoImport: "time", Helper: helperDatetimeUtcnow, RetTag: "__Datetime", ExtraHelpers: map[string]string{"__Datetime": helperDatetimeType, "__Timedelta": helperTimedeltaType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"fmt", "strings"}},
 				},
 			},
 		},
@@ -406,6 +415,29 @@ const helperJSONLoads = `func __gopy_json_loads(s string) any {
 		panic(err)
 	}
 	return v
+}`
+
+// helperJSONLoad reads JSON from an io.Reader (typically *os.File from a
+// with-open block). Mirrors json.load(fh).
+const helperJSONLoad = `func __gopy_json_load(r io.Reader) any {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		panic(err)
+	}
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		panic(err)
+	}
+	return v
+}`
+
+// helperJSONDump serializes v and writes the (Python-style separator)
+// output to the writer. Variadic indent param matches dumps's signature.
+const helperJSONDump = `func __gopy_json_dump(v any, w interface{ Write([]byte) (int, error) }, indent ...int64) {
+	out := __gopy_json_dumps(v, indent...)
+	if _, err := w.Write([]byte(out)); err != nil {
+		panic(err)
+	}
 }`
 
 // helperReFindall mirrors Python's re.findall(pattern, string): returns
@@ -790,6 +822,64 @@ const helperURLUnquote = `func __gopy_url_unquote(s string) string {
 		panic(err)
 	}
 	return v
+}`
+
+// helperURLQuotePlus / UnquotePlus mirror Python's quote_plus / unquote_plus
+// — same as quote / unquote except space ↔ `+`.
+const helperURLQuotePlus = `func __gopy_url_quote_plus(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ' ' {
+			b.WriteByte('+')
+			continue
+		}
+		safe := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '_' || c == '.' || c == '-' || c == '~'
+		if safe {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}`
+
+const helperURLUnquotePlus = `func __gopy_url_unquote_plus(s string) string {
+	v, err := url.PathUnescape(strings.ReplaceAll(s, "+", " "))
+	if err != nil {
+		panic(err)
+	}
+	return v
+}`
+
+// helperURLParseQs returns map[string][]string from a query-string,
+// mirroring urllib.parse.parse_qs. parse_qsl returns the same data as
+// []any pairs.
+const helperURLParseQs = `func __gopy_url_parse_qs(s string) map[string][]string {
+	v, err := url.ParseQuery(s)
+	if err != nil {
+		panic(err)
+	}
+	out := map[string][]string{}
+	for k, vs := range v {
+		out[k] = vs
+	}
+	return out
+}`
+
+const helperURLParseQsl = `func __gopy_url_parse_qsl(s string) []any {
+	v, err := url.ParseQuery(s)
+	if err != nil {
+		panic(err)
+	}
+	out := []any{}
+	for k, vs := range v {
+		for _, vv := range vs {
+			out = append(out, []any{k, vv})
+		}
+	}
+	return out
 }`
 
 // helperLog* mimic the logging module's level-prefixed stderr output.
@@ -1648,6 +1738,36 @@ func (d *__Datetime) Strftime(layout string) string {
 // helperDatetimeNow returns Python's datetime.datetime.now() as a
 // *__Datetime so it can take part in timedelta arithmetic.
 const helperDatetimeNow = `func __gopy_datetime_now() *__Datetime { return &__Datetime{t: time.Now()} }`
+
+const helperDatetimeUtcnow = `func __gopy_datetime_utcnow() *__Datetime { return &__Datetime{t: time.Now().UTC()} }`
+
+// helperDatetimeFromTs builds *__Datetime from a Unix timestamp (seconds
+// since epoch, may be fractional). Mirrors datetime.fromtimestamp's local
+// timezone interpretation.
+const helperDatetimeFromTs = `func __gopy_datetime_fromts(ts float64) *__Datetime {
+	sec := int64(ts)
+	nsec := int64((ts - float64(sec)) * 1e9)
+	return &__Datetime{t: time.Unix(sec, nsec)}
+}`
+
+// helperDatetimeFromIso parses an ISO-8601 timestamp, mirroring
+// datetime.fromisoformat. Accepts the common YYYY-MM-DD,
+// YYYY-MM-DDTHH:MM:SS, and the same forms with fractional seconds.
+const helperDatetimeFromIso = `func __gopy_datetime_fromiso(s string) *__Datetime {
+	layouts := []string{
+		"2006-01-02T15:04:05.000000",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05.000000",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	}
+	for _, l := range layouts {
+		if t, err := time.Parse(l, s); err == nil {
+			return &__Datetime{t: t}
+		}
+	}
+	panic(NewException("ValueError: Invalid isoformat string: " + s))
+}`
 
 // helperPyTimeFormat translates a Python strftime/strptime layout to the
 // equivalent Go reference-time layout. Subset covers the codes most
