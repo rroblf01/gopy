@@ -1786,6 +1786,24 @@ func (g *gen) expr(e ir.Expr) error {
 			if x.Op == "-" {
 				return g.emitMethodOp(x.L, "Sub", x.R)
 			}
+		case lt == "__Timedelta" && rt == "__Timedelta":
+			if x.Op == "+" {
+				return g.emitMethodOp(x.L, "Add", x.R)
+			}
+			if x.Op == "-" {
+				return g.emitMethodOp(x.L, "Sub", x.R)
+			}
+		case lt == "__Timedelta" && x.R.TypeOf() != nil && x.R.TypeOf().Kind == ir.TyInt:
+			if x.Op == "*" {
+				return g.emitMethodOp(x.L, "Mul", x.R)
+			}
+			if x.Op == "/" || x.Op == "//" {
+				return g.emitMethodOp(x.L, "DivInt", x.R)
+			}
+		case x.L.TypeOf() != nil && x.L.TypeOf().Kind == ir.TyInt && rt == "__Timedelta":
+			if x.Op == "*" {
+				return g.emitMethodOp(x.R, "Mul", x.L)
+			}
 		case lt == "__Path" && x.Op == "/":
 			return g.emitMethodOp(x.L, "Join", x.R)
 		}
@@ -3102,10 +3120,13 @@ var taggedMethodRename = map[string]map[string]string{
 		"popleft":    "Popleft",
 	},
 	"__Pattern": {
-		"match":   "Match",
-		"search":  "Search",
-		"findall": "Findall",
-		"sub":     "Sub",
+		"match":     "Match",
+		"search":    "Search",
+		"findall":   "Findall",
+		"sub":       "Sub",
+		"subn":      "Subn",
+		"split":     "Split",
+		"fullmatch": "Fullmatch",
 	},
 	"__Date": {
 		"isoformat":  "Isoformat",
@@ -3127,8 +3148,9 @@ var taggedMethodRename = map[string]map[string]string{
 // resolving through exprTag.
 var taggedMethodRetTag = map[string]map[string]string{
 	"__Pattern": {
-		"match":  "__Match",
-		"search": "__Match",
+		"match":     "__Match",
+		"search":    "__Match",
+		"fullmatch": "__Match",
 	},
 	"__Datetime": {
 		"__add__": "__Datetime",
@@ -3218,6 +3240,13 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	// `str.maketrans(...)` — classmethod-like; build a rune→string map.
 	if n, ok := m.Recv.(*ir.Name); ok && n.N == "str" && m.Method == "maketrans" {
 		return g.builtinStrMaketrans(m)
+	}
+	// `chain.from_iterable(xs)` — flatten one level. Receiver Name "chain"
+	// resolves via the itertools alias.
+	if n, ok := m.Recv.(*ir.Name); ok && m.Method == "from_iterable" {
+		if path, hit := g.aliases[n.N]; hit && path == "itertools.chain" {
+			return g.builtinChainFromIterable(m)
+		}
 	}
 	// `dt.replace(year=..., ...)` / `d.replace(year=..., ...)` — kwargs
 	// can't ride the standard tagged-method dispatch, so intercept.
@@ -5672,6 +5701,38 @@ func (g *gen) builtinJSONDumps(c *ir.Call) error {
 		g.writef(")")
 	}
 	g.writef(")")
+	return nil
+}
+
+// builtinChainFromIterable emits `chain.from_iterable(xs)` — flattens one
+// level. Input must be a list-of-lists with a known inner element type.
+func (g *gen) builtinChainFromIterable(m *ir.MethodCall) error {
+	if len(m.Args) != 1 || len(m.Keywords) != 0 {
+		return fmt.Errorf("chain.from_iterable() takes one iterable")
+	}
+	outer, err := listElemTypeOf(m.Args[0])
+	if err != nil {
+		return fmt.Errorf("chain.from_iterable(): %w", err)
+	}
+	if outer.Kind != ir.TyList {
+		return fmt.Errorf("chain.from_iterable(): outer iterable must be a list of lists")
+	}
+	innerGo := g.goType(outer.Elem)
+	g.writef("func() []%s {\n", innerGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__out := []%s{}\n", innerGo)
+	g.writeIndent()
+	g.writef("for _, __sub := range ")
+	if err := g.expr(m.Args[0]); err != nil {
+		return err
+	}
+	g.writef(" { __out = append(__out, __sub...) }\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
 	return nil
 }
 
@@ -9011,6 +9072,20 @@ func (g *gen) exprTag(e ir.Expr) string {
 		// operator dispatches through emitMethodOp again.
 		if x.Op == "/" && g.exprTag(x.L) == "__Path" {
 			return "__Path"
+		}
+		// Timedelta arithmetic preserves the tag.
+		lt, rt := g.exprTag(x.L), g.exprTag(x.R)
+		if (lt == "__Timedelta" && rt == "__Timedelta") && (x.Op == "+" || x.Op == "-") {
+			return "__Timedelta"
+		}
+		if lt == "__Timedelta" && (x.Op == "*" || x.Op == "/" || x.Op == "//") {
+			return "__Timedelta"
+		}
+		if rt == "__Timedelta" && x.Op == "*" {
+			return "__Timedelta"
+		}
+		if lt == "__Datetime" && rt == "__Timedelta" && (x.Op == "+" || x.Op == "-") {
+			return "__Datetime"
 		}
 	case *ir.Attribute:
 		if recvTag := g.exprTag(x.Recv); recvTag != "" {

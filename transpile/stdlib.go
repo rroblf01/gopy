@@ -789,6 +789,24 @@ func (p *__Pattern) Findall(s string) []string {
 
 func (p *__Pattern) Sub(repl, s string) string {
 	return p.r.ReplaceAllString(s, repl)
+}
+
+func (p *__Pattern) Subn(repl, s string) []any {
+	count := int64(len(p.r.FindAllStringIndex(s, -1)))
+	return []any{p.r.ReplaceAllString(s, repl), count}
+}
+
+func (p *__Pattern) Split(s string) []string {
+	out := p.r.Split(s, -1)
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+func (p *__Pattern) Fullmatch(s string) *__Match {
+	anchored := regexp.MustCompile("^(?:" + p.r.String() + ")$")
+	return __gopy_match_build(anchored, s, false)
 }`
 
 const helperReCompile = `func __gopy_re_compile(pattern string) *__Pattern {
@@ -2319,6 +2337,29 @@ func (t *__Timedelta) String() string {
 
 func (t *__Timedelta) TotalSeconds() float64 {
 	return float64(t.d) / float64(time.Second)
+}
+
+func (t *__Timedelta) Mul(n int64) *__Timedelta {
+	return &__Timedelta{d: t.d * time.Duration(n)}
+}
+
+func (t *__Timedelta) DivInt(n int64) *__Timedelta {
+	if n == 0 {
+		panic(NewException("ZeroDivisionError: integer division or modulo by zero"))
+	}
+	return &__Timedelta{d: t.d / time.Duration(n)}
+}
+
+func (t *__Timedelta) Neg() *__Timedelta {
+	return &__Timedelta{d: -t.d}
+}
+
+func (t *__Timedelta) Add(o *__Timedelta) *__Timedelta {
+	return &__Timedelta{d: t.d + o.d}
+}
+
+func (t *__Timedelta) Sub(o *__Timedelta) *__Timedelta {
+	return &__Timedelta{d: t.d - o.d}
 }
 
 func (t *__Timedelta) Days() int64 {
