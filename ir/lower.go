@@ -967,6 +967,8 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			return &Type{Kind: TyInt}, nil
 		case "float":
 			return &Type{Kind: TyFloat}, nil
+		case "complex":
+			return &Type{Kind: TyComplex}, nil
 		case "str":
 			return &Type{Kind: TyStr}, nil
 		case "bool":

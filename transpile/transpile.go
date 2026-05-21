@@ -1322,6 +1322,35 @@ const helperPyPrint = `func __gopy_print(sep string, end string, args ...any) {
 				s += ".0"
 			}
 			fmt.Print(s)
+		case complex128:
+			// Match Python's complex repr: (real+imagj) with parens only
+			// when the real part is nonzero. Pure-imaginary values print
+			// without parens; uses 'j' (Python) rather than Go's 'i'.
+			re, im := real(v), imag(v)
+			fmtFloat := func(f float64) string {
+				s := strconv.FormatFloat(f, 'g', -1, 64)
+				ok := false
+				for j := 0; j < len(s); j++ {
+					if s[j] == '.' || s[j] == 'e' || s[j] == 'E' {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					s += ""
+				}
+				return s
+			}
+			if re == 0 {
+				fmt.Print(fmtFloat(im) + "j")
+			} else {
+				sign := "+"
+				if im < 0 {
+					sign = "-"
+					im = -im
+				}
+				fmt.Print("(" + fmtFloat(re) + sign + fmtFloat(im) + "j)")
+			}
 		default:
 			fmt.Print(a)
 		}
@@ -2303,6 +2332,18 @@ func (g *gen) expr(e ir.Expr) error {
 				}
 			}
 		}
+		// `c.real` / `c.imag` on a complex128 — map to Go's real() / imag()
+		// builtins so the access returns a float64.
+		if x.Name == "real" || x.Name == "imag" {
+			if t := g.effectiveType(x.Recv); t != nil && t.Kind == ir.TyComplex {
+				g.writef("%s(", x.Name)
+				if err := g.expr(x.Recv); err != nil {
+					return err
+				}
+				g.writef(")")
+				return nil
+			}
+		}
 		// `obj.__class__` is equivalent to `type(obj)` — returns the
 		// gopy __Type tag wrapper so `.__name__` / `.__qualname__` work.
 		if x.Name == "__class__" {
@@ -3276,6 +3317,8 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinSet(c)
 		case "type":
 			return g.builtinType(c)
+		case "complex":
+			return g.builtinComplex(c)
 		case "format":
 			return g.builtinFormat(c)
 		case "hex":
@@ -5907,6 +5950,41 @@ func (g *gen) builtinFormat(c *ir.Call) error {
 // user classes; accessing `.__name__` on the result is a no-op (see the
 // Attribute codegen). Full class-handle comparison (`type(x) is int`) is
 // not supported.
+// builtinComplex emits Go's complex(real, imag) builtin. Both args are
+// cast to float64 so int / mixed-type calls match CPython's coercion
+// rules. Zero / one-arg forms supply a 0.0 imaginary part to match
+// `complex(2.5)` → `(2.5+0j)`.
+func (g *gen) builtinComplex(c *ir.Call) error {
+	if len(c.Keywords) != 0 {
+		return fmt.Errorf("complex() takes no keyword arguments")
+	}
+	if len(c.Args) > 2 {
+		return fmt.Errorf("complex() takes at most 2 arguments")
+	}
+	g.writef("complex(")
+	if len(c.Args) >= 1 {
+		g.writef("float64(")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef(")")
+	} else {
+		g.writef("float64(0)")
+	}
+	g.writef(", ")
+	if len(c.Args) == 2 {
+		g.writef("float64(")
+		if err := g.expr(c.Args[1]); err != nil {
+			return err
+		}
+		g.writef(")")
+	} else {
+		g.writef("float64(0)")
+	}
+	g.writef(")")
+	return nil
+}
+
 func (g *gen) builtinType(c *ir.Call) error {
 	if len(c.Args) != 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("type() takes exactly 1 positional argument")
@@ -10180,6 +10258,8 @@ func (g *gen) goType(t *ir.Type) string {
 		return "int64"
 	case ir.TyFloat:
 		return "float64"
+	case ir.TyComplex:
+		return "complex128"
 	case ir.TyStr:
 		return "string"
 	case ir.TyBool:

@@ -29,6 +29,7 @@ const (
 	TyTuple
 	TyNamed
 	TyAny
+	TyComplex
 )
 
 func (t *Type) IsZero() bool { return t == nil || t.Kind == TyUnknown }
