@@ -2717,6 +2717,17 @@ func (g *gen) call(c *ir.Call) error {
 			if len(c.Args) != 1 {
 				return fmt.Errorf("len() takes exactly 1 argument")
 			}
+			// User-class `__len__` dispatch: `len(obj)` → `obj.Len()`.
+			if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+				if fn := g.lookupMethod(t.Name, "__len__"); fn != nil {
+					_ = fn
+					if err := g.expr(c.Args[0]); err != nil {
+						return err
+					}
+					g.writef(".Len()")
+					return nil
+				}
+			}
 			g.writef("int64(len(")
 			if err := g.expr(c.Args[0]); err != nil {
 				return err
@@ -2762,6 +2773,17 @@ func (g *gen) call(c *ir.Call) error {
 		case "bool":
 			if len(c.Args) != 1 {
 				return fmt.Errorf("bool() takes exactly 1 argument")
+			}
+			// User-class `__bool__` dispatch: `bool(obj)` → `obj.Bool()`.
+			if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+				if fn := g.lookupMethod(t.Name, "__bool__"); fn != nil {
+					_ = fn
+					if err := g.expr(c.Args[0]); err != nil {
+						return err
+					}
+					g.writef(".Bool()")
+					return nil
+				}
 			}
 			t := c.Args[0].TypeOf()
 			if t != nil && t.Kind == ir.TyBool {
@@ -5932,6 +5954,16 @@ func exportedDunder(name string) string {
 		return "Iter"
 	case "__next__":
 		return "Next"
+	case "__abs__":
+		return "Abs"
+	case "__neg__":
+		return "Neg"
+	case "__pos__":
+		return "Pos"
+	case "__int__":
+		return "Int"
+	case "__float__":
+		return "Float"
 	}
 	return name
 }
@@ -7814,6 +7846,17 @@ func (g *gen) builtinAbs(c *ir.Call) error {
 		}
 		g.writef("; if __td.d < 0 { return &__Timedelta{d: -__td.d} }; return __td }()")
 		return nil
+	}
+	// User-class `__abs__` dispatch: `abs(obj)` → `obj.Abs()`.
+	if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+		if fn := g.lookupMethod(t.Name, "__abs__"); fn != nil {
+			_ = fn
+			if err := g.expr(c.Args[0]); err != nil {
+				return err
+			}
+			g.writef(".Abs()")
+			return nil
+		}
 	}
 	t := c.Args[0].TypeOf()
 	if t == nil || (t.Kind != ir.TyInt && t.Kind != ir.TyFloat) {
