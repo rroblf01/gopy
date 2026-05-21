@@ -295,6 +295,15 @@ type WithFile struct {
 	Body    []Stmt
 }
 
+// WithCM is the lowered form of `with <expr> as name: body` for a
+// user-class context manager. Codegen resolves __enter__/__exit__ on
+// the class to emit a deferred Exit call wrapped in an IIFE.
+type WithCM struct {
+	VarName string // "" when there is no `as` clause
+	Ctx     Expr
+	Body    []Stmt
+}
+
 func (*ExprStmt) stmtNode()   {}
 func (*Assign) stmtNode()     {}
 func (*Return) stmtNode()     {}
@@ -307,6 +316,7 @@ func (*AssignAttr) stmtNode() {}
 func (*Try) stmtNode()        {}
 func (*Raise) stmtNode()      {}
 func (*WithFile) stmtNode()   {}
+func (*WithCM) stmtNode()     {}
 func (*Yield) stmtNode()      {}
 func (*YieldFrom) stmtNode()  {}
 func (*Break) stmtNode()      {}
@@ -344,9 +354,10 @@ type Name struct {
 	Ty *Type
 }
 type BinOp struct {
-	Op       string // "+", "-", "*", "/", "//", "%"
-	L, R     Expr
-	Ty       *Type
+	Op      string // "+", "-", "*", "/", "//", "%"
+	L, R    Expr
+	Ty      *Type
+	InPlace bool // true when produced by an AugAssign lowering
 }
 type CmpOp struct {
 	Op   string // "==", "!=", "<", "<=", ">", ">="

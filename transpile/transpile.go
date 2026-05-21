@@ -898,6 +898,8 @@ func (g *gen) stmt(s ir.Stmt) error {
 		return g.raise(x)
 	case *ir.WithFile:
 		return g.withFile(x)
+	case *ir.WithCM:
+		return g.withCM(x)
 	case *ir.Match:
 		return g.matchStmt(x)
 	case *ir.LocalFunc:
@@ -1316,6 +1318,56 @@ const helperFileWrite = `func __gopy_fh_write(f *os.File, s string) {
 		panic(err)
 	}
 }`
+
+// withCM emits a user-class context manager: instantiates the ctx
+// expression, calls .Enter() to bind the as-var, defers .Exit() so the
+// teardown runs even on panic, then emits the body. Wrapping the whole
+// block in an IIFE scopes the defer to the `with` block rather than the
+// enclosing function.
+func (g *gen) withCM(w *ir.WithCM) error {
+	t := g.effectiveType(w.Ctx)
+	if t == nil || t.Kind != ir.TyNamed {
+		t = g.userCallRetType(w.Ctx)
+	}
+	if t == nil || t.Kind != ir.TyNamed {
+		return fmt.Errorf("with: context expression has no resolvable class type")
+	}
+	enter := g.lookupMethod(t.Name, "__enter__")
+	exit := g.lookupMethod(t.Name, "__exit__")
+	if enter == nil || exit == nil {
+		return fmt.Errorf("with: class %s must define both __enter__ and __exit__", t.Name)
+	}
+	g.writeIndent()
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__cm := ")
+	if err := g.expr(w.Ctx); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("defer __cm.Exit(nil, nil, nil)\n")
+	if w.VarName != "" {
+		g.writeIndent()
+		g.writef("%s := __cm.Enter()\n", w.VarName)
+		g.writeIndent()
+		g.writef("_ = %s\n", w.VarName)
+		if enter.Ret != nil && enter.Ret.Kind == ir.TyNamed {
+			g.varTypes[w.VarName] = enter.Ret.Name
+		}
+	} else {
+		g.writeIndent()
+		g.writef("__cm.Enter()\n")
+	}
+	if err := g.stmts(w.Body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	return nil
+}
 
 func (g *gen) withFile(w *ir.WithFile) error {
 	g.addImport("os")
@@ -1872,8 +1924,16 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		// User-class operator overloading: when L's effective type is a
 		// registered TyNamed class with a matching __op__ method, route
-		// the binop through it.
+		// the binop through it. Augmented-assignment forms (`x += y`)
+		// try `__iadd__` etc. first and fall back to `__add__`.
 		if lTy := g.effectiveType(x.L); lTy != nil && lTy.Kind == ir.TyNamed {
+			if x.InPlace {
+				if iop := iopDunderName(x.Op); iop != "" {
+					if fn := g.lookupMethod(lTy.Name, iop); fn != nil {
+						return g.emitMethodOp(x.L, exportedDunder(iop), x.R)
+					}
+				}
+			}
 			dunder := opDunderName(x.Op)
 			if dunder != "" {
 				if fn := g.lookupMethod(lTy.Name, dunder); fn != nil {
@@ -6043,6 +6103,41 @@ func opDunderName(op string) string {
 	return ""
 }
 
+// iopDunderName maps a binary operator to the in-place dunder method
+// CPython dispatches through during augmented assignment (`x += y` →
+// `__iadd__`). Empty string when no in-place form exists.
+func iopDunderName(op string) string {
+	switch op {
+	case "+":
+		return "__iadd__"
+	case "-":
+		return "__isub__"
+	case "*":
+		return "__imul__"
+	case "/":
+		return "__itruediv__"
+	case "//":
+		return "__ifloordiv__"
+	case "%":
+		return "__imod__"
+	case "**":
+		return "__ipow__"
+	case "|":
+		return "__ior__"
+	case "&":
+		return "__iand__"
+	case "^":
+		return "__ixor__"
+	case "<<":
+		return "__ilshift__"
+	case ">>":
+		return "__irshift__"
+	case "@":
+		return "__imatmul__"
+	}
+	return ""
+}
+
 // exportedDunder returns the Go method name gopy emits for a Python
 // dunder method. Matches the renames performed at method-def time.
 func exportedDunder(name string) string {
@@ -6113,6 +6208,36 @@ func exportedDunder(name string) string {
 		return "Matmul"
 	case "__invert__":
 		return "Invert"
+	case "__enter__":
+		return "Enter"
+	case "__exit__":
+		return "Exit"
+	case "__iadd__":
+		return "Iadd"
+	case "__isub__":
+		return "Isub"
+	case "__imul__":
+		return "Imul"
+	case "__itruediv__":
+		return "Itruediv"
+	case "__ifloordiv__":
+		return "Ifloordiv"
+	case "__imod__":
+		return "Imod"
+	case "__ipow__":
+		return "Ipow"
+	case "__ior__":
+		return "Ior"
+	case "__iand__":
+		return "Iand"
+	case "__ixor__":
+		return "Ixor"
+	case "__ilshift__":
+		return "Ilshift"
+	case "__irshift__":
+		return "Irshift"
+	case "__imatmul__":
+		return "Imatmul"
 	}
 	return name
 }

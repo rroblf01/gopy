@@ -1207,7 +1207,7 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			name := tgt.Str("id")
 			lhsTy, _ := sc.lookup(name)
 			lhs := &Name{N: name, Ty: lhsTy}
-			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promoteOp(op, lhs.Ty, rhs.TypeOf())}
+			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promoteOp(op, lhs.Ty, rhs.TypeOf()), InPlace: true}
 			return &Assign{Target: name, Value: bin, Decl: false}, nil
 		case "Attribute":
 			recv, err := lowerExpr(tgt.Child("value"), sc)
@@ -1216,7 +1216,7 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			}
 			attrName := tgt.Str("attr")
 			lhs := &Attribute{Recv: recv, Name: attrName, Ty: rhs.TypeOf()}
-			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promoteOp(op, lhs.Ty, rhs.TypeOf())}
+			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promoteOp(op, lhs.Ty, rhs.TypeOf()), InPlace: true}
 			return &AssignAttr{Target: recv, Name: attrName, Value: bin}, nil
 		case "Subscript":
 			obj, err := lowerExpr(tgt.Child("value"), sc)
@@ -1237,7 +1237,7 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 				}
 			}
 			lhs := &Subscript{Value: obj, Index: idx, Ty: elemTy}
-			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promoteOp(op, elemTy, rhs.TypeOf())}
+			bin := &BinOp{Op: op, L: lhs, R: rhs, Ty: promoteOp(op, elemTy, rhs.TypeOf()), InPlace: true}
 			return &AssignSub{Target: obj, Index: idx, Value: bin}, nil
 		default:
 			return nil, fmt.Errorf("line %d: unsupported AugAssign target %q", n.Lineno(), tgt.Type())
@@ -2398,9 +2398,10 @@ func lowerMatchPattern(p parser.Node, sc *scope) ([]Expr, error) {
 	return nil, fmt.Errorf("match pattern: %q not supported", p.Type())
 }
 
-// lowerWith handles only `with open(path[, mode]) as name: body` in F4.
-// Other context managers raise an explicit "unsupported" error so users see
-// a precise failure mode rather than mysterious downstream Go errors.
+// lowerWith handles `with open(...) as name:` (file form) and the
+// generic user-class form `with <expr> as name:` where the class
+// implements __enter__ / __exit__. The user-class path produces a
+// WithCM IR node; codegen resolves the dunder methods.
 func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 	items := n.Children("items")
 	if len(items) != 1 {
@@ -2408,12 +2409,38 @@ func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 	}
 	item := items[0]
 	ctx := item.Child("context_expr")
-	if ctx.Type() != "Call" {
-		return nil, fmt.Errorf("line %d: only `with open(...)` supported (F4)", n.Lineno())
+	// Generic context-manager path: anything other than `open(...)`.
+	isOpenCall := false
+	if ctx.Type() == "Call" {
+		fn := ctx.Child("func")
+		if fn.Type() == "Name" && fn.Str("id") == "open" {
+			isOpenCall = true
+		}
 	}
-	fn := ctx.Child("func")
-	if fn.Type() != "Name" || fn.Str("id") != "open" {
-		return nil, fmt.Errorf("line %d: only `with open(...)` supported (F4)", n.Lineno())
+	if !isOpenCall {
+		ctxExpr, err := lowerExpr(ctx, sc)
+		if err != nil {
+			return nil, err
+		}
+		varName := ""
+		asNode := item.Child("optional_vars")
+		innerSc := &scope{vars: copyVars(sc.vars)}
+		if asNode != nil && asNode.Type() == "Name" {
+			varName = asNode.Str("id")
+			// Best-effort: bind the as-var to the ctx expression's type
+			// (typically TyNamed for a class call). Codegen still treats
+			// the var as the class instance.
+			if t := ctxExpr.TypeOf(); t != nil {
+				innerSc.declare(varName, t)
+			} else {
+				innerSc.declare(varName, &Type{Kind: TyUnknown})
+			}
+		}
+		body, err := lowerBody(n.Children("body"), innerSc)
+		if err != nil {
+			return nil, err
+		}
+		return &WithCM{VarName: varName, Ctx: ctxExpr, Body: body}, nil
 	}
 	args := ctx.Children("args")
 	if len(args) < 1 || len(args) > 2 {
