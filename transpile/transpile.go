@@ -1776,11 +1776,26 @@ func (g *gen) matchStmt(m *ir.Match) error {
 			g.writef(" {\n")
 		} else if mc.SeqPat != nil {
 			sp := mc.SeqPat
-			g.writef("if len(__subj) == %d", len(sp.Elements))
+			lenOp := "=="
+			minLen := len(sp.Elements) + len(sp.Tail)
+			if sp.HasStar {
+				lenOp = ">="
+			}
+			g.writef("if len(__subj) %s %d", lenOp, minLen)
 			for j, e := range sp.Elements {
-				g.writef(" && __subj[%d] == ", j)
-				if err := g.expr(e); err != nil {
-					return err
+				if e.LitVal != nil {
+					g.writef(" && __subj[%d] == ", j)
+					if err := g.expr(e.LitVal); err != nil {
+						return err
+					}
+				}
+			}
+			for j, e := range sp.Tail {
+				if e.LitVal != nil {
+					g.writef(" && __subj[len(__subj)-%d] == ", len(sp.Tail)-j)
+					if err := g.expr(e.LitVal); err != nil {
+						return err
+					}
 				}
 			}
 			if mc.Guard != nil {
@@ -1791,6 +1806,30 @@ func (g *gen) matchStmt(m *ir.Match) error {
 				g.writef(")")
 			}
 			g.writef(" {\n")
+			g.indent++
+			for j, e := range sp.Elements {
+				if e.Capture != "" && e.Capture != "_" {
+					g.writeIndent()
+					g.writef("%s := __subj[%d]\n", e.Capture, j)
+					g.writeIndent()
+					g.writef("_ = %s\n", e.Capture)
+				}
+			}
+			if sp.HasStar && sp.Star != "_" {
+				g.writeIndent()
+				g.writef("%s := __subj[%d:len(__subj)-%d]\n", sp.Star, len(sp.Elements), len(sp.Tail))
+				g.writeIndent()
+				g.writef("_ = %s\n", sp.Star)
+			}
+			for j, e := range sp.Tail {
+				if e.Capture != "" && e.Capture != "_" {
+					g.writeIndent()
+					g.writef("%s := __subj[len(__subj)-%d]\n", e.Capture, len(sp.Tail)-j)
+					g.writeIndent()
+					g.writef("_ = %s\n", e.Capture)
+				}
+			}
+			g.indent--
 		} else if mc.ClassPat != nil {
 			// `case ClassName(field=value, ...)` — type-assert __subj
 			// against the class pointer (or Go primitive for int/str/

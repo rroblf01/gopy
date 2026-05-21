@@ -306,10 +306,23 @@ type MatchClassPat struct {
 	KwdValues []Expr
 }
 
-// MatchSeqPat captures `case [v1, v2, ...]:` — fixed-length sequence
-// match with literal element patterns. Star unpacking isn't supported.
+// MatchSeqPat captures `case [v1, v2, ...]:` — sequence match.
+// Each Elements entry is either a literal value to match against
+// (Capture == "") or a name to bind that position to (Capture != "",
+// LitVal == nil). When Star != "", the pattern matches sequences of
+// length >= len(Elements) + len(Tail); Star binds the middle slice;
+// Tail elements (if any) bind the final elements.
 type MatchSeqPat struct {
-	Elements []Expr
+	Elements []MatchSeqElt
+	Star     string // "" when no `*name`; "_" allowed as anonymous
+	HasStar  bool
+	Tail     []MatchSeqElt
+}
+
+// MatchSeqElt: exactly one of LitVal / Capture is set.
+type MatchSeqElt struct {
+	LitVal  Expr
+	Capture string
 }
 
 // MatchMapPat captures `case {"k": v, ...}:` — checks each (key, value)

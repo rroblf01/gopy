@@ -2844,14 +2844,34 @@ func lowerMatchMapPattern(p parser.Node, sc *scope) (*MatchMapPat, error) {
 	return out, nil
 }
 
-// lowerMatchSeqPattern parses `case [v1, v2, ...]:` — fixed-length
-// sequence match against literal element patterns. Star unpacking
-// rejected for now (would require capture + remainder slicing).
+// lowerMatchSeqPattern parses `case [v1, v2, ..., *rest, w1, ...]:`.
+// Each element is either a literal (MatchValue), a singleton, a bare
+// capture (MatchAs with no inner pattern), or the single allowed star.
+// Nested patterns are not supported.
 func lowerMatchSeqPattern(p parser.Node, sc *scope) (*MatchSeqPat, error) {
 	out := &MatchSeqPat{}
+	cur := &out.Elements
 	for _, sub := range p.Children("patterns") {
 		if sub.Type() == "MatchStar" {
-			return nil, fmt.Errorf("match sequence: `*` capture not supported")
+			if out.HasStar {
+				return nil, fmt.Errorf("match sequence: only one `*` allowed")
+			}
+			name := sub.Str("name")
+			if name == "" {
+				name = "_"
+			}
+			out.Star = name
+			out.HasStar = true
+			cur = &out.Tail
+			continue
+		}
+		if sub.Type() == "MatchAs" && sub.Child("pattern") == nil {
+			name := sub.Str("name")
+			if name == "" {
+				name = "_"
+			}
+			*cur = append(*cur, MatchSeqElt{Capture: name})
+			continue
 		}
 		ps, err := lowerMatchPattern(sub, sc)
 		if err != nil {
@@ -2860,7 +2880,7 @@ func lowerMatchSeqPattern(p parser.Node, sc *scope) (*MatchSeqPat, error) {
 		if len(ps) != 1 {
 			return nil, fmt.Errorf("match sequence element must produce one literal pattern")
 		}
-		out.Elements = append(out.Elements, ps[0])
+		*cur = append(*cur, MatchSeqElt{LitVal: ps[0]})
 	}
 	return out, nil
 }
