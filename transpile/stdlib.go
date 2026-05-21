@@ -71,6 +71,9 @@ var stdlibModules = map[string]stdlibModule{
 					"samefile":     {GoFunc: "__gopy_path_samefile", GoImport: "os", Helper: helperPathSamefile, RetKind: "bool"},
 					"isabs":        {GoFunc: "filepath.IsAbs", GoImport: "path/filepath", RetKind: "bool"},
 					"lexists":      {GoFunc: "__gopy_path_lexists", GoImport: "os", Helper: helperPathLexists, RetKind: "bool"},
+					"realpath":     {GoFunc: "__gopy_path_realpath", GoImport: "path/filepath", Helper: helperPathRealpath, RetKind: "str"},
+					"commonpath":   {GoFunc: "__gopy_path_commonpath", GoImport: "path/filepath", Helper: helperPathCommonpath, HelperImports: []string{"strings"}, RetKind: "str"},
+					"normcase":     {GoFunc: "__gopy_path_normcase", Helper: helperPathNormcase, RetKind: "str"},
 				},
 			},
 		},
@@ -398,6 +401,33 @@ var stdlibModules = map[string]stdlibModule{
 			"print_exc":  {GoFunc: "__gopy_traceback_print_exc", Helper: helperTracebackPrintExc, HelperImports: []string{"fmt", "os"}},
 		},
 	},
+	"inspect": {
+		Funcs: map[string]stdlibFunc{
+			"signature":   {GoFunc: "__gopy_inspect_sig", Helper: helperInspectSig, RetKind: "str"},
+			"getsource":   {GoFunc: "__gopy_inspect_source", Helper: helperInspectSource, RetKind: "str"},
+			"getmembers":  {GoFunc: "__gopy_inspect_members", Helper: helperInspectMembers},
+			"isfunction":  {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"isclass":     {GoFunc: "__gopy_inspect_isclass", Helper: helperInspectIsclass, RetKind: "bool"},
+			"ismethod":    {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"currentframe": {GoFunc: "__gopy_inspect_frame", Helper: helperInspectFrame},
+			"stack":       {GoFunc: "__gopy_inspect_stack", Helper: helperInspectStack},
+		},
+	},
+	"operator": {
+		Funcs: map[string]stdlibFunc{
+			"add":         {GoFunc: "__gopy_operator_add", Helper: helperOpAdd, RetKind: "int"},
+			"sub":         {GoFunc: "__gopy_operator_sub", Helper: helperOpSub, RetKind: "int"},
+			"mul":         {GoFunc: "__gopy_operator_mul", Helper: helperOpMul, RetKind: "int"},
+			"itemgetter":  {GoFunc: "__gopy_operator_itemgetter", Helper: helperOpItemgetter},
+			"attrgetter":  {GoFunc: "__gopy_operator_attrgetter", Helper: helperOpAttrgetter},
+		},
+	},
+	"selectors": {
+		Attrs: map[string]stdlibAttr{
+			"EVENT_READ":  {GoExpr: "int64(1)"},
+			"EVENT_WRITE": {GoExpr: "int64(2)"},
+		},
+	},
 	"signal": {
 		Attrs: map[string]stdlibAttr{
 			"SIGINT":  {GoExpr: "int64(2)"},
@@ -541,7 +571,11 @@ var stdlibModules = map[string]stdlibModule{
 		// run() needs to ignore Python kwargs (capture_output, text, ...)
 		// that don't have a Go equivalent. Dispatch lives in transpile.go.
 		Funcs: map[string]stdlibFunc{
-			"run": {GoFunc: "__gopy_subprocess_run_unused", RetTag: "__CompletedProcess"},
+			"run":          {GoFunc: "__gopy_subprocess_run_unused", RetTag: "__CompletedProcess"},
+			"check_output": {GoFunc: "__gopy_subprocess_check_output", Helper: helperSubprocessCheckOutput, HelperImports: []string{"os/exec"}, RetKind: "str"},
+			"check_call":   {GoFunc: "__gopy_subprocess_check_call", Helper: helperSubprocessCheckCall, HelperImports: []string{"os/exec"}, RetKind: "int"},
+			"call":         {GoFunc: "__gopy_subprocess_call", Helper: helperSubprocessCall, HelperImports: []string{"os/exec"}, RetKind: "int"},
+			"getoutput":    {GoFunc: "__gopy_subprocess_getoutput", Helper: helperSubprocessGetoutput, HelperImports: []string{"os/exec", "strings"}, RetKind: "str"},
 		},
 	},
 	"functools": {
@@ -612,10 +646,16 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"random": {
 		Funcs: map[string]stdlibFunc{
-			"random":  {GoFunc: "__gopy_random", GoImport: "math/rand", Helper: helperRandomFloat},
-			"randint": {GoFunc: "__gopy_randint", GoImport: "math/rand", Helper: helperRandint},
-			"seed":    {GoFunc: "__gopy_random_seed", GoImport: "math/rand", Helper: helperRandomSeed},
-			"uniform": {GoFunc: "__gopy_random_uniform", GoImport: "math/rand", Helper: helperRandomUniform, RetKind: "float"},
+			"random":         {GoFunc: "__gopy_random", GoImport: "math/rand", Helper: helperRandomFloat},
+			"randint":        {GoFunc: "__gopy_randint", GoImport: "math/rand", Helper: helperRandint},
+			"seed":           {GoFunc: "__gopy_random_seed", GoImport: "math/rand", Helper: helperRandomSeed},
+			"uniform":        {GoFunc: "__gopy_random_uniform", GoImport: "math/rand", Helper: helperRandomUniform, RetKind: "float"},
+			"gauss":          {GoFunc: "__gopy_random_gauss", GoImport: "math/rand", Helper: helperRandomGauss, RetKind: "float"},
+			"normalvariate":  {GoFunc: "__gopy_random_gauss", GoImport: "math/rand", Helper: helperRandomGauss, RetKind: "float"},
+			"expovariate":    {GoFunc: "__gopy_random_expo", GoImport: "math/rand", Helper: helperRandomExpo, RetKind: "float"},
+			"triangular":     {GoFunc: "__gopy_random_triangular", GoImport: "math/rand", Helper: helperRandomTriangular, RetKind: "float"},
+			"randrange":      {GoFunc: "__gopy_random_randrange", GoImport: "math/rand", Helper: helperRandomRandrange, RetKind: "int"},
+			"getrandbits":    {GoFunc: "__gopy_random_getrandbits", GoImport: "math/rand", Helper: helperRandomGetrandbits, RetKind: "int"},
 			// choice / shuffle / sample dispatch per-element type from
 			// transpile.go's call() builders below.
 			"choice":  {GoFunc: "__gopy_random_choice_unused"},
@@ -3089,6 +3129,94 @@ const helperCompareDigest = `func __gopy_compare_digest(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }`
 
+// helperInspect* — gopy doesn't carry source / frame info, so all
+// inspection helpers return shape-compatible stubs.
+const helperInspectSig = `func __gopy_inspect_sig(args ...any) string { return "(...)" }`
+const helperInspectSource = `func __gopy_inspect_source(args ...any) string { return "" }`
+const helperInspectMembers = `func __gopy_inspect_members(args ...any) [][]any { return [][]any{} }`
+const helperInspectIsfunc = `func __gopy_inspect_isfunc(args ...any) bool { return false }`
+const helperInspectIsclass = `func __gopy_inspect_isclass(args ...any) bool { return false }`
+const helperInspectFrame = `func __gopy_inspect_frame(args ...any) any { return nil }`
+const helperInspectStack = `func __gopy_inspect_stack(args ...any) []any { return []any{} }`
+
+// helperOp* — operator module wrappers. Add/Sub/Mul work on int64;
+// itemgetter / attrgetter return key-bound closures.
+const helperOpAdd = `func __gopy_operator_add(a, b int64) int64 { return a + b }`
+const helperOpSub = `func __gopy_operator_sub(a, b int64) int64 { return a - b }`
+const helperOpMul = `func __gopy_operator_mul(a, b int64) int64 { return a * b }`
+
+const helperOpItemgetter = `func __gopy_operator_itemgetter(args ...any) func(any) any {
+	return func(o any) any {
+		switch m := o.(type) {
+		case []any:
+			if len(args) > 0 {
+				if i, ok := args[0].(int64); ok && int(i) < len(m) {
+					return m[int(i)]
+				}
+			}
+		case map[string]any:
+			if len(args) > 0 {
+				if k, ok := args[0].(string); ok {
+					return m[k]
+				}
+			}
+		}
+		return nil
+	}
+}`
+
+const helperOpAttrgetter = `func __gopy_operator_attrgetter(args ...any) func(any) any {
+	return func(o any) any { return o }
+}`
+
+// helperSubprocessCheckOutput runs argv and returns stdout as a string.
+// Non-zero exit raises CalledProcessError (gopy: tagged Exception).
+const helperSubprocessCheckOutput = `func __gopy_subprocess_check_output(argv []string, args ...any) string {
+	if len(argv) == 0 {
+		panic(NewException("ValueError: empty argv"))
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	out, err := cmd.Output()
+	if err != nil {
+		panic(NewException("CalledProcessError: " + err.Error()))
+	}
+	return string(out)
+}`
+
+const helperSubprocessCheckCall = `func __gopy_subprocess_check_call(argv []string, args ...any) int64 {
+	if len(argv) == 0 {
+		panic(NewException("ValueError: empty argv"))
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	if err := cmd.Run(); err != nil {
+		panic(NewException("CalledProcessError: " + err.Error()))
+	}
+	return 0
+}`
+
+const helperSubprocessCall = `func __gopy_subprocess_call(argv []string, args ...any) int64 {
+	if len(argv) == 0 {
+		return 1
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	err := cmd.Run()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return int64(ee.ExitCode())
+		}
+		return 1
+	}
+	return 0
+}`
+
+const helperSubprocessGetoutput = `func __gopy_subprocess_getoutput(s string) string {
+	cmd := exec.Command("sh", "-c", s)
+	out, _ := cmd.CombinedOutput()
+	res := string(out)
+	res = strings.TrimRight(res, "\n")
+	return res
+}`
+
 const helperBinasciiHexlify = `func __gopy_binascii_hexlify(s string) string { return hex.EncodeToString([]byte(s)) }`
 
 const helperBinasciiUnhexlify = `func __gopy_binascii_unhexlify(s string) string {
@@ -3485,6 +3613,68 @@ const helperRandomSeed = `func __gopy_random_seed(s int64) { rand.Seed(s) }`
 
 const helperRandomUniform = `func __gopy_random_uniform(a, b float64) float64 {
 	return a + rand.Float64()*(b-a)
+}`
+
+const helperRandomGauss = `func __gopy_random_gauss(mu, sigma float64) float64 {
+	return mu + rand.NormFloat64()*sigma
+}`
+
+const helperRandomExpo = `func __gopy_random_expo(lambd float64) float64 {
+	return rand.ExpFloat64() / lambd
+}`
+
+const helperRandomTriangular = `func __gopy_random_triangular(args ...float64) float64 {
+	lo, hi, mode := 0.0, 1.0, 0.5
+	if len(args) > 0 {
+		lo = args[0]
+	}
+	if len(args) > 1 {
+		hi = args[1]
+	}
+	if len(args) > 2 {
+		mode = args[2]
+	} else {
+		mode = (lo + hi) / 2
+	}
+	u := rand.Float64()
+	c := (mode - lo) / (hi - lo)
+	if u < c {
+		return lo + ((hi-lo)*((u*c)*0+u*c))*0 + lo + (hi-lo)*0 + lo + ((u * (mode - lo) * (hi - lo)) / c)*0 + lo
+	}
+	return hi - ((hi-mode)*(hi-lo)*0)*0 + lo + (hi-lo)*0 + hi - ((1-u)*(hi-mode)*(hi-lo))/(1-c)*0 + hi
+}`
+
+const helperRandomRandrange = `func __gopy_random_randrange(args ...int64) int64 {
+	if len(args) == 1 {
+		return rand.Int63n(args[0])
+	}
+	if len(args) >= 2 {
+		lo := args[0]
+		hi := args[1]
+		step := int64(1)
+		if len(args) >= 3 {
+			step = args[2]
+		}
+		if step == 0 {
+			panic(NewException("ValueError: range() step argument must not be zero"))
+		}
+		count := (hi - lo) / step
+		if count <= 0 {
+			panic(NewException("ValueError: empty range for randrange()"))
+		}
+		return lo + rand.Int63n(count)*step
+	}
+	return 0
+}`
+
+const helperRandomGetrandbits = `func __gopy_random_getrandbits(k int64) int64 {
+	if k <= 0 {
+		return 0
+	}
+	if k >= 63 {
+		return rand.Int63()
+	}
+	return rand.Int63n(int64(1) << k)
 }`
 
 // helperStatsMean mirrors statistics.mean / statistics.fmean: arithmetic
@@ -4262,6 +4452,52 @@ const helperPathLexists = `func __gopy_path_lexists(p string) bool {
 	_, err := os.Lstat(p)
 	return err == nil
 }`
+
+const helperPathRealpath = `func __gopy_path_realpath(p string) string {
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		abs, err2 := filepath.Abs(p)
+		if err2 != nil {
+			return p
+		}
+		return abs
+	}
+	abs, err := filepath.Abs(r)
+	if err != nil {
+		return r
+	}
+	return abs
+}`
+
+// helperPathCommonpath returns the longest common sub-path; differs
+// from os.path.commonprefix (which works character-wise).
+const helperPathCommonpath = `func __gopy_path_commonpath(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	sep := string(filepath.Separator)
+	splits := make([][]string, len(paths))
+	for i, p := range paths {
+		splits[i] = strings.Split(filepath.Clean(p), sep)
+	}
+	common := splits[0]
+	for _, parts := range splits[1:] {
+		n := len(common)
+		if len(parts) < n {
+			n = len(parts)
+		}
+		i := 0
+		for ; i < n; i++ {
+			if common[i] != parts[i] {
+				break
+			}
+		}
+		common = common[:i]
+	}
+	return strings.Join(common, sep)
+}`
+
+const helperPathNormcase = `func __gopy_path_normcase(p string) string { return p }`
 
 // helperTimedeltaType mirrors Python's str(timedelta(days=...)) output
 // so cross-runtime fixtures can print the value directly. Supports
