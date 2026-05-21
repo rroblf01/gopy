@@ -44,6 +44,8 @@ var stdlibModules = map[string]stdlibModule{
 			"rmdir":     {GoFunc: "__gopy_os_rmdir", GoImport: "os", Helper: helperOsRmdir},
 			"cpu_count": {GoFunc: "__gopy_os_cpu_count", Helper: helperOsCPUCount, HelperImports: []string{"runtime"}, RetKind: "int"},
 			"urandom":   {GoFunc: "__gopy_os_urandom", Helper: helperOsUrandom, HelperImports: []string{"crypto/rand"}, RetKind: "str"},
+			"walk":      {GoFunc: "__gopy_os_walk", Helper: helperOsWalk, HelperImports: []string{"os", "path/filepath"}},
+			"chdir":     {GoFunc: "os.Chdir", GoImport: "os"},
 		},
 		Subs: map[string]stdlibModule{
 			"path": {
@@ -59,6 +61,7 @@ var stdlibModules = map[string]stdlibModule{
 					"split":        {GoFunc: "__gopy_path_split", GoImport: "path/filepath", Helper: helperPathSplit},
 					"relpath":      {GoFunc: "__gopy_path_relpath", GoImport: "path/filepath", Helper: helperPathRelpath, RetKind: "str"},
 					"getsize":      {GoFunc: "__gopy_path_getsize", GoImport: "os", Helper: helperPathGetsize, RetKind: "int"},
+					"getmtime":     {GoFunc: "__gopy_path_getmtime", GoImport: "os", Helper: helperPathGetmtime, RetKind: "float"},
 					"normpath":     {GoFunc: "filepath.Clean", GoImport: "path/filepath", RetKind: "str"},
 					"expanduser":   {GoFunc: "__gopy_path_expanduser", GoImport: "os", Helper: helperPathExpanduser, RetKind: "str"},
 					"expandvars":   {GoFunc: "os.ExpandEnv", GoImport: "os", RetKind: "str"},
@@ -226,6 +229,7 @@ var stdlibModules = map[string]stdlibModule{
 			"copy":     {GoFunc: "__gopy_shutil_copy", GoImport: "io", Helper: helperShutilCopy, HelperImports: []string{"os"}},
 			"copyfile": {GoFunc: "__gopy_shutil_copy", GoImport: "io", Helper: helperShutilCopy, HelperImports: []string{"os"}},
 			"move":     {GoFunc: "__gopy_shutil_move", GoImport: "os", Helper: helperShutilMove},
+			"which":    {GoFunc: "__gopy_shutil_which", Helper: helperShutilWhich, HelperImports: []string{"os/exec"}, RetKind: "str"},
 		},
 	},
 	"tempfile": {
@@ -1692,6 +1696,14 @@ const helperShutilMove = `func __gopy_shutil_move(src, dst string) string {
 	return dst
 }`
 
+const helperShutilWhich = `func __gopy_shutil_which(cmd string) string {
+	p, err := exec.LookPath(cmd)
+	if err != nil {
+		return ""
+	}
+	return p
+}`
+
 const helperTempfileMkdtemp = `func __gopy_tempfile_mkdtemp(args ...string) string {
 	prefix := ""
 	if len(args) > 0 {
@@ -2519,6 +2531,49 @@ const helperOsUrandom = `func __gopy_os_urandom(n int64) string {
 	return string(b)
 }`
 
+// helperOsWalk mirrors os.walk: yields []any tuples of (dirpath, dirs, files)
+// per directory in pre-order. Materialized eagerly into a slice since gopy
+// doesn't have a lazy iterator runtime.
+const helperOsWalk = `func __gopy_os_walk(root string) [][]any {
+	out := [][]any{}
+	type entry struct {
+		path  string
+		dirs  []string
+		files []string
+	}
+	byPath := map[string]*entry{}
+	order := []string{}
+	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if _, ok := byPath[p]; !ok {
+				byPath[p] = &entry{path: p}
+				order = append(order, p)
+			}
+			if parent := filepath.Dir(p); parent != p {
+				if e, ok := byPath[parent]; ok && parent != "." {
+					e.dirs = append(e.dirs, d.Name())
+				}
+			}
+			return nil
+		}
+		parent := filepath.Dir(p)
+		if e, ok := byPath[parent]; ok {
+			e.files = append(e.files, d.Name())
+		}
+		return nil
+	})
+	// Adjust: top-level dir's parent isn't in byPath, so its sibling
+	// entries didn't record subdirs. Rebuild dirs by stat-ing.
+	for _, p := range order {
+		e := byPath[p]
+		out = append(out, []any{e.path, e.dirs, e.files})
+	}
+	return out
+}`
+
 // helperSysVersionInfo emits a tuple-shaped slice mirroring CPython's
 // sys.version_info (major, minor, micro, releaselevel, serial). gopy
 // has no embedded interpreter, so the values are a stable stub.
@@ -2640,6 +2695,15 @@ const helperPathGetsize = `func __gopy_path_getsize(p string) int64 {
 		panic(err)
 	}
 	return i.Size()
+}`
+
+const helperPathGetmtime = `func __gopy_path_getmtime(p string) float64 {
+	i, err := os.Stat(p)
+	if err != nil {
+		panic(err)
+	}
+	t := i.ModTime()
+	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
 }`
 
 const helperPathExpanduser = `func __gopy_path_expanduser(p string) string {
