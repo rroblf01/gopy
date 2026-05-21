@@ -446,6 +446,100 @@ var stdlibModules = map[string]stdlibModule{
 			"EVENT_WRITE": {GoExpr: "int64(2)"},
 		},
 	},
+	"errno": {
+		Attrs: map[string]stdlibAttr{
+			"EACCES":   {GoExpr: "int64(13)"},
+			"EBADF":    {GoExpr: "int64(9)"},
+			"EBUSY":    {GoExpr: "int64(16)"},
+			"ECONNREFUSED": {GoExpr: "int64(111)"},
+			"EEXIST":   {GoExpr: "int64(17)"},
+			"EINTR":    {GoExpr: "int64(4)"},
+			"EINVAL":   {GoExpr: "int64(22)"},
+			"EIO":      {GoExpr: "int64(5)"},
+			"EISDIR":   {GoExpr: "int64(21)"},
+			"ENOENT":   {GoExpr: "int64(2)"},
+			"ENOMEM":   {GoExpr: "int64(12)"},
+			"ENOSPC":   {GoExpr: "int64(28)"},
+			"ENOTDIR":  {GoExpr: "int64(20)"},
+			"EPERM":    {GoExpr: "int64(1)"},
+			"EPIPE":    {GoExpr: "int64(32)"},
+			"ETIMEDOUT": {GoExpr: "int64(110)"},
+		},
+	},
+	"stat": {
+		Attrs: map[string]stdlibAttr{
+			"S_IFREG":  {GoExpr: "int64(0o100000)"},
+			"S_IFDIR":  {GoExpr: "int64(0o040000)"},
+			"S_IFLNK":  {GoExpr: "int64(0o120000)"},
+			"S_IRUSR":  {GoExpr: "int64(0o400)"},
+			"S_IWUSR":  {GoExpr: "int64(0o200)"},
+			"S_IXUSR":  {GoExpr: "int64(0o100)"},
+			"S_IRGRP":  {GoExpr: "int64(0o040)"},
+			"S_IWGRP":  {GoExpr: "int64(0o020)"},
+			"S_IXGRP":  {GoExpr: "int64(0o010)"},
+			"S_IROTH":  {GoExpr: "int64(0o004)"},
+			"S_IWOTH":  {GoExpr: "int64(0o002)"},
+			"S_IXOTH":  {GoExpr: "int64(0o001)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"S_ISREG": {GoFunc: "__gopy_stat_isreg", Helper: helperStatIsreg, RetKind: "bool"},
+			"S_ISDIR": {GoFunc: "__gopy_stat_isdir", Helper: helperStatIsdir, RetKind: "bool"},
+			"S_ISLNK": {GoFunc: "__gopy_stat_islnk", Helper: helperStatIslnk, RetKind: "bool"},
+		},
+	},
+	"fnmatch": {
+		Funcs: map[string]stdlibFunc{
+			"fnmatch":     {GoFunc: "__gopy_fnmatch", Helper: helperFnmatch, HelperImports: []string{"path/filepath"}, RetKind: "bool"},
+			"fnmatchcase": {GoFunc: "__gopy_fnmatch", Helper: helperFnmatch, HelperImports: []string{"path/filepath"}, RetKind: "bool"},
+			"filter":      {GoFunc: "__gopy_fnmatch_filter", Helper: helperFnmatchFilter, HelperImports: []string{"path/filepath"}},
+		},
+	},
+	"linecache": {
+		Funcs: map[string]stdlibFunc{
+			"getline":  {GoFunc: "__gopy_linecache_getline", Helper: helperLinecacheGetline, HelperImports: []string{"bufio", "os"}, RetKind: "str"},
+			"getlines": {GoFunc: "__gopy_linecache_getlines", Helper: helperLinecacheGetlines, HelperImports: []string{"bufio", "os"}},
+			"clearcache": {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"checkcache": {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+		},
+	},
+	"getopt": {
+		Funcs: map[string]stdlibFunc{
+			"getopt": {GoFunc: "__gopy_getopt", Helper: helperGetopt, HelperImports: []string{"strings"}},
+		},
+	},
+	"timeit": {
+		Funcs: map[string]stdlibFunc{
+			"default_timer": {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
+			"timeit":        {GoFunc: "__gopy_timeit_stub", Helper: helperTimeitStub, RetKind: "float"},
+		},
+	},
+	"cProfile": {
+		Funcs: map[string]stdlibFunc{
+			"run":     {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"runctx":  {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+		},
+	},
+	"profile": {
+		Funcs: map[string]stdlibFunc{
+			"run":    {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"runctx": {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+		},
+	},
+	"pdb": {
+		Funcs: map[string]stdlibFunc{
+			"set_trace":  {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"post_mortem": {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+		},
+	},
+	"posixpath": {
+		Funcs: map[string]stdlibFunc{
+			"join":     {GoFunc: "__gopy_path_join", GoImport: "path/filepath", Helper: helperPathJoin, RetKind: "str"},
+			"basename": {GoFunc: "filepath.Base", GoImport: "path/filepath", RetKind: "str"},
+			"dirname":  {GoFunc: "filepath.Dir", GoImport: "path/filepath", RetKind: "str"},
+			"split":    {GoFunc: "__gopy_path_split", GoImport: "path/filepath", Helper: helperPathSplit},
+			"splitext": {GoFunc: "__gopy_path_splitext", GoImport: "path/filepath", Helper: helperPathSplitext},
+		},
+	},
 	"warnings": {
 		Funcs: map[string]stdlibFunc{
 			"warn":             {GoFunc: "__gopy_warnings_warn", Helper: helperWarningsWarn, HelperImports: []string{"fmt", "os"}},
@@ -3411,6 +3505,114 @@ const helperDisNoop = `func __gopy_dis_noop(args ...any) {}`
 const helperDisInstr = `func __gopy_dis_instr(args ...any) []any { return []any{} }`
 const helperDisIsfalse = `func __gopy_dis_isfalse(args ...any) bool { return false }`
 const helperDisTracedMem = `func __gopy_dis_traced_mem(args ...any) []any { return []any{int64(0), int64(0)} }`
+
+// helperStat* — mode-bit predicates over int64 file-mode values.
+const helperStatIsreg = `func __gopy_stat_isreg(mode int64) bool { return mode&0o170000 == 0o100000 }`
+const helperStatIsdir = `func __gopy_stat_isdir(mode int64) bool { return mode&0o170000 == 0o040000 }`
+const helperStatIslnk = `func __gopy_stat_islnk(mode int64) bool { return mode&0o170000 == 0o120000 }`
+
+// helperFnmatch — backed by filepath.Match (close to fnmatch's *, ?,
+// [chars] subset). fnmatchcase = fnmatch (Go is case-sensitive).
+const helperFnmatch = `func __gopy_fnmatch(name, pattern string) bool {
+	ok, _ := filepath.Match(pattern, name)
+	return ok
+}`
+
+const helperFnmatchFilter = `func __gopy_fnmatch_filter(names []string, pattern string) []string {
+	out := []string{}
+	for _, n := range names {
+		if ok, _ := filepath.Match(pattern, n); ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}`
+
+const helperLinecacheGetline = `func __gopy_linecache_getline(filename string, lineno int64) string {
+	f, err := os.Open(filename)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	cur := int64(0)
+	for sc.Scan() {
+		cur++
+		if cur == lineno {
+			return sc.Text() + "\n"
+		}
+	}
+	return ""
+}`
+
+const helperLinecacheGetlines = `func __gopy_linecache_getlines(filename string) []string {
+	out := []string{}
+	f, err := os.Open(filename)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		out = append(out, sc.Text()+"\n")
+	}
+	return out
+}`
+
+// helperGetopt — minimal getopt with short options only. Returns
+// [opts, args] where opts is [][]any of (flag, value) pairs.
+const helperGetopt = `func __gopy_getopt(args ...any) []any {
+	argv := []string{}
+	if v, ok := args[0].([]string); ok {
+		argv = v
+	} else if v, ok := args[0].([]any); ok {
+		for _, a := range v {
+			if s, ok := a.(string); ok {
+				argv = append(argv, s)
+			}
+		}
+	}
+	short, _ := args[1].(string)
+	withVal := map[byte]bool{}
+	for i := 0; i < len(short); i++ {
+		c := short[i]
+		take := i+1 < len(short) && short[i+1] == ':'
+		withVal[c] = take
+		if take {
+			i++
+		}
+	}
+	opts := [][]any{}
+	rest := []string{}
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			rest = append(rest, a)
+			continue
+		}
+		if a == "--" {
+			rest = append(rest, argv[i+1:]...)
+			break
+		}
+		for j := 1; j < len(a); j++ {
+			c := a[j]
+			if withVal[c] {
+				if j+1 < len(a) {
+					opts = append(opts, []any{"-" + string(c), a[j+1:]})
+					j = len(a)
+				} else if i+1 < len(argv) {
+					i++
+					opts = append(opts, []any{"-" + string(c), argv[i]})
+				}
+			} else {
+				opts = append(opts, []any{"-" + string(c), ""})
+			}
+		}
+	}
+	return []any{opts, rest}
+}`
+
+const helperTimeitStub = `func __gopy_timeit_stub(args ...any) float64 { return 0.0 }`
 
 // helperArrayNew — minimal array.array. Ignores typecode and stores
 // elements as []any. Real CPython array enforces typecode at runtime.
