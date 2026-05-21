@@ -2738,6 +2738,20 @@ func (g *gen) call(c *ir.Call) error {
 			if len(c.Args) != 1 {
 				return fmt.Errorf("str() takes exactly 1 argument")
 			}
+			// `str(obj)` on a user class with `__str__` defined → call
+			// `obj.String()`. fmt.Sprintf("%v", obj) does this too via
+			// the Stringer interface, but going direct is clearer in the
+			// emitted code.
+			if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+				if fn := g.lookupMethod(t.Name, "__str__"); fn != nil {
+					_ = fn
+					if err := g.expr(c.Args[0]); err != nil {
+						return err
+					}
+					g.writef(".String()")
+					return nil
+				}
+			}
 			g.addImport("fmt")
 			g.writef("fmt.Sprintf(\"%%v\", ")
 			if err := g.expr(c.Args[0]); err != nil {
@@ -2748,6 +2762,17 @@ func (g *gen) call(c *ir.Call) error {
 		case "int":
 			if len(c.Args) != 1 {
 				return fmt.Errorf("int() takes exactly 1 argument")
+			}
+			// `int(obj)` → `obj.Int()` when user class has `__int__`.
+			if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+				if fn := g.lookupMethod(t.Name, "__int__"); fn != nil {
+					_ = fn
+					if err := g.expr(c.Args[0]); err != nil {
+						return err
+					}
+					g.writef(".Int()")
+					return nil
+				}
 			}
 			// If the arg's IR type is concretely numeric, the simple Go
 			// cast wins. Otherwise (any from **kwargs, a bare interface
@@ -2826,6 +2851,17 @@ func (g *gen) call(c *ir.Call) error {
 			if len(c.Args) != 1 {
 				return fmt.Errorf("float() takes exactly 1 argument")
 			}
+			// `float(obj)` → `obj.Float()` when user class has `__float__`.
+			if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+				if fn := g.lookupMethod(t.Name, "__float__"); fn != nil {
+					_ = fn
+					if err := g.expr(c.Args[0]); err != nil {
+						return err
+					}
+					g.writef(".Float()")
+					return nil
+				}
+			}
 			if t := c.Args[0].TypeOf(); t != nil &&
 				(t.Kind == ir.TyInt || t.Kind == ir.TyFloat) {
 				g.writef("float64(")
@@ -2889,6 +2925,17 @@ func (g *gen) call(c *ir.Call) error {
 		case "hash":
 			if len(c.Args) != 1 {
 				return fmt.Errorf("hash() takes 1 argument")
+			}
+			// `hash(obj)` → `obj.Hash()` when user class defines __hash__.
+			if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+				if fn := g.lookupMethod(t.Name, "__hash__"); fn != nil {
+					_ = fn
+					if err := g.expr(c.Args[0]); err != nil {
+						return err
+					}
+					g.writef(".Hash()")
+					return nil
+				}
 			}
 			g.addImport("fmt")
 			g.addImport("hash/fnv")
@@ -2957,6 +3004,30 @@ func (g *gen) call(c *ir.Call) error {
 	if name, ok := c.Func.(*ir.Name); ok {
 		if fn, ok := g.funcs[name.N]; ok {
 			return g.userFuncCall(fn, c)
+		}
+	}
+	// Callable instance: `obj(args)` where obj is a class instance with
+	// __call__ defined dispatches to obj.Call(args).
+	if t := g.effectiveType(c.Func); t != nil && t.Kind == ir.TyNamed {
+		if fn := g.lookupMethod(t.Name, "__call__"); fn != nil {
+			_ = fn
+			if err := g.expr(c.Func); err != nil {
+				return err
+			}
+			g.writef(".Call(")
+			for i, a := range c.Args {
+				if i > 0 {
+					g.writef(", ")
+				}
+				if err := g.expr(a); err != nil {
+					return err
+				}
+			}
+			if len(c.Keywords) > 0 {
+				return fmt.Errorf("kwargs not supported on __call__")
+			}
+			g.writef(")")
+			return nil
 		}
 	}
 	if err := g.expr(c.Func); err != nil {
@@ -5964,6 +6035,10 @@ func exportedDunder(name string) string {
 		return "Int"
 	case "__float__":
 		return "Float"
+	case "__reversed__":
+		return "Reversed"
+	case "__call__":
+		return "Call"
 	}
 	return name
 }
@@ -7805,6 +7880,17 @@ func (g *gen) builtinAccumulate(c *ir.Call) error {
 func (g *gen) builtinReversed(c *ir.Call) error {
 	if len(c.Args) != 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("reversed() takes one positional argument")
+	}
+	// `reversed(obj)` → `obj.Reversed()` when user class has `__reversed__`.
+	if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+		if fn := g.lookupMethod(t.Name, "__reversed__"); fn != nil {
+			_ = fn
+			if err := g.expr(c.Args[0]); err != nil {
+				return err
+			}
+			g.writef(".Reversed()")
+			return nil
+		}
 	}
 	elem, err := listElemTypeOf(c.Args[0])
 	if err != nil {
