@@ -422,6 +422,23 @@ var stdlibModules = map[string]stdlibModule{
 			"attrgetter":  {GoFunc: "__gopy_operator_attrgetter", Helper: helperOpAttrgetter},
 		},
 	},
+	"array": {
+		Funcs: map[string]stdlibFunc{
+			"array": {GoFunc: "__gopy_array_new", Helper: helperArrayNew, HelperImports: []string{"fmt"}},
+		},
+	},
+	"pwd": {
+		Funcs: map[string]stdlibFunc{
+			"getpwuid": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub},
+			"getpwnam": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub},
+		},
+	},
+	"grp": {
+		Funcs: map[string]stdlibFunc{
+			"getgrgid": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub},
+			"getgrnam": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub},
+		},
+	},
 	"selectors": {
 		Attrs: map[string]stdlibAttr{
 			"EVENT_READ":  {GoExpr: "int64(1)"},
@@ -3138,6 +3155,44 @@ const helperInspectIsfunc = `func __gopy_inspect_isfunc(args ...any) bool { retu
 const helperInspectIsclass = `func __gopy_inspect_isclass(args ...any) bool { return false }`
 const helperInspectFrame = `func __gopy_inspect_frame(args ...any) any { return nil }`
 const helperInspectStack = `func __gopy_inspect_stack(args ...any) []any { return []any{} }`
+
+// helperArrayNew — minimal array.array. Ignores typecode and stores
+// elements as []any. Real CPython array enforces typecode at runtime.
+const helperArrayNew = `func __gopy_array_new(args ...any) []any {
+	out := []any{}
+	if len(args) < 2 {
+		return out
+	}
+	switch xs := args[1].(type) {
+	case []any:
+		out = append(out, xs...)
+	case []int64:
+		for _, v := range xs {
+			out = append(out, v)
+		}
+	case []float64:
+		for _, v := range xs {
+			out = append(out, v)
+		}
+	case []string:
+		for _, v := range xs {
+			out = append(out, v)
+		}
+	case string:
+		for _, r := range xs {
+			out = append(out, int64(r))
+		}
+	default:
+		_ = fmt.Sprintf("%v", xs)
+	}
+	return out
+}`
+
+// helperPwdStub — gopy doesn't expose Unix passwd/group via stdlib.
+// Returns a 7-tuple analog with empty fields.
+const helperPwdStub = `func __gopy_pwd_stub(args ...any) []any {
+	return []any{"", "", int64(0), int64(0), "", "", ""}
+}`
 
 // helperOp* — operator module wrappers. Add/Sub/Mul work on int64;
 // itemgetter / attrgetter return key-bound closures.

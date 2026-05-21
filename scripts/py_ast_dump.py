@@ -40,6 +40,12 @@ def node_to_dict(node):
                 # Lower as None so it disappears from generated code.
                 result["_const_kind"] = "none"
                 result["value"] = None
+            elif isinstance(v, complex):
+                # Imaginary / complex literals (`2j`, `1+2j`). Encode as
+                # a (real, imag) pair the Go side reassembles into a
+                # ComplexLit node.
+                result["_const_kind"] = "complex"
+                result["value"] = {"real": v.real, "imag": v.imag}
         return result
     if isinstance(node, list):
         return [node_to_dict(x) for x in node]

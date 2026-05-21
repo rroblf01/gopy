@@ -1830,6 +1830,16 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			}
 		}
 		return &Assert{Cond: cond, Msg: msg}, nil
+	case "Delete":
+		var targets []Expr
+		for _, t := range n.Children("targets") {
+			e, err := lowerExpr(t, sc)
+			if err != nil {
+				return nil, err
+			}
+			targets = append(targets, e)
+		}
+		return &Del{Targets: targets}, nil
 	default:
 		return nil, fmt.Errorf("line %d: unsupported statement %q", n.Lineno(), n.Type())
 	}
@@ -2308,6 +2318,13 @@ func lowerConstant(n parser.Node) (Expr, error) {
 		return &StrLit{V: x, Ty: &Type{Kind: TyStr}}, nil
 	case nil:
 		return &NoneLit{Ty: &Type{Kind: TyNone}}, nil
+	case map[string]any:
+		if kind == "complex" {
+			re, _ := x["real"].(float64)
+			im, _ := x["imag"].(float64)
+			return &ComplexLit{Real: re, Imag: im, Ty: &Type{Kind: TyComplex}}, nil
+		}
+		return nil, fmt.Errorf("line %d: unsupported constant map shape", n.Lineno())
 	default:
 		return nil, fmt.Errorf("line %d: unsupported constant %T", n.Lineno(), v)
 	}
@@ -3323,6 +3340,9 @@ func promote(a, b *Type) *Type {
 	}
 	if a.Kind == TyStr && b.Kind == TyStr {
 		return &Type{Kind: TyStr}
+	}
+	if a.Kind == TyComplex || b.Kind == TyComplex {
+		return &Type{Kind: TyComplex}
 	}
 	if a.Kind == TyFloat || b.Kind == TyFloat {
 		return &Type{Kind: TyFloat}

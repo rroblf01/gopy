@@ -380,6 +380,13 @@ type Assert struct {
 	Msg  Expr // optional
 }
 
+// Del is `del target`. Target shapes: Name (no-op + scope drop),
+// Subscript (`del d[k]` → delete(d, k)), Attribute (`del obj.attr`,
+// not yet supported on user classes).
+type Del struct {
+	Targets []Expr
+}
+
 func (*ExprStmt) stmtNode()   {}
 func (*Assign) stmtNode()     {}
 func (*Return) stmtNode()     {}
@@ -394,6 +401,7 @@ func (*Raise) stmtNode()      {}
 func (*WithFile) stmtNode()   {}
 func (*WithCM) stmtNode()     {}
 func (*Assert) stmtNode()     {}
+func (*Del) stmtNode()        {}
 func (*Yield) stmtNode()      {}
 func (*YieldFrom) stmtNode()  {}
 func (*Break) stmtNode()      {}
@@ -416,6 +424,11 @@ type IntLit struct {
 type FloatLit struct {
 	V  float64
 	Ty *Type
+}
+type ComplexLit struct {
+	Real float64
+	Imag float64
+	Ty   *Type
 }
 type StrLit struct {
 	V  string
@@ -608,6 +621,7 @@ type FStrPart struct {
 }
 
 func (*IntLit) exprNode()     {}
+func (*ComplexLit) exprNode() {}
 func (*FloatLit) exprNode()   {}
 func (*StrLit) exprNode()     {}
 func (*BoolLit) exprNode()    {}
@@ -633,6 +647,7 @@ func (*Starred) exprNode()    {}
 func (*NamedExpr) exprNode()  {}
 
 func (e *IntLit) TypeOf() *Type     { return e.Ty }
+func (e *ComplexLit) TypeOf() *Type { return e.Ty }
 func (e *FloatLit) TypeOf() *Type   { return e.Ty }
 func (e *StrLit) TypeOf() *Type     { return e.Ty }
 func (e *BoolLit) TypeOf() *Type    { return e.Ty }

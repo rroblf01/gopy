@@ -1037,6 +1037,8 @@ func (g *gen) stmt(s ir.Stmt) error {
 		return g.withCM(x)
 	case *ir.Assert:
 		return g.assertStmt(x)
+	case *ir.Del:
+		return g.delStmt(x)
 	case *ir.Match:
 		return g.matchStmt(x)
 	case *ir.LocalFunc:
@@ -1490,6 +1492,67 @@ const helperFileWrite = `func __gopy_fh_write(f *os.File, s string) {
 // teardown runs even on panic, then emits the body. Wrapping the whole
 // block in an IIFE scopes the defer to the `with` block rather than the
 // enclosing function.
+// delStmt emits `del target`. Subscript form → `delete(d, k)` for dicts
+// or `xs = append(xs[:i], xs[i+1:]...)` for lists. Bare-Name form is a
+// no-op at codegen (Python drops the binding; Go's scope handles that
+// at function boundary). Attribute target rejected since user classes
+// don't have a delete protocol.
+func (g *gen) delStmt(d *ir.Del) error {
+	for _, t := range d.Targets {
+		switch x := t.(type) {
+		case *ir.Subscript:
+			recvTy := g.effectiveType(x.Value)
+			g.writeIndent()
+			if recvTy != nil && recvTy.Kind == ir.TyDict {
+				g.writef("delete(")
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef(", ")
+				if err := g.expr(x.Index); err != nil {
+					return err
+				}
+				g.writef(")\n")
+				continue
+			}
+			if recvTy != nil && recvTy.Kind == ir.TyList {
+				// xs = append(xs[:i], xs[i+1:]...)
+				name, ok := x.Value.(*ir.Name)
+				if !ok {
+					return fmt.Errorf("del on list slice requires a Name target")
+				}
+				g.writef("%s = append(", name.N)
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef("[:")
+				if err := g.expr(x.Index); err != nil {
+					return err
+				}
+				g.writef("], ")
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef("[")
+				if err := g.expr(x.Index); err != nil {
+					return err
+				}
+				g.writef("+1:]...)\n")
+				continue
+			}
+			return fmt.Errorf("del on subscript requires dict or list target")
+		case *ir.Name:
+			// No emission — Go scope cleanup handles unreachable locals.
+			// Mark with `_ = name` so Go doesn't complain about unused.
+			g.writeIndent()
+			g.writef("_ = %s\n", x.N)
+		default:
+			return fmt.Errorf("del: unsupported target shape")
+		}
+	}
+	return nil
+}
+
 // assertStmt emits `assert cond[, msg]`. The condition is run through
 // the same truthiness helper used by `if`, then we panic with an
 // AssertionError-tagged Exception so existing try/except wiring catches
@@ -2252,6 +2315,8 @@ func (g *gen) expr(e ir.Expr) error {
 		g.writef("%d", x.V)
 	case *ir.FloatLit:
 		g.writef("%g", x.V)
+	case *ir.ComplexLit:
+		g.writef("complex(%g, %g)", x.Real, x.Imag)
 	case *ir.BoolLit:
 		if x.V {
 			g.writef("true")
@@ -7102,10 +7167,17 @@ func (g *gen) builtinJSONDumps(c *ir.Call) error {
 	}
 	var indent ir.Expr
 	for _, kw := range c.Keywords {
-		if kw.Name != "indent" {
+		switch kw.Name {
+		case "indent":
+			indent = kw.Value
+		case "sort_keys", "ensure_ascii", "separators", "default", "skipkeys":
+			// Accepted but ignored: encoding/json already sorts map keys
+			// alphabetically (matches sort_keys=True), escapes non-ASCII
+			// by default, and uses fixed separators that gopy doesn't
+			// expose for override.
+		default:
 			return fmt.Errorf("json.dumps(): unsupported keyword %q", kw.Name)
 		}
-		indent = kw.Value
 	}
 	g.addImport("encoding/json")
 	g.addImport("strings")
