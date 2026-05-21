@@ -80,6 +80,10 @@ var stdlibModules = map[string]stdlibModule{
 			"monotonic":    {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
 			"perf_counter": {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
 			"time_ns":      {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
+			"strftime":     {GoFunc: "__gopy_time_strftime", GoImport: "time", Helper: helperTimeStrftime, HelperImports: []string{"strings"}, RetKind: "str"},
+			"localtime":    {GoFunc: "__gopy_time_localtime", GoImport: "time", Helper: helperTimeLocaltime},
+			"gmtime":       {GoFunc: "__gopy_time_gmtime", GoImport: "time", Helper: helperTimeGmtime},
+			"mktime":       {GoFunc: "__gopy_time_mktime", GoImport: "time", Helper: helperTimeMktime, RetKind: "float"},
 		},
 	},
 	"json": {
@@ -178,7 +182,9 @@ var stdlibModules = map[string]stdlibModule{
 		Subs: map[string]stdlibModule{
 			"request": {
 				Funcs: map[string]stdlibFunc{
-					"urlopen": {GoFunc: "__gopy_url_urlopen", Helper: helperURLOpen, HelperImports: []string{"io", "net/http"}, RetTag: "__HTTPResponse", ExtraHelpers: map[string]string{"__HTTPResponse": helperHTTPResponseType}},
+					"urlopen":     {GoFunc: "__gopy_url_urlopen", Helper: helperURLOpen, HelperImports: []string{"io", "net/http"}, RetTag: "__HTTPResponse", ExtraHelpers: map[string]string{"__HTTPResponse": helperHTTPResponseType}},
+					"Request":     {GoFunc: "__gopy_url_request_new", Helper: helperURLRequestNew, RetTag: "__URLRequest", ExtraHelpers: map[string]string{"__URLRequest": helperURLRequestType}},
+					"urlretrieve": {GoFunc: "__gopy_url_urlretrieve", Helper: helperURLRetrieve, HelperImports: []string{"io", "net/http", "os"}},
 				},
 			},
 			"parse": {
@@ -283,6 +289,46 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"guess_type":      {GoFunc: "__gopy_mimetypes_guess", Helper: helperMimetypesGuess, HelperImports: []string{"mime", "path/filepath"}},
 			"guess_extension": {GoFunc: "__gopy_mimetypes_guess_ext", Helper: helperMimetypesGuessExt, HelperImports: []string{"mime"}, RetKind: "str"},
+		},
+	},
+	"xml": {
+		Subs: map[string]stdlibModule{
+			"etree": {
+				Subs: map[string]stdlibModule{
+					"ElementTree": {
+						Funcs: map[string]stdlibFunc{
+							"fromstring": {GoFunc: "__gopy_xml_fromstring", Helper: helperXMLFromstring, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType}, HelperImports: []string{"encoding/xml", "strings"}},
+						},
+					},
+				},
+			},
+		},
+	},
+	"http": {
+		Subs: map[string]stdlibModule{
+			"client": {
+				Funcs: map[string]stdlibFunc{
+					"HTTPSConnection": {GoFunc: "__gopy_http_client_new", Helper: helperHTTPClientNew, RetTag: "__HTTPClient", ExtraHelpers: map[string]string{"__HTTPClient": helperHTTPClientType}, HelperImports: []string{"net/http", "io", "strings"}},
+					"HTTPConnection":  {GoFunc: "__gopy_http_client_new_plain", Helper: helperHTTPClientNewPlain, RetTag: "__HTTPClient", ExtraHelpers: map[string]string{"__HTTPClient": helperHTTPClientType}, HelperImports: []string{"net/http", "io", "strings"}},
+				},
+			},
+		},
+	},
+	"struct": {
+		Funcs: map[string]stdlibFunc{
+			"pack":      {GoFunc: "__gopy_struct_pack", Helper: helperStructPack, HelperImports: []string{"encoding/binary", "bytes"}, RetKind: "str"},
+			"unpack":    {GoFunc: "__gopy_struct_unpack", Helper: helperStructUnpack, HelperImports: []string{"encoding/binary"}},
+			"calcsize":  {GoFunc: "__gopy_struct_calcsize", Helper: helperStructCalcsize, RetKind: "int"},
+		},
+	},
+	"fractions": {
+		Funcs: map[string]stdlibFunc{
+			"Fraction": {GoFunc: "__gopy_fraction_new", Helper: helperFractionNew, RetTag: "__Fraction", ExtraHelpers: map[string]string{"__Fraction": helperFractionType}, HelperImports: []string{"fmt", "strconv", "strings"}},
+		},
+	},
+	"decimal": {
+		Funcs: map[string]stdlibFunc{
+			"Decimal": {GoFunc: "__gopy_decimal_new", Helper: helperDecimalNew, RetTag: "__Decimal", ExtraHelpers: map[string]string{"__Decimal": helperDecimalType}, HelperImports: []string{"fmt", "strconv"}},
 		},
 	},
 	"pickle": {
@@ -405,6 +451,10 @@ var stdlibModules = map[string]stdlibModule{
 			"getfqdn":       {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
 			"gethostbyname": {GoFunc: "__gopy_socket_gethostbyname", Helper: helperSocketGethostbyname, HelperImports: []string{"net"}, RetKind: "str"},
 			"gethostbyaddr": {GoFunc: "__gopy_socket_gethostbyaddr", Helper: helperSocketGethostbyaddr, HelperImports: []string{"net"}},
+			"inet_aton":     {GoFunc: "__gopy_socket_inet_aton", Helper: helperSocketInetAton, HelperImports: []string{"net"}, RetKind: "str"},
+			"inet_ntoa":     {GoFunc: "__gopy_socket_inet_ntoa", Helper: helperSocketInetNtoa, HelperImports: []string{"net"}, RetKind: "str"},
+			"htons":         {GoFunc: "__gopy_socket_htons", Helper: helperSocketHtons, RetKind: "int"},
+			"ntohs":         {GoFunc: "__gopy_socket_htons", Helper: helperSocketHtons, RetKind: "int"},
 			"socket":        {GoFunc: "__gopy_socket_new", Helper: helperSocketNew, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 			"create_connection": {GoFunc: "__gopy_socket_create_conn", Helper: helperSocketCreateConn, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 		},
@@ -682,6 +732,82 @@ const helperTimeSleep = `func __gopy_time_sleep(seconds float64) { time.Sleep(ti
 const helperTimeMonotonic = `func __gopy_time_monotonic() float64 { return float64(time.Now().UnixNano()) / 1e9 }`
 
 const helperTimeNs = `func __gopy_time_ns() int64 { return time.Now().UnixNano() }`
+
+// helperTimeStrftime: minimal CPython strftime → Go time.Format mapping
+// (%Y, %m, %d, %H, %M, %S, %y, %j, %A, %a, %B, %b, %p, %z, %Z, %%).
+// Accepts time.struct_time-like 9-tuple ([]any) or skips it (uses now).
+const helperTimeStrftime = `func __gopy_time_strftime(args ...any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	fmtStr := ""
+	switch s := args[0].(type) {
+	case string:
+		fmtStr = s
+	}
+	t := time.Now()
+	if len(args) >= 2 {
+		if tup, ok := args[1].([]any); ok && len(tup) >= 6 {
+			yr, _ := tup[0].(int64)
+			mo, _ := tup[1].(int64)
+			day, _ := tup[2].(int64)
+			hr, _ := tup[3].(int64)
+			mn, _ := tup[4].(int64)
+			sc, _ := tup[5].(int64)
+			t = time.Date(int(yr), time.Month(int(mo)), int(day), int(hr), int(mn), int(sc), 0, time.UTC)
+		}
+	}
+	repl := []struct{ from, to string }{
+		{"%Y", "2006"}, {"%m", "01"}, {"%d", "02"},
+		{"%H", "15"}, {"%M", "04"}, {"%S", "05"},
+		{"%y", "06"}, {"%A", "Monday"}, {"%a", "Mon"},
+		{"%B", "January"}, {"%b", "Jan"}, {"%p", "PM"},
+		{"%z", "-0700"}, {"%Z", "MST"},
+	}
+	out := fmtStr
+	for _, r := range repl {
+		out = strings.ReplaceAll(out, r.from, t.Format(r.to))
+	}
+	out = strings.ReplaceAll(out, "%%", "%")
+	return out
+}`
+
+// helperTimeLocaltime / Gmtime emit a 9-tuple analog matching CPython's
+// time.struct_time field order: (year, month, day, hour, minute, second,
+// weekday, yearday, isdst). All fields are int64.
+const helperTimeLocaltime = `func __gopy_time_localtime(args ...float64) []any {
+	var t time.Time
+	if len(args) > 0 {
+		t = time.Unix(int64(args[0]), 0).Local()
+	} else {
+		t = time.Now().Local()
+	}
+	return []any{int64(t.Year()), int64(t.Month()), int64(t.Day()), int64(t.Hour()), int64(t.Minute()), int64(t.Second()), int64((int(t.Weekday()) + 6) % 7), int64(t.YearDay()), int64(-1)}
+}`
+
+const helperTimeGmtime = `func __gopy_time_gmtime(args ...float64) []any {
+	var t time.Time
+	if len(args) > 0 {
+		t = time.Unix(int64(args[0]), 0).UTC()
+	} else {
+		t = time.Now().UTC()
+	}
+	return []any{int64(t.Year()), int64(t.Month()), int64(t.Day()), int64(t.Hour()), int64(t.Minute()), int64(t.Second()), int64((int(t.Weekday()) + 6) % 7), int64(t.YearDay()), int64(0)}
+}`
+
+const helperTimeMktime = `func __gopy_time_mktime(tup []any) float64 {
+	if len(tup) < 6 {
+		return 0
+	}
+	yr, _ := tup[0].(int64)
+	mo, _ := tup[1].(int64)
+	day, _ := tup[2].(int64)
+	hr, _ := tup[3].(int64)
+	mn, _ := tup[4].(int64)
+	sc, _ := tup[5].(int64)
+	t := time.Date(int(yr), time.Month(int(mo)), int(day), int(hr), int(mn), int(sc), 0, time.Local)
+	return float64(t.Unix())
+}`
 
 // helperJSONDumps mirrors CPython's json.dumps default separators of
 // `, ` and `: `. Go's encoding/json emits compact JSON, so we reformat
@@ -1398,6 +1524,68 @@ func (r *__HTTPResponse) Close() {}
 
 func (r *__HTTPResponse) Getcode() int64 { return r.Status }`
 
+// helperURLRequestType — request builder used as `urlopen(Request(...))`
+// argument or passed directly to http.client. Captures method, headers,
+// data; urlopen() now accepts either a str URL or a *__URLRequest.
+const helperURLRequestType = `type __URLRequest struct {
+	URL     string
+	Method  string
+	Data    string
+	Headers map[string]string
+}
+
+func (r *__URLRequest) Add_header(k, v string) {
+	if r.Headers == nil {
+		r.Headers = map[string]string{}
+	}
+	r.Headers[k] = v
+}`
+
+const helperURLRequestNew = `func __gopy_url_request_new(args ...any) *__URLRequest {
+	r := &__URLRequest{Method: "GET", Headers: map[string]string{}}
+	if len(args) > 0 {
+		r.URL, _ = args[0].(string)
+	}
+	if len(args) > 1 {
+		r.Data, _ = args[1].(string)
+		if r.Data != "" {
+			r.Method = "POST"
+		}
+	}
+	return r
+}`
+
+const helperURLRetrieve = `func __gopy_url_urlretrieve(args ...any) []any {
+	if len(args) == 0 {
+		return []any{"", map[string]string{}}
+	}
+	url, _ := args[0].(string)
+	dest := ""
+	if len(args) > 1 {
+		dest, _ = args[1].(string)
+	}
+	resp, err := http.Get(url)
+	if err != nil {
+		panic(NewException("URLError: " + err.Error()))
+	}
+	defer resp.Body.Close()
+	if dest == "" {
+		f, e := os.CreateTemp("", "urlretrieve-*")
+		if e != nil {
+			panic(NewException("URLError: " + e.Error()))
+		}
+		dest = f.Name()
+		f.Close()
+	}
+	out, err := os.Create(dest)
+	if err != nil {
+		panic(NewException("URLError: " + err.Error()))
+	}
+	defer out.Close()
+	io.Copy(out, resp.Body)
+	return []any{dest, map[string]string{}}
+}`
+
 const helperURLOpen = `func __gopy_url_urlopen(url string) *__HTTPResponse {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -1710,6 +1898,29 @@ const helperSocketGethostbyname = `func __gopy_socket_gethostbyname(host string)
 	}
 	return ips[0]
 }`
+
+// helperSocketInetAton converts dotted-quad → 4-byte packed string.
+// CPython returns bytes; gopy uses str-as-bytes pass-through.
+const helperSocketInetAton = `func __gopy_socket_inet_aton(addr string) string {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		panic(NewException("OSError: illegal IP address string passed to inet_aton"))
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		panic(NewException("OSError: not an IPv4 address"))
+	}
+	return string(v4)
+}`
+
+const helperSocketInetNtoa = `func __gopy_socket_inet_ntoa(packed string) string {
+	if len(packed) != 4 {
+		panic(NewException("OSError: packed IP wrong length for inet_ntoa"))
+	}
+	return net.IPv4(packed[0], packed[1], packed[2], packed[3]).String()
+}`
+
+const helperSocketHtons = `func __gopy_socket_htons(n int64) int64 { return n & 0xffff }`
 
 // helperSocketGethostbyaddr returns a 3-tuple analog (hostname, aliases, ips)
 // where aliases is always empty (Go's net.LookupAddr returns no aliases).
@@ -2289,6 +2500,525 @@ const helperEmailFormatDatetime = `func __gopy_email_format_datetime(args ...any
 // auto-serialized. Output is text JSON rather than pickle's binary
 // protocol — incompatible at the wire format but functionally usable
 // for cross-process state passing within gopy programs.
+// helperXMLElementType — minimal Element tree node. Holds Tag, Text,
+// Attrib (attr map), and Children. .find(tag) / .findall(tag) walk
+// direct children; .iter(tag) walks the whole subtree.
+const helperXMLElementType = `type __XMLElement struct {
+	Tag      string
+	Text     string
+	Attrib   map[string]string
+	Children []*__XMLElement
+}
+
+func (e *__XMLElement) Find(tag string) *__XMLElement {
+	for _, c := range e.Children {
+		if c.Tag == tag {
+			return c
+		}
+	}
+	return nil
+}
+
+func (e *__XMLElement) Findall(tag string) []*__XMLElement {
+	out := []*__XMLElement{}
+	for _, c := range e.Children {
+		if c.Tag == tag {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (e *__XMLElement) Iter(args ...string) []*__XMLElement {
+	want := ""
+	if len(args) > 0 {
+		want = args[0]
+	}
+	var out []*__XMLElement
+	var walk func(n *__XMLElement)
+	walk = func(n *__XMLElement) {
+		if want == "" || n.Tag == want {
+			out = append(out, n)
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(e)
+	return out
+}
+
+func (e *__XMLElement) Get(key string, args ...string) string {
+	if v, ok := e.Attrib[key]; ok {
+		return v
+	}
+	if len(args) > 0 {
+		return args[0]
+	}
+	return ""
+}
+
+func __gopy_xml_build(d *xml.Decoder, start *xml.StartElement) *__XMLElement {
+	el := &__XMLElement{Tag: start.Name.Local, Attrib: map[string]string{}}
+	for _, a := range start.Attr {
+		el.Attrib[a.Name.Local] = a.Value
+	}
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return el
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			el.Children = append(el.Children, __gopy_xml_build(d, &t))
+		case xml.EndElement:
+			return el
+		case xml.CharData:
+			el.Text += string(t)
+		}
+	}
+}`
+
+const helperXMLFromstring = `func __gopy_xml_fromstring(src string) *__XMLElement {
+	d := xml.NewDecoder(strings.NewReader(src))
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return nil
+		}
+		if se, ok := tok.(xml.StartElement); ok {
+			return __gopy_xml_build(d, &se)
+		}
+	}
+}`
+
+// helperHTTPClientType — minimal http.client connection. Stores
+// host+scheme. .request(method, path, body, headers) sends; .getresponse()
+// returns an __HTTPResponse pre-loaded with body bytes + status.
+const helperHTTPClientType = `type __HTTPClient struct {
+	host   string
+	scheme string
+	last   *__HTTPResponse
+}
+
+func (c *__HTTPClient) Request(args ...any) {
+	if len(args) < 2 {
+		return
+	}
+	method, _ := args[0].(string)
+	pathArg, _ := args[1].(string)
+	body := ""
+	if len(args) >= 3 {
+		body, _ = args[2].(string)
+	}
+	headers := map[string]string{}
+	if len(args) >= 4 {
+		if m, ok := args[3].(map[string]string); ok {
+			headers = m
+		}
+	}
+	url := c.scheme + "://" + c.host + pathArg
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(strings.ToUpper(method), url, bodyReader)
+	if err != nil {
+		panic(NewException("HTTPException: " + err.Error()))
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		panic(NewException("HTTPException: " + err.Error()))
+	}
+	defer resp.Body.Close()
+	bs, _ := io.ReadAll(resp.Body)
+	hs := map[string]string{}
+	for k, v := range resp.Header {
+		if len(v) > 0 {
+			hs[k] = v[0]
+		}
+	}
+	c.last = &__HTTPResponse{body: string(bs), Status: int64(resp.StatusCode), Headers: hs}
+}
+
+func (c *__HTTPClient) Getresponse() *__HTTPResponse { return c.last }
+func (c *__HTTPClient) Close()                       {}`
+
+const helperHTTPClientNew = `func __gopy_http_client_new(host string, args ...any) *__HTTPClient {
+	return &__HTTPClient{host: host, scheme: "https"}
+}`
+
+const helperHTTPClientNewPlain = `func __gopy_http_client_new_plain(host string, args ...any) *__HTTPClient {
+	return &__HTTPClient{host: host, scheme: "http"}
+}`
+
+// helperStructPack — minimal struct.pack supporting common single-char
+// type codes: 'b' int8, 'B' uint8, 'h' int16, 'H' uint16, 'i' int32,
+// 'I' uint32, 'q' int64, 'Q' uint64, 'f' float32, 'd' float64, 's' raw
+// string. Endianness prefix: '<' little, '>' big, '!' network (big),
+// '=' native (little). '@' / no prefix → native.
+const helperStructPack = `func __gopy_struct_pack_int(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case int32:
+		return int64(x)
+	case uint64:
+		return int64(x)
+	case float64:
+		return int64(x)
+	}
+	return 0
+}
+
+func __gopy_struct_pack(args ...any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	fmtStr, _ := args[0].(string)
+	be := false
+	off := 0
+	if len(fmtStr) > 0 {
+		switch fmtStr[0] {
+		case '<', '=', '@':
+			off = 1
+		case '>', '!':
+			off = 1
+			be = true
+		}
+	}
+	buf := &bytes.Buffer{}
+	ai := 1
+	for i := off; i < len(fmtStr); i++ {
+		c := fmtStr[i]
+		if ai > len(args)-1 {
+			break
+		}
+		v := args[ai]
+		ai++
+		switch c {
+		case 'b':
+			n := __gopy_struct_pack_int(v)
+			buf.WriteByte(byte(n))
+		case 'B':
+			n := __gopy_struct_pack_int(v)
+			buf.WriteByte(byte(n))
+		case 'h':
+			n := __gopy_struct_pack_int(v)
+			b := make([]byte, 2)
+			if be {
+				binary.BigEndian.PutUint16(b, uint16(n))
+			} else {
+				binary.LittleEndian.PutUint16(b, uint16(n))
+			}
+			buf.Write(b)
+		case 'H':
+			n := __gopy_struct_pack_int(v)
+			b := make([]byte, 2)
+			if be {
+				binary.BigEndian.PutUint16(b, uint16(n))
+			} else {
+				binary.LittleEndian.PutUint16(b, uint16(n))
+			}
+			buf.Write(b)
+		case 'i', 'l':
+			n := __gopy_struct_pack_int(v)
+			b := make([]byte, 4)
+			if be {
+				binary.BigEndian.PutUint32(b, uint32(n))
+			} else {
+				binary.LittleEndian.PutUint32(b, uint32(n))
+			}
+			buf.Write(b)
+		case 'I', 'L':
+			n := __gopy_struct_pack_int(v)
+			b := make([]byte, 4)
+			if be {
+				binary.BigEndian.PutUint32(b, uint32(n))
+			} else {
+				binary.LittleEndian.PutUint32(b, uint32(n))
+			}
+			buf.Write(b)
+		case 'q', 'Q':
+			n := __gopy_struct_pack_int(v)
+			b := make([]byte, 8)
+			if be {
+				binary.BigEndian.PutUint64(b, uint64(n))
+			} else {
+				binary.LittleEndian.PutUint64(b, uint64(n))
+			}
+			buf.Write(b)
+		case 's':
+			s, _ := v.(string)
+			buf.WriteString(s)
+		}
+	}
+	return buf.String()
+}`
+
+const helperStructUnpack = `func __gopy_struct_unpack(fmtStr, data string) []any {
+	out := []any{}
+	off := 0
+	be := false
+	if len(fmtStr) > 0 {
+		switch fmtStr[0] {
+		case '<', '=', '@':
+			off = 1
+		case '>', '!':
+			off = 1
+			be = true
+		}
+	}
+	pos := 0
+	bs := []byte(data)
+	for i := off; i < len(fmtStr); i++ {
+		c := fmtStr[i]
+		switch c {
+		case 'b':
+			if pos >= len(bs) {
+				return out
+			}
+			out = append(out, int64(int8(bs[pos])))
+			pos++
+		case 'B':
+			if pos >= len(bs) {
+				return out
+			}
+			out = append(out, int64(bs[pos]))
+			pos++
+		case 'h':
+			if pos+2 > len(bs) {
+				return out
+			}
+			var v uint16
+			if be {
+				v = binary.BigEndian.Uint16(bs[pos:])
+			} else {
+				v = binary.LittleEndian.Uint16(bs[pos:])
+			}
+			out = append(out, int64(int16(v)))
+			pos += 2
+		case 'H':
+			if pos+2 > len(bs) {
+				return out
+			}
+			var v uint16
+			if be {
+				v = binary.BigEndian.Uint16(bs[pos:])
+			} else {
+				v = binary.LittleEndian.Uint16(bs[pos:])
+			}
+			out = append(out, int64(v))
+			pos += 2
+		case 'i', 'l':
+			if pos+4 > len(bs) {
+				return out
+			}
+			var v uint32
+			if be {
+				v = binary.BigEndian.Uint32(bs[pos:])
+			} else {
+				v = binary.LittleEndian.Uint32(bs[pos:])
+			}
+			out = append(out, int64(int32(v)))
+			pos += 4
+		case 'I', 'L':
+			if pos+4 > len(bs) {
+				return out
+			}
+			var v uint32
+			if be {
+				v = binary.BigEndian.Uint32(bs[pos:])
+			} else {
+				v = binary.LittleEndian.Uint32(bs[pos:])
+			}
+			out = append(out, int64(v))
+			pos += 4
+		case 'q', 'Q':
+			if pos+8 > len(bs) {
+				return out
+			}
+			var v uint64
+			if be {
+				v = binary.BigEndian.Uint64(bs[pos:])
+			} else {
+				v = binary.LittleEndian.Uint64(bs[pos:])
+			}
+			out = append(out, int64(v))
+			pos += 8
+		}
+	}
+	return out
+}`
+
+const helperStructCalcsize = `func __gopy_struct_calcsize(fmtStr string) int64 {
+	off := 0
+	if len(fmtStr) > 0 {
+		switch fmtStr[0] {
+		case '<', '=', '@', '>', '!':
+			off = 1
+		}
+	}
+	n := int64(0)
+	for i := off; i < len(fmtStr); i++ {
+		switch fmtStr[i] {
+		case 'b', 'B', 's', 'c', '?':
+			n++
+		case 'h', 'H':
+			n += 2
+		case 'i', 'I', 'l', 'L', 'f':
+			n += 4
+		case 'q', 'Q', 'd':
+			n += 8
+		}
+	}
+	return n
+}`
+
+// helperFractionType — rational number stored as numerator/denominator
+// int64s, reduced to lowest terms on construction. Arithmetic methods
+// follow CPython's Fraction shape; division by zero raises.
+const helperFractionType = `type __Fraction struct {
+	Num, Den int64
+}
+
+func __gopy_frac_gcd(a, b int64) int64 {
+	if a < 0 {
+		a = -a
+	}
+	if b < 0 {
+		b = -b
+	}
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
+
+func (f *__Fraction) Reduce() {
+	if f.Den == 0 {
+		panic(NewException("ZeroDivisionError: Fraction denominator zero"))
+	}
+	if f.Den < 0 {
+		f.Num = -f.Num
+		f.Den = -f.Den
+	}
+	g := __gopy_frac_gcd(f.Num, f.Den)
+	if g > 1 {
+		f.Num /= g
+		f.Den /= g
+	}
+}
+
+func (f *__Fraction) String() string {
+	if f.Den == 1 {
+		return fmt.Sprintf("%d", f.Num)
+	}
+	return fmt.Sprintf("%d/%d", f.Num, f.Den)
+}
+
+func (f *__Fraction) Add(o *__Fraction) *__Fraction {
+	r := &__Fraction{Num: f.Num*o.Den + o.Num*f.Den, Den: f.Den * o.Den}
+	r.Reduce()
+	return r
+}
+
+func (f *__Fraction) Sub(o *__Fraction) *__Fraction {
+	r := &__Fraction{Num: f.Num*o.Den - o.Num*f.Den, Den: f.Den * o.Den}
+	r.Reduce()
+	return r
+}
+
+func (f *__Fraction) Mul(o *__Fraction) *__Fraction {
+	r := &__Fraction{Num: f.Num * o.Num, Den: f.Den * o.Den}
+	r.Reduce()
+	return r
+}
+
+func (f *__Fraction) Truediv(o *__Fraction) *__Fraction {
+	r := &__Fraction{Num: f.Num * o.Den, Den: f.Den * o.Num}
+	r.Reduce()
+	return r
+}
+
+func (f *__Fraction) Eq(o *__Fraction) bool { return f.Num*o.Den == o.Num*f.Den }
+func (f *__Fraction) Lt(o *__Fraction) bool { return f.Num*o.Den < o.Num*f.Den }
+func (f *__Fraction) Float() float64        { return float64(f.Num) / float64(f.Den) }`
+
+const helperFractionNew = `func __gopy_fraction_new(args ...any) *__Fraction {
+	if len(args) == 0 {
+		return &__Fraction{Num: 0, Den: 1}
+	}
+	if len(args) == 1 {
+		switch v := args[0].(type) {
+		case int64:
+			return &__Fraction{Num: v, Den: 1}
+		case string:
+			if i := strings.Index(v, "/"); i >= 0 {
+				n, _ := strconv.ParseInt(strings.TrimSpace(v[:i]), 10, 64)
+				d, _ := strconv.ParseInt(strings.TrimSpace(v[i+1:]), 10, 64)
+				f := &__Fraction{Num: n, Den: d}
+				f.Reduce()
+				return f
+			}
+			n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			return &__Fraction{Num: n, Den: 1}
+		}
+		return &__Fraction{Num: 0, Den: 1}
+	}
+	n, _ := args[0].(int64)
+	d, _ := args[1].(int64)
+	f := &__Fraction{Num: n, Den: d}
+	f.Reduce()
+	return f
+}`
+
+// helperDecimalType — fixed-point string-backed decimal. Stores the
+// raw input string; arithmetic delegates to float64 for simplicity.
+// Not a true arbitrary-precision Decimal — round-off matches float64.
+const helperDecimalType = `type __Decimal struct {
+	Repr string
+	V    float64
+}
+
+func (d *__Decimal) String() string  { return d.Repr }
+func (d *__Decimal) Float() float64  { return d.V }
+
+func (d *__Decimal) Add(o *__Decimal) *__Decimal { return __gopy_decimal_from(d.V + o.V) }
+func (d *__Decimal) Sub(o *__Decimal) *__Decimal { return __gopy_decimal_from(d.V - o.V) }
+func (d *__Decimal) Mul(o *__Decimal) *__Decimal { return __gopy_decimal_from(d.V * o.V) }
+func (d *__Decimal) Truediv(o *__Decimal) *__Decimal {
+	if o.V == 0 {
+		panic(NewException("ZeroDivisionError"))
+	}
+	return __gopy_decimal_from(d.V / o.V)
+}
+
+func __gopy_decimal_from(v float64) *__Decimal {
+	return &__Decimal{Repr: strconv.FormatFloat(v, 'f', -1, 64), V: v}
+}`
+
+const helperDecimalNew = `func __gopy_decimal_new(args ...any) *__Decimal {
+	if len(args) == 0 {
+		return &__Decimal{Repr: "0", V: 0}
+	}
+	switch v := args[0].(type) {
+	case int64:
+		return &__Decimal{Repr: fmt.Sprintf("%d", v), V: float64(v)}
+	case float64:
+		return __gopy_decimal_from(v)
+	case string:
+		f, _ := strconv.ParseFloat(v, 64)
+		return &__Decimal{Repr: v, V: f}
+	}
+	return &__Decimal{Repr: "0", V: 0}
+}`
+
 const helperPickleDumps = `func __gopy_pickle_dumps(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {

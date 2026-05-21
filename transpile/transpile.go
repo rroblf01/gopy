@@ -3944,12 +3944,34 @@ var taggedMethodRename = map[string]map[string]string{
 		"close":   "Close",
 		"getcode": "Getcode",
 	},
+	"__HTTPClient": {
+		"request":     "Request",
+		"getresponse": "Getresponse",
+		"close":       "Close",
+	},
+	"__XMLElement": {
+		"find":    "Find",
+		"findall": "Findall",
+		"iter":    "Iter",
+		"get":     "Get",
+	},
+	"__URLRequest": {
+		"add_header": "Add_header",
+	},
 	"__Queue": {
 		"put":   "Put",
 		"get":   "Get",
 		"qsize": "Qsize",
 		"empty": "Empty",
 		"full":  "Full",
+	},
+	"__Fraction": {
+		"add":     "Add",
+		"sub":     "Sub",
+		"mul":     "Mul",
+		"truediv": "Truediv",
+		"eq":      "Eq",
+		"lt":      "Lt",
 	},
 	"__ArgParser": {
 		"add_argument": "AddArgument",
@@ -4015,6 +4037,10 @@ var taggedMethodElemTag = map[string]map[string]string{
 		"iterdir": "__Path",
 		"glob":    "__Path",
 	},
+	"__XMLElement": {
+		"findall": "__XMLElement",
+		"iter":    "__XMLElement",
+	},
 }
 
 // taggedAttrInfo describes one tagged-value field: the Go field name to
@@ -4076,6 +4102,15 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 	"__HTTPResponse": {
 		"status":  {GoName: "Status", Ty: &ir.Type{Kind: ir.TyInt}},
 		"headers": {GoName: "Headers", Ty: &ir.Type{Kind: ir.TyDict, Key: &ir.Type{Kind: ir.TyStr}, Val: &ir.Type{Kind: ir.TyStr}}},
+	},
+	"__Fraction": {
+		"numerator":   {GoName: "Num", Ty: &ir.Type{Kind: ir.TyInt}},
+		"denominator": {GoName: "Den", Ty: &ir.Type{Kind: ir.TyInt}},
+	},
+	"__XMLElement": {
+		"tag":  {GoName: "Tag", Ty: &ir.Type{Kind: ir.TyStr}},
+		"text": {GoName: "Text", Ty: &ir.Type{Kind: ir.TyStr}},
+		"attrib": {GoName: "Attrib", Ty: &ir.Type{Kind: ir.TyDict, Key: &ir.Type{Kind: ir.TyStr}, Val: &ir.Type{Kind: ir.TyStr}}},
 	},
 }
 
