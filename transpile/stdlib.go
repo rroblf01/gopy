@@ -255,8 +255,19 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"socket": {
 		Funcs: map[string]stdlibFunc{
-			"gethostname": {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
-			"getfqdn":     {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
+			"gethostname":   {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
+			"getfqdn":       {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
+			"gethostbyname": {GoFunc: "__gopy_socket_gethostbyname", Helper: helperSocketGethostbyname, HelperImports: []string{"net"}, RetKind: "str"},
+		},
+	},
+	"platform": {
+		Funcs: map[string]stdlibFunc{
+			"system":         {GoFunc: "__gopy_platform_system", Helper: helperPlatformSystem, HelperImports: []string{"runtime", "strings"}, RetKind: "str"},
+			"machine":        {GoFunc: "__gopy_platform_machine", Helper: helperPlatformMachine, HelperImports: []string{"runtime"}, RetKind: "str"},
+			"node":           {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
+			"release":        {GoFunc: "__gopy_platform_release", Helper: helperPlatformRelease, RetKind: "str"},
+			"python_version": {GoFunc: "__gopy_platform_python_version", Helper: helperPlatformPythonVersion, RetKind: "str"},
+			"platform":       {GoFunc: "__gopy_platform_platform", Helper: helperPlatformPlatform, HelperImports: []string{"runtime"}, RetKind: "str"},
 		},
 	},
 	"dataclasses": {
@@ -1429,6 +1440,55 @@ const helperSocketHostname = `func __gopy_socket_hostname() string {
 	}
 	return h
 }`
+
+const helperSocketGethostbyname = `func __gopy_socket_gethostbyname(host string) string {
+	ips, err := net.LookupHost(host)
+	if err != nil || len(ips) == 0 {
+		panic(NewException("gaierror: " + host))
+	}
+	return ips[0]
+}`
+
+const helperPlatformSystem = `func __gopy_platform_system() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "Darwin"
+	case "linux":
+		return "Linux"
+	case "windows":
+		return "Windows"
+	case "freebsd":
+		return "FreeBSD"
+	case "openbsd":
+		return "OpenBSD"
+	case "netbsd":
+		return "NetBSD"
+	}
+	return strings.Title(runtime.GOOS)
+}`
+
+const helperPlatformMachine = `func __gopy_platform_machine() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x86_64"
+	case "386":
+		return "i686"
+	case "arm64":
+		return "aarch64"
+	case "arm":
+		return "armv7l"
+	}
+	return runtime.GOARCH
+}`
+
+const helperPlatformRelease = `func __gopy_platform_release() string { return "" }`
+
+const helperPlatformPythonVersion = `func __gopy_platform_python_version() string { return "3.12.0" }`
+
+const helperPlatformPlatform = `func __gopy_platform_platform() string {
+	return runtime.GOOS + "-" + runtime.GOARCH
+}`
+
 
 const helperCalIsleap = `func __gopy_cal_isleap(y int64) bool {
 	return (y%4 == 0 && y%100 != 0) || y%400 == 0
