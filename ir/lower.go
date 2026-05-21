@@ -488,15 +488,23 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		dataclassDone = true
 	}
 
+	type classFieldDefault struct {
+		Name  string
+		Value Expr
+	}
+	var classFieldDefaults []classFieldDefault
+
 	for _, m := range bodyNodes {
 		if dataclassDone && m.Type() == "AnnAssign" {
 			continue // already consumed above
 		}
 		// Class-level field annotations on a regular class: `class Foo:\n
 		// items: dict[str, int]\n def __init__(self): ...`. Register the
-		// field on the class struct so the type is known; ignore the
-		// declared default since __init__ does the real work. ClassVar
-		// declarations are dropped from struct fields by convention.
+		// field on the class struct so the type is known. If a default
+		// value is given (`x: int = 5`), stash it so it gets applied at
+		// the head of __init__'s body, mirroring Python's class-level
+		// initializer semantics. ClassVar declarations are dropped from
+		// struct fields by convention.
 		if !isDataclass && m.Type() == "AnnAssign" {
 			tgt := m.Child("target")
 			if tgt.Type() != "Name" {
@@ -528,6 +536,15 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			}
 			if !already {
 				class.Fields = append(class.Fields, Param{Name: fieldName, Ty: ty})
+			}
+			if def := m.Child("value"); def != nil {
+				dsc := newScope()
+				dsc.declare("self", &Type{Kind: TyNamed, Name: name})
+				dv, err := lowerExpr(def, dsc)
+				if err != nil {
+					return nil, fmt.Errorf("class %s.%s default: %w", name, fieldName, err)
+				}
+				classFieldDefaults = append(classFieldDefaults, classFieldDefault{Name: fieldName, Value: dv})
 			}
 			continue
 		}
@@ -604,6 +621,20 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			body, err := lowerBody(m.Children("body"), sc)
 			if err != nil {
 				return nil, err
+			}
+			// Prepend class-level field defaults so they run before the
+			// user-written __init__ body. If __init__ already sets the
+			// same field, the user's assignment wins (executed second).
+			if len(classFieldDefaults) > 0 {
+				prefix := make([]Stmt, 0, len(classFieldDefaults))
+				for _, d := range classFieldDefaults {
+					prefix = append(prefix, &AssignAttr{
+						Target: &Name{N: "self", Ty: &Type{Kind: TyNamed, Name: name}},
+						Name:   d.Name,
+						Value:  d.Value,
+					})
+				}
+				body = append(prefix, body...)
 			}
 			class.InitBody = body
 			// Scan body for `self.x = expr` to derive fields (preserve order).
@@ -727,6 +758,20 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				class.Properties = map[string]bool{}
 			}
 			class.Properties[methName] = true
+		}
+	}
+
+	// Synthesize a constructor body for class-level field defaults when
+	// the class has no explicit __init__ — otherwise the defaults would
+	// vanish at codegen time.
+	if !class.HasInit && len(classFieldDefaults) > 0 {
+		class.HasInit = true
+		for _, d := range classFieldDefaults {
+			class.InitBody = append(class.InitBody, &AssignAttr{
+				Target: &Name{N: "self", Ty: &Type{Kind: TyNamed, Name: name}},
+				Name:   d.Name,
+				Value:  d.Value,
+			})
 		}
 	}
 
