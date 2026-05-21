@@ -191,6 +191,8 @@ var stdlibModules = map[string]stdlibModule{
 					"urlparse":     {GoFunc: "__gopy_url_urlparse", GoImport: "net/url", Helper: helperURLUrlparse, RetTag: "__URLParseResult", ExtraHelpers: map[string]string{"__URLParseResult": helperURLParseResultType}},
 					"parse_qs":     {GoFunc: "__gopy_url_parse_qs", GoImport: "net/url", Helper: helperURLParseQs},
 					"parse_qsl":    {GoFunc: "__gopy_url_parse_qsl", GoImport: "net/url", Helper: helperURLParseQsl},
+					"urljoin":      {GoFunc: "__gopy_url_urljoin", GoImport: "net/url", Helper: helperURLUrljoin, RetKind: "str"},
+					"urlsplit":     {GoFunc: "__gopy_url_urlparse", GoImport: "net/url", Helper: helperURLUrlparse, RetTag: "__URLParseResult", ExtraHelpers: map[string]string{"__URLParseResult": helperURLParseResultType}},
 				},
 			},
 		},
@@ -275,6 +277,12 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"copy":     {GoFunc: "__gopy_copy_shallow", Helper: helperCopyShallow, HelperImports: []string{"encoding/json"}},
 			"deepcopy": {GoFunc: "__gopy_copy_deep", Helper: helperCopyDeep, HelperImports: []string{"encoding/json"}},
+		},
+	},
+	"mimetypes": {
+		Funcs: map[string]stdlibFunc{
+			"guess_type":      {GoFunc: "__gopy_mimetypes_guess", Helper: helperMimetypesGuess, HelperImports: []string{"mime", "path/filepath"}},
+			"guess_extension": {GoFunc: "__gopy_mimetypes_guess_ext", Helper: helperMimetypesGuessExt, HelperImports: []string{"mime"}, RetKind: "str"},
 		},
 	},
 	"weakref": {
@@ -1426,6 +1434,56 @@ const helperURLParseResultType = `type __URLParseResult struct {
 	Params   string
 	Query    string
 	Fragment string
+}`
+
+// helperMimetypesGuess mirrors Python's mimetypes.guess_type which
+// returns (type, encoding) where encoding is typically None / "" for
+// most file types. gopy emits a 2-elt slice; encoding is always "".
+const helperMimetypesGuess = `func __gopy_mimetypes_guess(args ...any) []any {
+	if len(args) == 0 {
+		return []any{"", ""}
+	}
+	name, _ := args[0].(string)
+	ext := filepath.Ext(name)
+	if ext == "" {
+		return []any{"", ""}
+	}
+	t := mime.TypeByExtension(ext)
+	if t == "" {
+		return []any{"", ""}
+	}
+	// Strip charset suffix; CPython's guess_type returns the bare type.
+	for i := 0; i < len(t); i++ {
+		if t[i] == ';' {
+			t = t[:i]
+			break
+		}
+	}
+	return []any{t, ""}
+}`
+
+const helperMimetypesGuessExt = `func __gopy_mimetypes_guess_ext(args ...any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	typ, _ := args[0].(string)
+	exts, err := mime.ExtensionsByType(typ)
+	if err != nil || len(exts) == 0 {
+		return ""
+	}
+	return exts[0]
+}`
+
+const helperURLUrljoin = `func __gopy_url_urljoin(base, ref string) string {
+	b, err := url.Parse(base)
+	if err != nil {
+		return ref
+	}
+	r, err := url.Parse(ref)
+	if err != nil {
+		return ref
+	}
+	return b.ResolveReference(r).String()
 }`
 
 const helperURLUrlparse = `func __gopy_url_urlparse(s string) *__URLParseResult {
