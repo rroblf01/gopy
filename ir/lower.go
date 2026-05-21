@@ -1920,6 +1920,10 @@ func lowerBinOpKind(s string) (string, error) {
 		return "<<", nil
 	case "RShift":
 		return ">>", nil
+	case "MatMult":
+		return "@", nil
+	case "Pow":
+		return "**", nil
 	}
 	return "", fmt.Errorf("unsupported BinOp %q", s)
 }

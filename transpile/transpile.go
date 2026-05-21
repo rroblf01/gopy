@@ -1735,6 +1735,30 @@ func (g *gen) forEach(x *ir.ForEach) error {
 		// Fall through to forEachBody for the user body + closing brace.
 		return g.forEachBody(x)
 	}
+	// User-class iteration: `for v in obj` where obj's class defines
+	// __iter__ returning a list/iterable. Emit `for _, v := range obj.Iter()`
+	// after binding the loop var's element type for downstream attr access.
+	if t := g.effectiveType(x.Iter); t != nil && t.Kind == ir.TyNamed {
+		if fn := g.lookupMethod(t.Name, "__iter__"); fn != nil {
+			if fn.Ret != nil && fn.Ret.Kind == ir.TyList && fn.Ret.Elem != nil {
+				if fn.Ret.Elem.Kind == ir.TyNamed && x.Var != "_" {
+					g.varTypes[x.Var] = fn.Ret.Elem.Name
+				}
+				g.writeIndent()
+				switch x.Var {
+				case "_":
+					g.writef("for range ")
+				default:
+					g.writef("for _, %s := range ", x.Var)
+				}
+				if err := g.expr(x.Iter); err != nil {
+					return err
+				}
+				g.writef(".Iter() {\n")
+				return g.forEachBody(x)
+			}
+		}
+	}
 	// Default single-var range. Dict iterates keys (Python semantics);
 	// channels (generators) take the value side.
 	g.writeIndent()
@@ -2050,6 +2074,30 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		g.writef(")")
 	case *ir.UnaryOp:
+		// User-class unary dispatch: `-obj` / `+obj` / `~obj` route through
+		// __neg__ / __pos__ / __invert__ when the operand is a TyNamed
+		// class instance with the method defined.
+		if t := g.effectiveType(x.X); t != nil && t.Kind == ir.TyNamed {
+			var dunder string
+			switch x.Op {
+			case "-":
+				dunder = "__neg__"
+			case "+":
+				dunder = "__pos__"
+			case "~":
+				dunder = "__invert__"
+			}
+			if dunder != "" {
+				if fn := g.lookupMethod(t.Name, dunder); fn != nil {
+					_ = fn
+					if err := g.expr(x.X); err != nil {
+						return err
+					}
+					g.writef(".%s()", exportedDunder(dunder))
+					return nil
+				}
+			}
+		}
 		switch x.Op {
 		case "-":
 			g.writef("(-")
@@ -5979,6 +6027,18 @@ func opDunderName(op string) string {
 		return "__eq__"
 	case "!=":
 		return "__ne__"
+	case "|":
+		return "__or__"
+	case "&":
+		return "__and__"
+	case "^":
+		return "__xor__"
+	case "<<":
+		return "__lshift__"
+	case ">>":
+		return "__rshift__"
+	case "@":
+		return "__matmul__"
 	}
 	return ""
 }
@@ -6039,6 +6099,20 @@ func exportedDunder(name string) string {
 		return "Reversed"
 	case "__call__":
 		return "Call"
+	case "__or__":
+		return "Or"
+	case "__and__":
+		return "And"
+	case "__xor__":
+		return "Xor"
+	case "__lshift__":
+		return "Lshift"
+	case "__rshift__":
+		return "Rshift"
+	case "__matmul__":
+		return "Matmul"
+	case "__invert__":
+		return "Invert"
 	}
 	return name
 }
