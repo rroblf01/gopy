@@ -273,6 +273,12 @@ var stdlibModules = map[string]stdlibModule{
 			"deepcopy": {GoFunc: "__gopy_copy_deep", Helper: helperCopyDeep, HelperImports: []string{"encoding/json"}},
 		},
 	},
+	"asyncio": {
+		Funcs: map[string]stdlibFunc{
+			"run":   {GoFunc: "__gopy_asyncio_run_unused"},
+			"sleep": {GoFunc: "__gopy_asyncio_sleep_unused"},
+		},
+	},
 	"queue": {
 		Funcs: map[string]stdlibFunc{
 			"Queue":     {GoFunc: "__gopy_queue_new", Helper: helperQueueNew, RetTag: "__Queue", ExtraHelpers: map[string]string{"__Queue": helperQueueType}, HelperImports: []string{"sync"}},

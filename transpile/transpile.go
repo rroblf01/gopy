@@ -3162,6 +3162,17 @@ func (g *gen) call(c *ir.Call) error {
 					return fmt.Errorf("typing.cast() takes (type, value)")
 				}
 				return g.expr(c.Args[1])
+			case "asyncio.run":
+				// gopy treats async as sync, so `asyncio.run(coro)` is
+				// just the result of evaluating coro.
+				if len(c.Args) != 1 {
+					return fmt.Errorf("asyncio.run() takes 1 argument")
+				}
+				return g.expr(c.Args[0])
+			case "asyncio.sleep":
+				// No-op under sync semantics.
+				g.writef("nil")
+				return nil
 			case "random.choice":
 				return g.builtinRandomChoice(c)
 			case "random.shuffle":
@@ -4090,6 +4101,14 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		// Synthesize a fake Call so we can reuse the builders.
 		synth := &ir.Call{Args: m.Args, Keywords: m.Keywords}
 		switch fullPath {
+		case "asyncio.run":
+			if len(synth.Args) != 1 {
+				return fmt.Errorf("asyncio.run() takes 1 argument")
+			}
+			return g.expr(synth.Args[0])
+		case "asyncio.sleep":
+			g.writef("nil")
+			return nil
 		case "collections.Counter":
 			return g.builtinCounter(synth)
 		case "itertools.chain":

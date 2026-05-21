@@ -84,7 +84,7 @@ func isMainGuard(n parser.Node) bool {
 
 func lowerTopLevel(n parser.Node) ([]Decl, error) {
 	switch n.Type() {
-	case "FunctionDef":
+	case "FunctionDef", "AsyncFunctionDef":
 		f, err := lowerFunc(n)
 		if err != nil {
 			return nil, err
@@ -590,7 +590,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			}
 			continue
 		}
-		if m.Type() != "FunctionDef" {
+		if m.Type() != "FunctionDef" && m.Type() != "AsyncFunctionDef" {
 			return nil, fmt.Errorf("line %d: class %s: only methods supported (F2)", m.Lineno(), name)
 		}
 		// Accepted method decorators:
@@ -2213,6 +2213,12 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			return nil, err
 		}
 		return &Starred{Value: inner, Ty: inner.TypeOf()}, nil
+	case "Await":
+		// gopy doesn't model real async — `await expr` collapses to
+		// `expr` (synchronous evaluation). Lets libraries with async
+		// APIs compile and behave correctly when the awaitable is a
+		// simple value rather than a deferred computation.
+		return lowerExpr(n.Child("value"), sc)
 	case "JoinedStr":
 		// f"..." — list of Constant(str) and FormattedValue.
 		var parts []FStrPart
