@@ -492,6 +492,45 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		if dataclassDone && m.Type() == "AnnAssign" {
 			continue // already consumed above
 		}
+		// Class-level field annotations on a regular class: `class Foo:\n
+		// items: dict[str, int]\n def __init__(self): ...`. Register the
+		// field on the class struct so the type is known; ignore the
+		// declared default since __init__ does the real work. ClassVar
+		// declarations are dropped from struct fields by convention.
+		if !isDataclass && m.Type() == "AnnAssign" {
+			tgt := m.Child("target")
+			if tgt.Type() != "Name" {
+				return nil, fmt.Errorf("line %d: class %s: field declaration target must be a Name", m.Lineno(), name)
+			}
+			annNode := m.Child("annotation")
+			if annNode != nil && annNode.Type() == "Subscript" {
+				if base := annNode.Child("value"); base != nil && base.Type() == "Name" && base.Str("id") == "ClassVar" {
+					// ClassVar[T] — accepted as a class-level constant
+					// annotation but not added as a struct field. Drop.
+					continue
+				}
+			}
+			ty, err := lowerAnnotation(annNode)
+			if err != nil {
+				return nil, fmt.Errorf("class %s.%s: %w", name, tgt.Str("id"), err)
+			}
+			fieldName := tgt.Str("id")
+			// Avoid duplicates: a class may also assign self.<name> in
+			// __init__, which a later pass will pick up. We register the
+			// declared type so attribute access sees it before __init__
+			// runs.
+			already := false
+			for _, f := range class.Fields {
+				if f.Name == fieldName {
+					already = true
+					break
+				}
+			}
+			if !already {
+				class.Fields = append(class.Fields, Param{Name: fieldName, Ty: ty})
+			}
+			continue
+		}
 		if m.Type() != "FunctionDef" {
 			return nil, fmt.Errorf("line %d: class %s: only methods supported (F2)", m.Lineno(), name)
 		}
@@ -568,7 +607,13 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			}
 			class.InitBody = body
 			// Scan body for `self.x = expr` to derive fields (preserve order).
+			// Skip fields already registered via class-level annotation so
+			// they keep their declared type rather than picking up the
+			// (often-untyped) initializer type.
 			seen := map[string]bool{}
+			for _, f := range class.Fields {
+				seen[f.Name] = true
+			}
 			for _, st := range body {
 				aa, ok := st.(*AssignAttr)
 				if !ok {

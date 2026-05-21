@@ -822,6 +822,19 @@ func (g *gen) stmt(s ir.Stmt) error {
 			return err
 		}
 		g.writef(".%s = ", x.Name)
+		// If the LHS field has a known concrete type (registered on the
+		// class) and the RHS is an untyped empty literal, emit the typed
+		// empty constructor so Go accepts the assignment.
+		if fieldTy := g.attrFieldType(x.Target, x.Name); fieldTy != nil {
+			if ll, ok := x.Value.(*ir.ListLit); ok && len(ll.Elems) == 0 && fieldTy.Kind == ir.TyList {
+				g.writef("%s{}\n", g.goType(fieldTy))
+				return nil
+			}
+			if dl, ok := x.Value.(*ir.DictLit); ok && len(dl.Keys) == 0 && fieldTy.Kind == ir.TyDict {
+				g.writef("%s{}\n", g.goType(fieldTy))
+				return nil
+			}
+		}
 		if err := g.expr(x.Value); err != nil {
 			return err
 		}
@@ -4586,6 +4599,31 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		}
 	}
 	g.writef(")")
+	return nil
+}
+
+// attrFieldType returns the declared IR type of `recv.attr` when recv is
+// a Name whose effective type is a registered class with that field.
+// Used by AssignAttr codegen to cast empty literals to the field type.
+func (g *gen) attrFieldType(recv ir.Expr, attr string) *ir.Type {
+	ty := g.effectiveType(recv)
+	if ty == nil || ty.Kind != ir.TyNamed {
+		if n, ok := recv.(*ir.Name); ok && n.N == "self" && g.currentClass != nil {
+			ty = &ir.Type{Kind: ir.TyNamed, Name: g.currentClass.Name}
+		}
+	}
+	if ty == nil || ty.Kind != ir.TyNamed {
+		return nil
+	}
+	cls, ok := g.classes[ty.Name]
+	if !ok {
+		return nil
+	}
+	for _, f := range cls.Fields {
+		if f.Name == attr {
+			return f.Ty
+		}
+	}
 	return nil
 }
 
