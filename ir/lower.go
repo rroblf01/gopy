@@ -380,7 +380,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 	// integer-aliased constant set. The base name is consumed, not
 	// embedded.
 	for i, b := range rawBases {
-		if b == "Enum" || b == "IntEnum" {
+		if b == "Enum" || b == "IntEnum" || b == "Flag" || b == "IntFlag" || b == "StrEnum" {
 			class.IsEnum = true
 			rawBases = append(rawBases[:i], rawBases[i+1:]...)
 			break
@@ -429,13 +429,36 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 	// trip the "only methods supported" rule.
 	isDataclass := false
 	for _, d := range n.Children("decorator_list") {
-		if d.Type() == "Name" && d.Str("id") == "dataclass" {
-			isDataclass = true
+		if d.Type() == "Name" {
+			switch d.Str("id") {
+			case "dataclass":
+				isDataclass = true
+			case "final", "runtime_checkable", "unique", "total_ordering":
+				continue
+			}
 		}
 		if d.Type() == "Attribute" {
 			recv := d.Child("value")
-			if recv != nil && recv.Type() == "Name" && recv.Str("id") == "dataclasses" && d.Str("attr") == "dataclass" {
-				isDataclass = true
+			attr := d.Str("attr")
+			if recv != nil && recv.Type() == "Name" {
+				switch recv.Str("id") {
+				case "dataclasses":
+					if attr == "dataclass" {
+						isDataclass = true
+					}
+				case "typing":
+					if attr == "final" || attr == "runtime_checkable" {
+						continue
+					}
+				case "enum":
+					if attr == "unique" {
+						continue
+					}
+				case "functools":
+					if attr == "total_ordering" {
+						continue
+					}
+				}
 			}
 		}
 		if d.Type() == "Call" {
