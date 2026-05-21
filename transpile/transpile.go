@@ -3446,6 +3446,10 @@ func (g *gen) call(c *ir.Call) error {
 			return g.builtinType(c)
 		case "complex":
 			return g.builtinComplex(c)
+		case "enumerate":
+			return g.builtinEnumerate(c)
+		case "zip":
+			return g.builtinZipPairs(c)
 		case "format":
 			return g.builtinFormat(c)
 		case "hex":
@@ -6154,6 +6158,93 @@ func (g *gen) builtinComplex(c *ir.Call) error {
 		g.writef("float64(0)")
 	}
 	g.writef(")")
+	return nil
+}
+
+// builtinEnumerate emits a standalone `enumerate(xs[, start])` as an IIFE
+// returning `[][]any` of [index, value] pairs. Matches gopy's tuple
+// convention (slice of any). The 2-arg form starts the index at the
+// given offset; defaults to 0 like CPython.
+func (g *gen) builtinEnumerate(c *ir.Call) error {
+	if len(c.Args) < 1 || len(c.Args) > 2 {
+		return fmt.Errorf("enumerate() takes 1 or 2 arguments")
+	}
+	g.writef("func() [][]any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__start := int64(0)\n")
+	if len(c.Args) == 2 {
+		g.writeIndent()
+		g.writef("__start = ")
+		if err := g.expr(c.Args[1]); err != nil {
+			return err
+		}
+		g.writef("\n")
+	}
+	g.writeIndent()
+	g.writef("__out := make([][]any, 0, len(__src))\n")
+	g.writeIndent()
+	g.writef("for __i, __v := range __src {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__out = append(__out, []any{__start + int64(__i), __v})\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinZipPairs emits standalone `zip(a, b)` as an IIFE returning
+// `[][]any` of paired elements, stopping at the shorter input. Matches
+// CPython's strict=False default.
+func (g *gen) builtinZipPairs(c *ir.Call) error {
+	if len(c.Args) != 2 {
+		return fmt.Errorf("zip() takes exactly 2 iterables (more arities not yet supported)")
+	}
+	g.writef("func() [][]any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__a := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__b := ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__n := len(__a)\n")
+	g.writeIndent()
+	g.writef("if len(__b) < __n { __n = len(__b) }\n")
+	g.writeIndent()
+	g.writef("__out := make([][]any, 0, __n)\n")
+	g.writeIndent()
+	g.writef("for __i := 0; __i < __n; __i++ {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__out = append(__out, []any{__a[__i], __b[__i]})\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
 	return nil
 }
 
