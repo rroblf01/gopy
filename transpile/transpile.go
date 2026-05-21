@@ -2508,19 +2508,33 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.FStr:
 		return g.fstring(x)
 	case *ir.Lambda:
-		// Standalone-lambda fallback: emit `func(p any) any { return body }`
-		// using the IR Body lowered with TyAny params. Body operations
-		// that rely on concrete types will fail to compile — that's a
-		// known limitation; specialized call sites (map / filter /
-		// sorted with key=) re-lower with proper types.
+		// Standalone-lambda emission. When the lambda has been retyped
+		// via a Callable annotation (TyFunc target), use the concrete
+		// param / return types so body ops compile; otherwise fall back
+		// to `func(p any) any` and rely on call-site re-lowering for
+		// builtins like sorted/map/filter to specialize properly.
+		typedParams := false
+		var retTy *ir.Type
+		if x.Ty != nil && x.Ty.Kind == ir.TyFunc {
+			typedParams = true
+			retTy = x.Ty.FuncRet
+		}
 		g.writef("func(")
 		for i, p := range x.Params {
 			if i > 0 {
 				g.writef(", ")
 			}
-			g.writef("%s any", p.Name)
+			if typedParams && p.Ty != nil {
+				g.writef("%s %s", p.Name, g.goType(p.Ty))
+			} else {
+				g.writef("%s any", p.Name)
+			}
 		}
-		g.writef(") any { return ")
+		if typedParams && retTy != nil && retTy.Kind != ir.TyNone && retTy.Kind != ir.TyUnknown {
+			g.writef(") %s { return ", g.goType(retTy))
+		} else {
+			g.writef(") any { return ")
+		}
 		if err := g.expr(x.Body); err != nil {
 			return err
 		}
@@ -10274,6 +10288,21 @@ func (g *gen) goType(t *ir.Type) string {
 		return "float64"
 	case ir.TyComplex:
 		return "complex128"
+	case ir.TyFunc:
+		var b strings.Builder
+		b.WriteString("func(")
+		for i, p := range t.FuncParams {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(g.goType(p))
+		}
+		b.WriteString(")")
+		if t.FuncRet != nil && t.FuncRet.Kind != ir.TyNone && t.FuncRet.Kind != ir.TyUnknown {
+			b.WriteString(" ")
+			b.WriteString(g.goType(t.FuncRet))
+		}
+		return b.String()
 	case ir.TyStr:
 		return "string"
 	case ir.TyBool:

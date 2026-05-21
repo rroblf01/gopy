@@ -8,11 +8,13 @@ import "github.com/rroblf01/gopy/parser"
 // Type is the resolved type of an expression or variable. F1 only models a
 // small set; richer kinds (generics, structs, interfaces) land in later phases.
 type Type struct {
-	Kind     TypeKind
-	Elem     *Type   // for List/Optional
-	Key, Val *Type   // for Dict
-	Name     string  // for Named
-	Tuple    []*Type // for TyTuple
+	Kind       TypeKind
+	Elem       *Type   // for List/Optional
+	Key, Val   *Type   // for Dict
+	Name       string  // for Named
+	Tuple      []*Type // for TyTuple
+	FuncParams []*Type // for TyFunc
+	FuncRet    *Type   // for TyFunc
 }
 
 type TypeKind int
@@ -30,6 +32,7 @@ const (
 	TyNamed
 	TyAny
 	TyComplex
+	TyFunc
 )
 
 func (t *Type) IsZero() bool { return t == nil || t.Kind == TyUnknown }

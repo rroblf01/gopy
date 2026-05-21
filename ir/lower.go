@@ -1105,10 +1105,38 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			}
 			return out, nil
 		case "Callable":
-			// `Callable[[A, B], R]` — gopy lowers to `any` since first-class
-			// function values flow through interface{}. The signature info
-			// is intentionally dropped.
-			return &Type{Kind: TyAny}, nil
+			// `Callable[[A, B], R]` — preserve the signature as TyFunc so
+			// lambda assignments can re-lower their bodies with concrete
+			// param types and codegen can emit the matching `func(...)`
+			// type. Args = Tuple([params-list, ret]) where the first elt
+			// is a List literal of param types and the second is the ret.
+			sl := n.Child("slice")
+			if sl == nil || sl.Type() != "Tuple" {
+				return &Type{Kind: TyAny}, nil
+			}
+			elts := sl.Children("elts")
+			if len(elts) != 2 {
+				return &Type{Kind: TyAny}, nil
+			}
+			out := &Type{Kind: TyFunc}
+			paramsNode := elts[0]
+			if paramsNode.Type() == "List" {
+				for _, p := range paramsNode.Children("elts") {
+					pt, err := lowerAnnotation(p)
+					if err != nil {
+						return nil, err
+					}
+					out.FuncParams = append(out.FuncParams, pt)
+				}
+			} else if paramsNode.Type() == "Constant" {
+				// `Callable[..., R]` (Ellipsis params) — leave params empty.
+			}
+			ret, err := lowerAnnotation(elts[1])
+			if err != nil {
+				return nil, err
+			}
+			out.FuncRet = ret
+			return out, nil
 		case "Dict":
 			sl := n.Child("slice")
 			if sl.Type() != "Tuple" {
@@ -1441,6 +1469,21 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			val, err = lowerExpr(v, sc)
 			if err != nil {
 				return nil, err
+			}
+			// Lambda RHS with Callable LHS: re-lower the body with the
+			// concrete param types so x*2 etc. resolve as int64 rather
+			// than the default any.
+			if lam, ok := val.(*Lambda); ok && ty != nil && ty.Kind == TyFunc {
+				body, lerr := LowerLambdaBody(lam, ty.FuncParams)
+				if lerr == nil {
+					lam.Body = body
+					lam.Ty = ty
+					if len(lam.Params) == len(ty.FuncParams) {
+						for i, p := range ty.FuncParams {
+							lam.Params[i].Ty = p
+						}
+					}
+				}
 			}
 		}
 		switch tgt.Type() {
