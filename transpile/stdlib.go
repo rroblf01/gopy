@@ -131,6 +131,7 @@ var stdlibModules = map[string]stdlibModule{
 			"token_hex":     {GoFunc: "__gopy_secrets_token_hex", GoImport: "crypto/rand", Helper: helperSecretsTokenHex, HelperImports: []string{"encoding/hex"}, RetKind: "str"},
 			"token_urlsafe": {GoFunc: "__gopy_secrets_token_urlsafe", GoImport: "crypto/rand", Helper: helperSecretsTokenUrl, HelperImports: []string{"encoding/base64"}, RetKind: "str"},
 			"token_bytes":   {GoFunc: "__gopy_secrets_token_bytes", GoImport: "crypto/rand", Helper: helperSecretsTokenBytes, RetKind: "str"},
+			"randbelow":     {GoFunc: "__gopy_secrets_randbelow", Helper: helperSecretsRandbelow, HelperImports: []string{"crypto/rand", "math/big"}, RetKind: "int"},
 		},
 	},
 	"base64": {
@@ -206,6 +207,18 @@ var stdlibModules = map[string]stdlibModule{
 			"mkdtemp":     {GoFunc: "__gopy_tempfile_mkdtemp", GoImport: "os", Helper: helperTempfileMkdtemp, RetKind: "str"},
 			"gettempdir":  {GoFunc: "os.TempDir", GoImport: "os", RetKind: "str"},
 			"mkstemp":     {GoFunc: "__gopy_tempfile_mkstemp", GoImport: "os", Helper: helperTempfileMkstemp},
+		},
+	},
+	"copy": {
+		Funcs: map[string]stdlibFunc{
+			"copy":     {GoFunc: "__gopy_copy_shallow", Helper: helperCopyShallow, HelperImports: []string{"encoding/json"}},
+			"deepcopy": {GoFunc: "__gopy_copy_deep", Helper: helperCopyDeep, HelperImports: []string{"encoding/json"}},
+		},
+	},
+	"html": {
+		Funcs: map[string]stdlibFunc{
+			"escape":   {GoFunc: "__gopy_html_escape", Helper: helperHTMLEscape, HelperImports: []string{"strings"}, RetKind: "str"},
+			"unescape": {GoFunc: "html.UnescapeString", GoImport: "html", RetKind: "str"},
 		},
 	},
 	"gzip": {
@@ -1041,6 +1054,50 @@ const helperSecretsTokenBytes = `func __gopy_secrets_token_bytes(args ...int64) 
 		panic(err)
 	}
 	return string(b)
+}`
+
+const helperSecretsRandbelow = `func __gopy_secrets_randbelow(n int64) int64 {
+	if n <= 0 {
+		panic(NewException("ValueError: randbelow needs a positive n"))
+	}
+	r, err := rand.Int(rand.Reader, big.NewInt(n))
+	if err != nil {
+		panic(err)
+	}
+	return r.Int64()
+}`
+
+// helperCopyShallow / helperCopyDeep route through encoding/json for a
+// portable, type-erased clone. Shallow and deep are identical for the
+// JSON-friendly value shapes gopy emits (slices, maps, primitives,
+// struct-with-fields-marshaled-by-name); deeper graphs aren't covered.
+const helperCopyShallow = `func __gopy_copy_shallow(v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(NewException("copy: " + err.Error()))
+	}
+	var out any
+	if err := json.Unmarshal(b, &out); err != nil {
+		panic(NewException("copy: " + err.Error()))
+	}
+	return out
+}`
+
+const helperCopyDeep = `func __gopy_copy_deep(v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(NewException("deepcopy: " + err.Error()))
+	}
+	var out any
+	if err := json.Unmarshal(b, &out); err != nil {
+		panic(NewException("deepcopy: " + err.Error()))
+	}
+	return out
+}`
+
+const helperHTMLEscape = `func __gopy_html_escape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;", "'", "&#x27;")
+	return r.Replace(s)
 }`
 
 // helperB64Encode / helperB64Decode mirror Python's base64.b64encode /
