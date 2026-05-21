@@ -89,6 +89,11 @@ func lowerTopLevel(n parser.Node) ([]Decl, error) {
 		if err != nil {
 			return nil, err
 		}
+		if f == nil {
+			// @overload stub — skip emission so the real impl that
+			// follows wins at codegen.
+			return nil, nil
+		}
 		return []Decl{f}, nil
 	case "ClassDef":
 		return lowerClass(n)
@@ -500,6 +505,18 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		if dataclassDone && m.Type() == "AnnAssign" {
 			continue // already consumed above
 		}
+		// `__slots__ = (...)` / `__slots__ = [...]` / `_ = ...` class-body
+		// statements are CPython hints with no Go equivalent — drop them
+		// rather than rejecting the class as having a non-method body.
+		if m.Type() == "Assign" {
+			targets := m.Children("targets")
+			if len(targets) == 1 && targets[0].Type() == "Name" {
+				switch targets[0].Str("id") {
+				case "__slots__", "__match_args__", "__all__", "_":
+					continue
+				}
+			}
+		}
 		// Class-level field annotations on a regular class: `class Foo:\n
 		// items: dict[str, int]\n def __init__(self): ...`. Register the
 		// field on the class struct so the type is known. If a default
@@ -572,7 +589,8 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				case "abstractmethod":
 					isAbstract = true
 					continue
-				case "staticmethod":
+				case "staticmethod", "final", "override", "overload",
+					"deprecated", "cached_property", "no_type_check":
 					continue
 				}
 			}
@@ -582,6 +600,52 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				if attr == "abstractmethod" || attr == "abstractclassmethod" || attr == "abstractstaticmethod" || attr == "abstractproperty" {
 					isAbstract = true
 					continue
+				}
+				recv := d.Child("value")
+				if recv != nil && recv.Type() == "Name" {
+					switch recv.Str("id") {
+					case "typing":
+						switch attr {
+						case "final", "overload", "no_type_check":
+							continue
+						}
+					case "functools":
+						if attr == "cached_property" {
+							continue
+						}
+					case "warnings":
+						if attr == "deprecated" {
+							continue
+						}
+					}
+				}
+			}
+			// Call-form decorators like @overload() / @deprecated("...").
+			if d.Type() == "Call" {
+				fn := d.Child("func")
+				if fn != nil {
+					if fn.Type() == "Name" {
+						switch fn.Str("id") {
+						case "overload", "deprecated":
+							continue
+						}
+					}
+					if fn.Type() == "Attribute" {
+						attr := fn.Str("attr")
+						recv := fn.Child("value")
+						if recv != nil && recv.Type() == "Name" {
+							switch recv.Str("id") {
+							case "typing":
+								if attr == "overload" || attr == "deprecated" {
+									continue
+								}
+							case "warnings":
+								if attr == "deprecated" {
+									continue
+								}
+							}
+						}
+					}
 				}
 			}
 			var dname string
@@ -787,6 +851,20 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 }
 
 func lowerFunc(n parser.Node) (*Func, error) {
+	// `@overload` / `@typing.overload` — the decorated function is a
+	// type-check stub. Drop it entirely; the real implementation that
+	// follows under the same name does the actual work.
+	for _, d := range n.Children("decorator_list") {
+		if d.Type() == "Name" && d.Str("id") == "overload" {
+			return nil, nil
+		}
+		if d.Type() == "Attribute" && d.Str("attr") == "overload" {
+			recv := d.Child("value")
+			if recv != nil && recv.Type() == "Name" && recv.Str("id") == "typing" {
+				return nil, nil
+			}
+		}
+	}
 	// Accepted decorators (silently ignored — they don't change Go
 	// codegen): `@staticmethod` matches a free function with no self;
 	// `@functools.lru_cache` / `@lru_cache` / `@lru_cache(...)` is a
@@ -796,16 +874,31 @@ func lowerFunc(n parser.Node) (*Func, error) {
 	for _, d := range n.Children("decorator_list") {
 		if d.Type() == "Name" {
 			switch d.Str("id") {
-			case "staticmethod", "lru_cache", "cache", "cached_property", "wraps", "singledispatch":
+			case "staticmethod", "lru_cache", "cache", "cached_property",
+				"wraps", "singledispatch", "final", "override", "overload",
+				"deprecated", "no_type_check", "runtime_checkable":
 				continue
 			}
 		}
 		if d.Type() == "Attribute" {
 			recv := d.Child("value")
-			if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" {
-				switch d.Str("attr") {
-				case "lru_cache", "cache", "cached_property", "wraps", "singledispatch":
-					continue
+			attr := d.Str("attr")
+			if recv != nil && recv.Type() == "Name" {
+				switch recv.Str("id") {
+				case "functools":
+					switch attr {
+					case "lru_cache", "cache", "cached_property", "wraps", "singledispatch":
+						continue
+					}
+				case "typing":
+					switch attr {
+					case "final", "overload", "no_type_check", "runtime_checkable":
+						continue
+					}
+				case "warnings":
+					if attr == "deprecated" {
+						continue
+					}
 				}
 			}
 		}
@@ -814,16 +907,28 @@ func lowerFunc(n parser.Node) (*Func, error) {
 			if fn != nil {
 				if fn.Type() == "Name" {
 					switch fn.Str("id") {
-					case "lru_cache", "cache", "wraps":
+					case "lru_cache", "cache", "wraps", "deprecated", "overload":
 						continue
 					}
 				}
 				if fn.Type() == "Attribute" {
 					recv := fn.Child("value")
-					if recv != nil && recv.Type() == "Name" && recv.Str("id") == "functools" {
-						switch fn.Str("attr") {
-						case "lru_cache", "cache", "wraps":
-							continue
+					attr := fn.Str("attr")
+					if recv != nil && recv.Type() == "Name" {
+						switch recv.Str("id") {
+						case "functools":
+							switch attr {
+							case "lru_cache", "cache", "wraps":
+								continue
+							}
+						case "typing":
+							if attr == "overload" || attr == "deprecated" {
+								continue
+							}
+						case "warnings":
+							if attr == "deprecated" {
+								continue
+							}
 						}
 					}
 				}
