@@ -125,6 +125,19 @@ type Class struct {
 	IsEnum bool
 	// EnumMembers lists the declared name / value pairs in source order.
 	EnumMembers []EnumMember
+	// IsInterface marks classes that inherit from abc.ABC with at least
+	// one @abstractmethod and no concrete state — emitted as a Go
+	// `interface` so subclasses satisfy it structurally.
+	IsInterface bool
+	// InterfaceMethods captures the method signatures (excluding self)
+	// for the interface emission: name + params + ret type.
+	InterfaceMethods []InterfaceMethod
+}
+
+type InterfaceMethod struct {
+	Name   string
+	Params []Param
+	Ret    *Type
 }
 
 type EnumMember struct {

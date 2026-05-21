@@ -64,6 +64,13 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	for _, d := range m.Decls {
 		switch x := d.(type) {
 		case *ir.Func:
+			// Skip emission for methods of interface-shaped classes —
+			// the interface declaration already lists the signatures.
+			if x.Receiver != nil {
+				if cls, ok := g.classes[x.Receiver.Ty.Name]; ok && cls.IsInterface && len(cls.InterfaceMethods) > 0 && len(cls.Fields) == 0 && !cls.HasInit && len(cls.MethodNames) == len(cls.InterfaceMethods) {
+					continue
+				}
+			}
 			if err := g.fn(x); err != nil {
 				return nil, err
 			}
@@ -441,12 +448,45 @@ func (g *gen) class(c *ir.Class) error {
 		return nil
 	}
 
+	// Pure-abstract classes (inherit from ABC + only @abstractmethod
+	// methods + no fields + no __init__) emit as a Go interface. Any
+	// subclass whose concrete method set covers InterfaceMethods will
+	// structurally satisfy it, so a function annotated with the base
+	// type can take any subclass instance.
+	if c.IsInterface && len(c.InterfaceMethods) > 0 && len(c.Fields) == 0 && !c.HasInit && len(c.MethodNames) == len(c.InterfaceMethods) {
+		g.writef("type %s interface {\n", c.Name)
+		g.indent++
+		for _, m := range c.InterfaceMethods {
+			g.writeIndent()
+			g.writef("%s(", m.Name)
+			for i, p := range m.Params {
+				if i > 0 {
+					g.writef(", ")
+				}
+				g.writef("%s %s", p.Name, g.goType(p.Ty))
+			}
+			g.writef(")")
+			if m.Ret != nil && m.Ret.Kind != ir.TyNone && m.Ret.Kind != ir.TyUnknown {
+				g.writef(" %s", g.goType(m.Ret))
+			}
+			g.writef("\n")
+		}
+		g.indent--
+		g.writef("}\n\n")
+		return nil
+	}
+
 	// Emit struct type.
 	g.writef("type %s struct {\n", c.Name)
 	g.indent++
 	// Inheritance: embed *Base as an anonymous field. Field name is the base
 	// type name, so attribute access on inherited fields works transparently.
+	// Interface-shaped bases aren't embedded — the subclass's method set
+	// satisfies the interface structurally.
 	for _, b := range c.Bases {
+		if base, ok := g.classes[b]; ok && base.IsInterface && len(base.InterfaceMethods) > 0 && len(base.Fields) == 0 && !base.HasInit && len(base.MethodNames) == len(base.InterfaceMethods) {
+			continue
+		}
 		g.writeIndent()
 		g.writef("*%s\n", b)
 	}
@@ -479,8 +519,12 @@ func (g *gen) class(c *ir.Class) error {
 	// Zero-initialize every embedded base. This keeps stateless mixin bases
 	// usable without an explicit `super().__init__()` call. The user's
 	// `super().__init__(args)` (which targets Bases[0]) will reassign the
-	// primary base later, overriding this stub.
+	// primary base later, overriding this stub. Interface-typed bases are
+	// skipped (no embed, no init).
 	for _, b := range c.Bases {
+		if base, ok := g.classes[b]; ok && base.IsInterface && len(base.InterfaceMethods) > 0 && len(base.Fields) == 0 && !base.HasInit && len(base.MethodNames) == len(base.InterfaceMethods) {
+			continue
+		}
 		g.writeIndent()
 		g.writef("self.%s = &%s{}\n", b, b)
 	}
@@ -10315,9 +10359,13 @@ func (g *gen) goType(t *ir.Type) string {
 		return "map[" + g.goType(t.Key) + "]" + g.goType(t.Val)
 	case ir.TyNamed:
 		// User-defined classes are referenced by pointer — except enums,
-		// which the codegen aliases to int64 directly.
+		// which the codegen aliases to int64 directly, and interface-
+		// shaped classes which carry their own pointer / value receiver.
 		if cls, ok := g.classes[t.Name]; ok {
 			if cls.IsEnum {
+				return t.Name
+			}
+			if cls.IsInterface && len(cls.InterfaceMethods) > 0 && len(cls.Fields) == 0 && !cls.HasInit && len(cls.MethodNames) == len(cls.InterfaceMethods) {
 				return t.Name
 			}
 			return "*" + t.Name

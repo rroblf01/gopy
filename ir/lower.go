@@ -361,10 +361,12 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		}
 		bn := b.Str("id")
 		switch bn {
-		case "object", "ABC", "ABCMeta", "Protocol", "Generic":
-			// Marker bases: not real Go embeds, just type-system hints
-			// in CPython. Drop them so the rest of inheritance handling
-			// sees a clean base list.
+		case "object", "Protocol", "Generic":
+			continue
+		case "ABC", "ABCMeta":
+			// ABC marker: collect for later interface promotion. Stripped
+			// from the embed list either way.
+			class.IsInterface = true
 			continue
 		}
 		rawBases = append(rawBases, bn)
@@ -557,6 +559,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		//                   so it doesn't need a `*Class` receiver
 		isProperty := false
 		isClassMethod := false
+		isAbstract := false
 		for _, d := range m.Children("decorator_list") {
 			if d.Type() == "Name" {
 				switch d.Str("id") {
@@ -566,14 +569,10 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				case "classmethod":
 					isClassMethod = true
 					continue
-				case "abstractmethod", "staticmethod":
-					// abstractmethod: accepted as a no-op. Without runtime
-					// reflection we can't enforce that subclasses override,
-					// so the method body still gets emitted; if a subclass
-					// inherits an abstract method that simply raises, the
-					// behavior matches CPython's runtime check.
-					// staticmethod on a method: emit as a regular method
-					// (the `self` is ignored by the caller convention).
+				case "abstractmethod":
+					isAbstract = true
+					continue
+				case "staticmethod":
 					continue
 				}
 			}
@@ -581,6 +580,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			if d.Type() == "Attribute" {
 				attr := d.Str("attr")
 				if attr == "abstractmethod" || attr == "abstractclassmethod" || attr == "abstractstaticmethod" || attr == "abstractproperty" {
+					isAbstract = true
 					continue
 				}
 			}
@@ -758,6 +758,13 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				class.Properties = map[string]bool{}
 			}
 			class.Properties[methName] = true
+		}
+		if isAbstract {
+			class.InterfaceMethods = append(class.InterfaceMethods, InterfaceMethod{
+				Name:   methName,
+				Params: append([]Param(nil), fn.Params...),
+				Ret:    fn.Ret,
+			})
 		}
 	}
 
