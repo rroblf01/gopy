@@ -223,8 +223,9 @@ var stdlibModules = map[string]stdlibModule{
 			"printable":       {GoExpr: "\"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\\\"#$%&'()*+,-./:;<=>?@[\\\\]^_`{|}~ \\t\\n\\r\\x0b\\x0c\""},
 		},
 		Funcs: map[string]stdlibFunc{
-			"Template": {GoFunc: "__gopy_string_template_new", Helper: helperStringTemplateNew, RetTag: "__Template", ExtraHelpers: map[string]string{"__Template": helperStringTemplateType}, HelperImports: []string{"strings", "fmt"}},
-			"capwords": {GoFunc: "__gopy_string_capwords", Helper: helperStringCapwords, HelperImports: []string{"strings"}, RetKind: "str"},
+			"Template":  {GoFunc: "__gopy_string_template_new", Helper: helperStringTemplateNew, RetTag: "__Template", ExtraHelpers: map[string]string{"__Template": helperStringTemplateType}, HelperImports: []string{"strings", "fmt"}},
+			"capwords":  {GoFunc: "__gopy_string_capwords", Helper: helperStringCapwords, HelperImports: []string{"strings"}, RetKind: "str"},
+			"Formatter": {GoFunc: "__gopy_string_formatter_unused"},
 		},
 	},
 	"collections": {
@@ -741,6 +742,7 @@ var stdlibModules = map[string]stdlibModule{
 			"get_type_hints": {GoFunc: "__gopy_typing_hints", Helper: helperTypingHints},
 			"get_args":       {GoFunc: "__gopy_typing_args", Helper: helperTypingArgs},
 			"get_origin":     {GoFunc: "__gopy_typing_origin", Helper: helperTypingOrigin},
+			"NewType":        {GoFunc: "__gopy_typing_newtype", Helper: helperTypingNewtype},
 			"TYPE_CHECKING":  {GoFunc: "__gopy_typing_typecheck_unused"},
 		},
 	},
@@ -2392,6 +2394,12 @@ const helperTypingArgs = `func __gopy_typing_args(args ...any) []any {
 
 const helperTypingOrigin = `func __gopy_typing_origin(args ...any) any {
 	return nil
+}`
+
+// helperTypingNewtype — NewType returns a callable identity. In gopy
+// the result is a closure that returns its argument unchanged.
+const helperTypingNewtype = `func __gopy_typing_newtype(args ...any) func(any) any {
+	return func(v any) any { return v }
 }`
 
 // helperArgparseType — minimal ArgumentParser. add_argument records

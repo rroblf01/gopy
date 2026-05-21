@@ -1342,6 +1342,15 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 				out.Tuple = append(out.Tuple, t)
 			}
 			return out, nil
+		case "Literal", "LiteralString":
+			// Literal["a", "b", ...] — accepted as `any` since gopy
+			// doesn't enforce the literal-value constraint at runtime.
+			return &Type{Kind: TyAny}, nil
+		case "TypedDict":
+			return &Type{Kind: TyDict, Key: &Type{Kind: TyStr}, Val: &Type{Kind: TyAny}}, nil
+		case "Required", "NotRequired", "ReadOnly":
+			// Wrapper hints — unwrap to the inner annotation.
+			return lowerAnnotation(n.Child("slice"))
 		default:
 			return nil, fmt.Errorf("unsupported generic annotation base %q", base.Str("id"))
 		}

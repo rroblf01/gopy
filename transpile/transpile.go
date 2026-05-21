@@ -7153,6 +7153,16 @@ func exportedDunder(name string) string {
 		return "Floor"
 	case "__trunc__":
 		return "Trunc"
+	case "__init_subclass__":
+		return "InitSubclass"
+	case "__class_getitem__":
+		return "ClassGetitem"
+	case "__del__":
+		return "Del"
+	case "__sizeof__":
+		return "Sizeof"
+	case "__dir__":
+		return "Dir"
 	}
 	return name
 }
@@ -10098,6 +10108,19 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 			return true, err
 		}
 		g.writef(")")
+		return true, nil
+	case "hex":
+		// bytes.hex() / str.hex() — emit hex.EncodeToString. gopy maps
+		// bytes to str so the same dispatch covers both.
+		if len(m.Args) != 0 {
+			return true, fmt.Errorf("bytes.hex() takes no arguments")
+		}
+		g.addImport("encoding/hex")
+		g.writef("hex.EncodeToString([]byte(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef("))")
 		return true, nil
 	case "swapcase":
 		if len(m.Args) != 0 {
