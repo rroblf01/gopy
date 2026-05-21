@@ -446,6 +446,76 @@ var stdlibModules = map[string]stdlibModule{
 			"EVENT_WRITE": {GoExpr: "int64(2)"},
 		},
 	},
+	"warnings": {
+		Funcs: map[string]stdlibFunc{
+			"warn":             {GoFunc: "__gopy_warnings_warn", Helper: helperWarningsWarn, HelperImports: []string{"fmt", "os"}},
+			"filterwarnings":   {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"simplefilter":     {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"resetwarnings":    {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"showwarning":      {GoFunc: "__gopy_warnings_warn", Helper: helperWarningsWarn, HelperImports: []string{"fmt", "os"}},
+		},
+	},
+	"gettext": {
+		Funcs: map[string]stdlibFunc{
+			"gettext":  {GoFunc: "__gopy_gettext_identity", Helper: helperGettextIdentity, RetKind: "str"},
+			"ngettext": {GoFunc: "__gopy_gettext_n", Helper: helperGettextN, RetKind: "str"},
+			"install":  {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+		},
+	},
+	"locale": {
+		Attrs: map[string]stdlibAttr{
+			"LC_ALL":      {GoExpr: "int64(6)"},
+			"LC_COLLATE":  {GoExpr: "int64(3)"},
+			"LC_CTYPE":    {GoExpr: "int64(0)"},
+			"LC_MONETARY": {GoExpr: "int64(4)"},
+			"LC_NUMERIC":  {GoExpr: "int64(1)"},
+			"LC_TIME":     {GoExpr: "int64(2)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"setlocale":   {GoFunc: "__gopy_locale_setlocale", Helper: helperLocaleSetlocale, RetKind: "str"},
+			"getlocale":   {GoFunc: "__gopy_locale_getlocale", Helper: helperLocaleGetlocale},
+			"getdefaultlocale": {GoFunc: "__gopy_locale_getlocale", Helper: helperLocaleGetlocale},
+		},
+	},
+	"colorsys": {
+		Funcs: map[string]stdlibFunc{
+			"rgb_to_hsv": {GoFunc: "__gopy_colorsys_rgb_hsv", Helper: helperColorsysRgbHsv, HelperImports: []string{"math"}},
+			"hsv_to_rgb": {GoFunc: "__gopy_colorsys_hsv_rgb", Helper: helperColorsysHsvRgb, HelperImports: []string{"math"}},
+			"rgb_to_yiq": {GoFunc: "__gopy_colorsys_rgb_yiq", Helper: helperColorsysRgbYiq},
+			"yiq_to_rgb": {GoFunc: "__gopy_colorsys_yiq_rgb", Helper: helperColorsysYiqRgb},
+		},
+	},
+	"keyword": {
+		Attrs: map[string]stdlibAttr{
+			"kwlist": {GoExpr: `[]string{"False","None","True","and","as","assert","async","await","break","class","continue","def","del","elif","else","except","finally","for","from","global","if","import","in","is","lambda","nonlocal","not","or","pass","raise","return","try","while","with","yield"}`},
+			"softkwlist": {GoExpr: `[]string{"match","case","type","_"}`},
+		},
+		Funcs: map[string]stdlibFunc{
+			"iskeyword":     {GoFunc: "__gopy_keyword_iskw", Helper: helperKeywordIskw, RetKind: "bool"},
+			"issoftkeyword": {GoFunc: "__gopy_keyword_issoftkw", Helper: helperKeywordIssoftkw, RetKind: "bool"},
+		},
+	},
+	"unicodedata": {
+		Funcs: map[string]stdlibFunc{
+			"category": {GoFunc: "__gopy_unicodedata_category", Helper: helperUnicodedataCategory, HelperImports: []string{"unicode"}, RetKind: "str"},
+			"name":     {GoFunc: "__gopy_unicodedata_name", Helper: helperUnicodedataName, RetKind: "str"},
+		},
+	},
+	"dis": {
+		Funcs: map[string]stdlibFunc{
+			"dis":            {GoFunc: "__gopy_dis_noop", Helper: helperDisNoop},
+			"disassemble":    {GoFunc: "__gopy_dis_noop", Helper: helperDisNoop},
+			"get_instructions": {GoFunc: "__gopy_dis_instr", Helper: helperDisInstr},
+		},
+	},
+	"tracemalloc": {
+		Funcs: map[string]stdlibFunc{
+			"start":           {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"stop":            {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"is_tracing":      {GoFunc: "__gopy_dis_isfalse", Helper: helperDisIsfalse, RetKind: "bool"},
+			"get_traced_memory": {GoFunc: "__gopy_dis_traced_mem", Helper: helperDisTracedMem},
+		},
+	},
 	"signal": {
 		Attrs: map[string]stdlibAttr{
 			"SIGINT":  {GoExpr: "int64(2)"},
@@ -3163,6 +3233,184 @@ const helperInspectIsfunc = `func __gopy_inspect_isfunc(args ...any) bool { retu
 const helperInspectIsclass = `func __gopy_inspect_isclass(args ...any) bool { return false }`
 const helperInspectFrame = `func __gopy_inspect_frame(args ...any) any { return nil }`
 const helperInspectStack = `func __gopy_inspect_stack(args ...any) []any { return []any{} }`
+
+// helperWarningsWarn writes message to stderr; matches CPython's
+// default warning stream. filterwarnings / simplefilter accepted as
+// no-ops since gopy doesn't apply filters globally.
+const helperWarningsWarn = `func __gopy_warnings_warn(args ...any) {
+	if len(args) == 0 {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "Warning:", fmt.Sprintf("%v", args[0]))
+}`
+
+const helperWarningsNoop = `func __gopy_warnings_noop(args ...any) {}`
+
+// helperGettext — identity / second-arg pass-through. gopy doesn't
+// load .mo translation catalogs; the message string is returned as-is.
+const helperGettextIdentity = `func __gopy_gettext_identity(s string) string { return s }`
+
+const helperGettextN = `func __gopy_gettext_n(args ...any) string {
+	if len(args) < 3 {
+		if len(args) > 0 {
+			s, _ := args[0].(string)
+			return s
+		}
+		return ""
+	}
+	var n int64
+	switch v := args[2].(type) {
+	case int64:
+		n = v
+	case int:
+		n = int64(v)
+	case float64:
+		n = int64(v)
+	}
+	if n == 1 {
+		s, _ := args[0].(string)
+		return s
+	}
+	s, _ := args[1].(string)
+	return s
+}`
+
+// helperLocale — gopy doesn't honor C locale settings. setlocale
+// echoes the requested locale name; getlocale returns ("C", "UTF-8").
+const helperLocaleSetlocale = `func __gopy_locale_setlocale(args ...any) string {
+	if len(args) >= 2 {
+		if s, ok := args[1].(string); ok {
+			return s
+		}
+	}
+	return "C"
+}`
+
+const helperLocaleGetlocale = `func __gopy_locale_getlocale(args ...any) []any {
+	return []any{"C", "UTF-8"}
+}`
+
+// helperColorsys — RGB / HSV / YIQ conversions follow Python's
+// reference implementation; inputs and outputs are floats in [0, 1].
+const helperColorsysRgbHsv = `func __gopy_colorsys_rgb_hsv(r, g, b float64) []any {
+	maxc := math.Max(r, math.Max(g, b))
+	minc := math.Min(r, math.Min(g, b))
+	v := maxc
+	if minc == maxc {
+		return []any{0.0, 0.0, v}
+	}
+	s := (maxc - minc) / maxc
+	rc := (maxc - r) / (maxc - minc)
+	gc := (maxc - g) / (maxc - minc)
+	bc := (maxc - b) / (maxc - minc)
+	var h float64
+	switch {
+	case r == maxc:
+		h = bc - gc
+	case g == maxc:
+		h = 2.0 + rc - bc
+	default:
+		h = 4.0 + gc - rc
+	}
+	h = math.Mod(h/6.0+1.0, 1.0)
+	return []any{h, s, v}
+}`
+
+const helperColorsysHsvRgb = `func __gopy_colorsys_hsv_rgb(h, s, v float64) []any {
+	if s == 0 {
+		return []any{v, v, v}
+	}
+	i := int(h * 6.0)
+	f := h*6.0 - float64(i)
+	p := v * (1.0 - s)
+	q := v * (1.0 - s*f)
+	t := v * (1.0 - s*(1.0-f))
+	switch i % 6 {
+	case 0:
+		return []any{v, t, p}
+	case 1:
+		return []any{q, v, p}
+	case 2:
+		return []any{p, v, t}
+	case 3:
+		return []any{p, q, v}
+	case 4:
+		return []any{t, p, v}
+	default:
+		return []any{v, p, q}
+	}
+}`
+
+const helperColorsysRgbYiq = `func __gopy_colorsys_rgb_yiq(r, g, b float64) []any {
+	y := 0.30*r + 0.59*g + 0.11*b
+	i := 0.74*(r-y) - 0.27*(b-y)
+	q := 0.48*(r-y) + 0.41*(b-y)
+	return []any{y, i, q}
+}`
+
+const helperColorsysYiqRgb = `func __gopy_colorsys_yiq_rgb(y, i, q float64) []any {
+	r := y + 0.9468822170900693*i + 0.6235565819861433*q
+	g := y - 0.27478764629897834*i - 0.6356910791873801*q
+	b := y - 1.1085450346420322*i + 1.7090069284064666*q
+	return []any{r, g, b}
+}`
+
+const helperKeywordIskw = `func __gopy_keyword_iskw(s string) bool {
+	for _, k := range []string{"False","None","True","and","as","assert","async","await","break","class","continue","def","del","elif","else","except","finally","for","from","global","if","import","in","is","lambda","nonlocal","not","or","pass","raise","return","try","while","with","yield"} {
+		if k == s {
+			return true
+		}
+	}
+	return false
+}`
+
+const helperKeywordIssoftkw = `func __gopy_keyword_issoftkw(s string) bool {
+	return s == "match" || s == "case" || s == "type" || s == "_"
+}`
+
+const helperUnicodedataCategory = `func __gopy_unicodedata_category(s string) string {
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)[0]
+	switch {
+	case unicode.IsLower(r):
+		return "Ll"
+	case unicode.IsUpper(r):
+		return "Lu"
+	case unicode.IsTitle(r):
+		return "Lt"
+	case unicode.IsLetter(r):
+		return "Lo"
+	case unicode.IsDigit(r):
+		return "Nd"
+	case unicode.IsNumber(r):
+		return "No"
+	case unicode.IsSpace(r):
+		return "Zs"
+	case unicode.IsPunct(r):
+		return "Po"
+	case unicode.IsControl(r):
+		return "Cc"
+	case unicode.IsSymbol(r):
+		return "So"
+	}
+	return "Cn"
+}`
+
+const helperUnicodedataName = `func __gopy_unicodedata_name(args ...any) string {
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok {
+			return s
+		}
+	}
+	return ""
+}`
+
+const helperDisNoop = `func __gopy_dis_noop(args ...any) {}`
+const helperDisInstr = `func __gopy_dis_instr(args ...any) []any { return []any{} }`
+const helperDisIsfalse = `func __gopy_dis_isfalse(args ...any) bool { return false }`
+const helperDisTracedMem = `func __gopy_dis_traced_mem(args ...any) []any { return []any{int64(0), int64(0)} }`
 
 // helperArrayNew — minimal array.array. Ignores typecode and stores
 // elements as []any. Real CPython array enforces typecode at runtime.
