@@ -947,6 +947,42 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("\n")
 		return nil
 	case *ir.If:
+		// `if isinstance(name, Class):` — narrow `name` to *Class
+		// inside the Then body by shadowing with a typed assertion.
+		// Method / attribute access against the narrowed name dispatches
+		// through the class's full method set.
+		if narrow, ok := g.isinstanceNarrow(x.Cond); ok {
+			g.writeIndent()
+			g.writef("if %s, __isnok := any(%s).(%s); __isnok {\n", narrow.Var, narrow.Var, narrow.GoType)
+			g.indent++
+			g.writeIndent()
+			g.writef("_ = %s\n", narrow.Var)
+			prev, hadPrev := g.localVarTypes[narrow.Var]
+			g.localVarTypes[narrow.Var] = narrow.Ty
+			if err := g.stmts(x.Then); err != nil {
+				return err
+			}
+			if hadPrev {
+				g.localVarTypes[narrow.Var] = prev
+			} else {
+				delete(g.localVarTypes, narrow.Var)
+			}
+			g.indent--
+			g.writeIndent()
+			g.writef("}")
+			if len(x.Else) > 0 {
+				g.writef(" else {\n")
+				g.indent++
+				if err := g.stmts(x.Else); err != nil {
+					return err
+				}
+				g.indent--
+				g.writeIndent()
+				g.writef("}")
+			}
+			g.writef("\n")
+			return nil
+		}
 		g.writeIndent()
 		g.writef("if ")
 		if err := g.boolExpr(x.Cond); err != nil {
@@ -4769,6 +4805,51 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	}
 	g.writef(")")
 	return nil
+}
+
+// isinstanceNarrowInfo holds the bits the If codegen needs to emit the
+// shadowing type assertion + register the narrowed local type.
+type isinstanceNarrowInfo struct {
+	Var    string
+	GoType string
+	Ty     *ir.Type
+}
+
+// isinstanceNarrow detects `isinstance(name, ClassOrPrim)` as the *entire*
+// condition. Tuple-of-classes forms aren't narrowed (no single target
+// type). Returns (info, true) on match.
+func (g *gen) isinstanceNarrow(cond ir.Expr) (isinstanceNarrowInfo, bool) {
+	call, ok := cond.(*ir.Call)
+	if !ok {
+		return isinstanceNarrowInfo{}, false
+	}
+	fn, ok := call.Func.(*ir.Name)
+	if !ok || fn.N != "isinstance" || len(call.Args) != 2 {
+		return isinstanceNarrowInfo{}, false
+	}
+	nameExpr, ok := call.Args[0].(*ir.Name)
+	if !ok {
+		return isinstanceNarrowInfo{}, false
+	}
+	clsName, ok := call.Args[1].(*ir.Name)
+	if !ok {
+		return isinstanceNarrowInfo{}, false
+	}
+	switch clsName.N {
+	case "int":
+		return isinstanceNarrowInfo{Var: nameExpr.N, GoType: "int64", Ty: &ir.Type{Kind: ir.TyInt}}, true
+	case "float":
+		return isinstanceNarrowInfo{Var: nameExpr.N, GoType: "float64", Ty: &ir.Type{Kind: ir.TyFloat}}, true
+	case "str":
+		return isinstanceNarrowInfo{Var: nameExpr.N, GoType: "string", Ty: &ir.Type{Kind: ir.TyStr}}, true
+	case "bool":
+		return isinstanceNarrowInfo{Var: nameExpr.N, GoType: "bool", Ty: &ir.Type{Kind: ir.TyBool}}, true
+	}
+	if _, ok := g.classes[clsName.N]; !ok {
+		return isinstanceNarrowInfo{}, false
+	}
+	ty := &ir.Type{Kind: ir.TyNamed, Name: clsName.N}
+	return isinstanceNarrowInfo{Var: nameExpr.N, GoType: g.goType(ty), Ty: ty}, true
 }
 
 // attrFieldType returns the declared IR type of `recv.attr` when recv is
@@ -10198,6 +10279,14 @@ func (g *gen) exprTag(e ir.Expr) string {
 // stdlib return-type registry (for Call / MethodCall whose target maps
 // to a stdlibFunc.RetKind). Returns nil only when no signal exists.
 func (g *gen) effectiveType(e ir.Expr) *ir.Type {
+	// localVarTypes wins for Name expressions: it tracks narrower /
+	// inferred types (e.g. inside an `isinstance` branch) than the IR's
+	// static type which might still be TyAny from a Union annotation.
+	if n, ok := e.(*ir.Name); ok {
+		if t, ok := g.localVarTypes[n.N]; ok && t != nil && t.Kind != ir.TyUnknown {
+			return t
+		}
+	}
 	if t := e.TypeOf(); t != nil && t.Kind != ir.TyUnknown {
 		return t
 	}
