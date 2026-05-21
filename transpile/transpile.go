@@ -3119,6 +3119,10 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinCount(c)
 			case "itertools.zip_longest":
 				return g.builtinZipLongest(c)
+			case "itertools.pairwise":
+				return g.builtinPairwise(c)
+			case "itertools.batched":
+				return g.builtinBatched(c)
 			case "heapq.heappush":
 				return g.builtinHeappush(c)
 			case "heapq.heappop":
@@ -4145,6 +4149,10 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinBisect(synth, true)
 		case "bisect.insort", "bisect.insort_left", "bisect.insort_right":
 			return g.builtinInsort(synth)
+		case "itertools.pairwise":
+			return g.builtinPairwise(synth)
+		case "itertools.batched":
+			return g.builtinBatched(synth)
 		}
 		// User-class numeric dunder dispatch for math.ceil / math.floor /
 		// math.trunc: when the lone argument is a user class instance with
@@ -7279,6 +7287,87 @@ func (g *gen) builtinDictFromkeys(m *ir.MethodCall) error {
 // Shorter sequence padded with the fillvalue kwarg (or the element type's
 // zero value when fillvalue is absent). Returned shape matches starmap's
 // expected pair-list input.
+// builtinPairwise emits `itertools.pairwise(xs)` as an eager `[][]any`
+// of (x[i], x[i+1]) pairs. Result is empty for sequences of length < 2.
+func (g *gen) builtinPairwise(c *ir.Call) error {
+	if len(c.Args) != 1 {
+		return fmt.Errorf("pairwise() takes 1 argument")
+	}
+	g.writef("func() [][]any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := make([][]any, 0)\n")
+	g.writeIndent()
+	g.writef("for __i := 0; __i+1 < len(__src); __i++ {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__out = append(__out, []any{__src[__i], __src[__i+1]})\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinBatched emits `itertools.batched(xs, n)` as an eager `[][]any`
+// of n-sized chunks (last chunk may be shorter). n must be >= 1.
+func (g *gen) builtinBatched(c *ir.Call) error {
+	if len(c.Args) != 2 {
+		return fmt.Errorf("batched() takes (iterable, n)")
+	}
+	g.needsException = true
+	g.writef("func() [][]any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__n := int(")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("if __n < 1 { panic(NewException(\"ValueError: batched(): n must be >= 1\")) }\n")
+	g.writeIndent()
+	g.writef("__out := make([][]any, 0)\n")
+	g.writeIndent()
+	g.writef("for __i := 0; __i < len(__src); __i += __n {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__end := __i + __n\n")
+	g.writeIndent()
+	g.writef("if __end > len(__src) { __end = len(__src) }\n")
+	g.writeIndent()
+	g.writef("__chunk := make([]any, 0, __end-__i)\n")
+	g.writeIndent()
+	g.writef("for __j := __i; __j < __end; __j++ { __chunk = append(__chunk, __src[__j]) }\n")
+	g.writeIndent()
+	g.writef("__out = append(__out, __chunk)\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 func (g *gen) builtinZipLongest(c *ir.Call) error {
 	if len(c.Args) != 2 {
 		return fmt.Errorf("zip_longest() takes (a, b); fillvalue is a kwarg")
