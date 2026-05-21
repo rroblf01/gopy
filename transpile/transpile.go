@@ -2296,6 +2296,16 @@ func (g *gen) expr(e ir.Expr) error {
 				if attr.GoImport != "" {
 					g.addImport(attr.GoImport)
 				}
+				if attr.Helper != "" {
+					key := attr.HelperName
+					if key == "" {
+						key = attr.GoExpr
+					}
+					g.helpers[key] = attr.Helper
+					for _, imp := range attr.HelperImports {
+						g.addImport(imp)
+					}
+				}
 				g.writef("%s", attr.GoExpr)
 				return nil
 			}

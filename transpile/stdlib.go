@@ -16,7 +16,12 @@ package transpile
 var stdlibModules = map[string]stdlibModule{
 	"sys": {
 		Attrs: map[string]stdlibAttr{
-			"argv": {GoExpr: "os.Args", GoImport: "os"},
+			"argv":         {GoExpr: "os.Args", GoImport: "os"},
+			"platform":     {GoExpr: "runtime.GOOS", GoImport: "runtime"},
+			"version":      {GoExpr: `"3.12.0 (gopy)"`},
+			"version_info": {GoExpr: "__gopy_sys_version_info", Helper: helperSysVersionInfo, HelperName: "__gopy_sys_version_info"},
+			"maxsize":      {GoExpr: "int64(9223372036854775807)"},
+			"byteorder":    {GoExpr: `"little"`},
 		},
 		Funcs: map[string]stdlibFunc{
 			"exit": {GoFunc: "os.Exit", GoImport: "os", IntArg0: true},
@@ -24,18 +29,21 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"os": {
 		Attrs: map[string]stdlibAttr{
-			"sep":    {GoExpr: `string(os.PathSeparator)`, GoImport: "os"},
+			"sep":     {GoExpr: `string(os.PathSeparator)`, GoImport: "os"},
 			"linesep": {GoExpr: `"\n"`},
+			"environ": {GoExpr: "__gopy_os_environ()", Helper: helperOsEnviron, HelperName: "__gopy_os_environ", HelperImports: []string{"os", "strings"}},
 		},
 		Funcs: map[string]stdlibFunc{
-			"getenv":   {GoFunc: "os.Getenv", GoImport: "os"},
-			"getcwd":   {GoFunc: "__gopy_os_getcwd", GoImport: "os", Helper: helperOsGetcwd, RetKind: "str"},
-			"listdir":  {GoFunc: "__gopy_os_listdir", GoImport: "os", Helper: helperOsListdir},
-			"makedirs": {GoFunc: "__gopy_os_makedirs", GoImport: "os", Helper: helperOsMakedirs},
-			"remove":   {GoFunc: "__gopy_os_remove", GoImport: "os", Helper: helperOsRemove},
-			"rename":   {GoFunc: "__gopy_os_rename", GoImport: "os", Helper: helperOsRename},
-			"mkdir":    {GoFunc: "__gopy_os_mkdir", GoImport: "os", Helper: helperOsMkdir},
-			"rmdir":    {GoFunc: "__gopy_os_rmdir", GoImport: "os", Helper: helperOsRmdir},
+			"getenv":    {GoFunc: "os.Getenv", GoImport: "os"},
+			"getcwd":    {GoFunc: "__gopy_os_getcwd", GoImport: "os", Helper: helperOsGetcwd, RetKind: "str"},
+			"listdir":   {GoFunc: "__gopy_os_listdir", GoImport: "os", Helper: helperOsListdir},
+			"makedirs":  {GoFunc: "__gopy_os_makedirs", GoImport: "os", Helper: helperOsMakedirs},
+			"remove":    {GoFunc: "__gopy_os_remove", GoImport: "os", Helper: helperOsRemove},
+			"rename":    {GoFunc: "__gopy_os_rename", GoImport: "os", Helper: helperOsRename},
+			"mkdir":     {GoFunc: "__gopy_os_mkdir", GoImport: "os", Helper: helperOsMkdir},
+			"rmdir":     {GoFunc: "__gopy_os_rmdir", GoImport: "os", Helper: helperOsRmdir},
+			"cpu_count": {GoFunc: "__gopy_os_cpu_count", Helper: helperOsCPUCount, HelperImports: []string{"runtime"}, RetKind: "int"},
+			"urandom":   {GoFunc: "__gopy_os_urandom", Helper: helperOsUrandom, HelperImports: []string{"crypto/rand"}, RetKind: "str"},
 		},
 		Subs: map[string]stdlibModule{
 			"path": {
@@ -56,6 +64,7 @@ var stdlibModules = map[string]stdlibModule{
 					"expandvars":   {GoFunc: "os.ExpandEnv", GoImport: "os", RetKind: "str"},
 					"commonprefix": {GoFunc: "__gopy_path_commonprefix", Helper: helperPathCommonprefix, RetKind: "str"},
 					"samefile":     {GoFunc: "__gopy_path_samefile", GoImport: "os", Helper: helperPathSamefile, RetKind: "bool"},
+					"isabs":        {GoFunc: "filepath.IsAbs", GoImport: "path/filepath", RetKind: "bool"},
 				},
 			},
 		},
@@ -477,8 +486,11 @@ type stdlibModule struct {
 }
 
 type stdlibAttr struct {
-	GoExpr   string
-	GoImport string
+	GoExpr        string
+	GoImport      string
+	Helper        string // optional package-level Go source (e.g. a var declaration) pulled in once
+	HelperName    string // key for helpers map dedup; defaults to GoExpr when empty
+	HelperImports []string
 }
 
 type stdlibFunc struct {
@@ -2327,6 +2339,33 @@ const helperOsGetcwd = `func __gopy_os_getcwd() string {
 	}
 	return d
 }`
+
+const helperOsEnviron = `func __gopy_os_environ() map[string]string {
+	out := map[string]string{}
+	for _, kv := range os.Environ() {
+		i := strings.Index(kv, "=")
+		if i < 0 {
+			continue
+		}
+		out[kv[:i]] = kv[i+1:]
+	}
+	return out
+}`
+
+const helperOsCPUCount = `func __gopy_os_cpu_count() int64 { return int64(runtime.NumCPU()) }`
+
+const helperOsUrandom = `func __gopy_os_urandom(n int64) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return string(b)
+}`
+
+// helperSysVersionInfo emits a tuple-shaped slice mirroring CPython's
+// sys.version_info (major, minor, micro, releaselevel, serial). gopy
+// has no embedded interpreter, so the values are a stable stub.
+const helperSysVersionInfo = `var __gopy_sys_version_info = []any{int64(3), int64(12), int64(0), "final", int64(0)}`
 
 const helperOsListdir = `func __gopy_os_listdir(p string) []string {
 	entries, err := os.ReadDir(p)
