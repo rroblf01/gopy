@@ -2823,9 +2823,9 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinNsmallest(c, true)
 			case "bisect.bisect_left":
 				return g.builtinBisect(c, false)
-			case "bisect.bisect_right":
+			case "bisect.bisect_right", "bisect.bisect":
 				return g.builtinBisect(c, true)
-			case "bisect.insort":
+			case "bisect.insort", "bisect.insort_left", "bisect.insort_right":
 				return g.builtinInsort(c)
 			case "subprocess.run":
 				return g.builtinSubprocessRun(c)
@@ -3806,9 +3806,9 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinNsmallest(synth, true)
 		case "bisect.bisect_left":
 			return g.builtinBisect(synth, false)
-		case "bisect.bisect_right":
+		case "bisect.bisect_right", "bisect.bisect":
 			return g.builtinBisect(synth, true)
-		case "bisect.insort":
+		case "bisect.insort", "bisect.insort_left", "bisect.insort_right":
 			return g.builtinInsort(synth)
 		}
 		// User-class numeric dunder dispatch for math.ceil / math.floor /

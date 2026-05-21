@@ -65,6 +65,7 @@ var stdlibModules = map[string]stdlibModule{
 					"commonprefix": {GoFunc: "__gopy_path_commonprefix", Helper: helperPathCommonprefix, RetKind: "str"},
 					"samefile":     {GoFunc: "__gopy_path_samefile", GoImport: "os", Helper: helperPathSamefile, RetKind: "bool"},
 					"isabs":        {GoFunc: "filepath.IsAbs", GoImport: "path/filepath", RetKind: "bool"},
+					"lexists":      {GoFunc: "__gopy_path_lexists", GoImport: "os", Helper: helperPathLexists, RetKind: "bool"},
 				},
 			},
 		},
@@ -125,6 +126,21 @@ var stdlibModules = map[string]stdlibModule{
 			"dist":      {GoFunc: "__gopy_math_dist", GoImport: "math", Helper: helperMathDist, RetKind: "float"},
 			"prod":      {GoFunc: "__gopy_math_prod", Helper: helperMathProd, RetKind: "int"},
 			"remainder": {GoFunc: "math.Remainder", GoImport: "math", RetKind: "float"},
+			"asin":      {GoFunc: "math.Asin", GoImport: "math"},
+			"acos":      {GoFunc: "math.Acos", GoImport: "math"},
+			"sinh":      {GoFunc: "math.Sinh", GoImport: "math"},
+			"cosh":      {GoFunc: "math.Cosh", GoImport: "math"},
+			"tanh":      {GoFunc: "math.Tanh", GoImport: "math"},
+			"asinh":     {GoFunc: "math.Asinh", GoImport: "math"},
+			"acosh":     {GoFunc: "math.Acosh", GoImport: "math"},
+			"atanh":     {GoFunc: "math.Atanh", GoImport: "math"},
+			"expm1":     {GoFunc: "math.Expm1", GoImport: "math"},
+			"log1p":     {GoFunc: "math.Log1p", GoImport: "math"},
+			"erf":       {GoFunc: "math.Erf", GoImport: "math"},
+			"erfc":      {GoFunc: "math.Erfc", GoImport: "math"},
+			"gamma":     {GoFunc: "math.Gamma", GoImport: "math"},
+			"lgamma":    {GoFunc: "__gopy_math_lgamma", GoImport: "math", Helper: helperMathLgamma},
+			"isclose":   {GoFunc: "__gopy_math_isclose", GoImport: "math", Helper: helperMathIsclose, RetKind: "bool"},
 		},
 	},
 	"hashlib": {
@@ -186,6 +202,7 @@ var stdlibModules = map[string]stdlibModule{
 			"octdigits":       {GoExpr: `"01234567"`},
 			"punctuation":     {GoExpr: "\"!\\\"#$%&'()*+,-./:;<=>?@[\\\\]^_`{|}~\""},
 			"whitespace":      {GoExpr: `" \t\n\r\f\v"`},
+			"printable":       {GoExpr: "\"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\\\"#$%&'()*+,-./:;<=>?@[\\\\]^_`{|}~ \\t\\n\\r\\x0b\\x0c\""},
 		},
 		Funcs: map[string]stdlibFunc{
 			"Template": {GoFunc: "__gopy_string_template_new", Helper: helperStringTemplateNew, RetTag: "__Template", ExtraHelpers: map[string]string{"__Template": helperStringTemplateType}, HelperImports: []string{"strings", "fmt"}},
@@ -347,7 +364,10 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"bisect_left":  {GoFunc: "__gopy_bisect_left_unused"},
 			"bisect_right": {GoFunc: "__gopy_bisect_right_unused"},
+			"bisect":       {GoFunc: "__gopy_bisect_right_unused"},
 			"insort":       {GoFunc: "__gopy_insort_unused"},
+			"insort_left":  {GoFunc: "__gopy_insort_unused"},
+			"insort_right": {GoFunc: "__gopy_insort_unused"},
 		},
 	},
 	"itertools": {
@@ -1764,6 +1784,33 @@ const helperMathGcd = `func __gopy_math_gcd(a, b int64) int64 {
 	return a
 }`
 
+const helperMathLgamma = `func __gopy_math_lgamma(x float64) float64 { v, _ := math.Lgamma(x); return v }`
+
+// helperMathIsclose mirrors math.isclose: |a-b| <= max(rel_tol*max(|a|,|b|), abs_tol).
+// rel_tol defaults to 1e-09, abs_tol defaults to 0.0.
+const helperMathIsclose = `func __gopy_math_isclose(args ...float64) bool {
+	if len(args) < 2 {
+		return false
+	}
+	a, b := args[0], args[1]
+	relTol := 1e-09
+	absTol := 0.0
+	if len(args) >= 3 {
+		relTol = args[2]
+	}
+	if len(args) >= 4 {
+		absTol = args[3]
+	}
+	if a == b {
+		return true
+	}
+	if math.IsInf(a, 0) || math.IsInf(b, 0) {
+		return false
+	}
+	diff := math.Abs(a - b)
+	return diff <= math.Max(relTol*math.Max(math.Abs(a), math.Abs(b)), absTol)
+}`
+
 const helperMathLcm = `func __gopy_math_lcm(a, b int64) int64 {
 	if a == 0 || b == 0 {
 		return 0
@@ -2583,6 +2630,14 @@ const helperPathSamefile = `func __gopy_path_samefile(a, b string) bool {
 		return false
 	}
 	return os.SameFile(ai, bi)
+}`
+
+// helperPathLexists mirrors os.path.lexists: true if the path exists,
+// including broken symlinks (Lstat doesn't follow). os.path.exists by
+// contrast returns false for dangling symlinks.
+const helperPathLexists = `func __gopy_path_lexists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
 }`
 
 // helperTimedeltaType mirrors Python's str(timedelta(days=...)) output
