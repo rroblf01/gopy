@@ -2554,10 +2554,21 @@ func (g *gen) fstring(f *ir.FStr) error {
 	var args []fstrArg
 	for _, p := range f.Parts {
 		if p.Expr != nil {
-			if p.Spec != "" || p.Conv != 0 {
-				// Spec or conversion present — route through the runtime
-				// format spec helper. Placeholder becomes %s since the
-				// helper returns a fully-formatted string.
+			// User-class __format__ always wins when the expression is a
+			// TyNamed instance with the dunder defined — CPython calls
+			// __format__ even for the empty spec.
+			hasUserFormat := false
+			if p.Conv == 0 {
+				if t := g.effectiveType(p.Expr); t != nil && t.Kind == ir.TyNamed {
+					if fn := g.lookupMethod(t.Name, "__format__"); fn != nil {
+						_ = fn
+						hasUserFormat = true
+					}
+				}
+			}
+			if p.Spec != "" || p.Conv != 0 || hasUserFormat {
+				// Spec / conv / user dispatch all yield a fully-formatted
+				// string. Placeholder becomes %s.
 				fmtBuf.WriteString("%s")
 			} else {
 				fmtBuf.WriteString("%v")
@@ -2570,6 +2581,23 @@ func (g *gen) fstring(f *ir.FStr) error {
 	g.writef("fmt.Sprintf(%s", strconv.Quote(fmtBuf.String()))
 	for _, a := range args {
 		g.writef(", ")
+		// User-class __format__ dispatch: `f"{obj:spec}"` →
+		// `obj.Format(spec)`. The conversion (!s / !r) still applies
+		// first when present, so chain in the same order CPython does.
+		// Empty spec also routes here so the dunder runs even for
+		// `f"{obj}"`, matching CPython.
+		if a.conv == 0 {
+			if t := g.effectiveType(a.expr); t != nil && t.Kind == ir.TyNamed {
+				if fn := g.lookupMethod(t.Name, "__format__"); fn != nil {
+					_ = fn
+					if err := g.expr(a.expr); err != nil {
+						return err
+					}
+					g.writef(".Format(%s)", strconv.Quote(a.spec))
+					continue
+				}
+			}
+		}
 		if a.spec != "" || a.conv != 0 {
 			// __gopy_fmt_spec is defined alongside __gopy_str_format in the
 			// same helper const, so adding one pulls in both. Helper body
@@ -2707,6 +2735,31 @@ func (g *gen) call(c *ir.Call) error {
 			if len(segs) >= 2 {
 				modPath := strings.Join(segs[:len(segs)-1], ".")
 				method := segs[len(segs)-1]
+				// User-class numeric dunder dispatch for ceil/floor/trunc
+				// imported via `from math import ceil`.
+				if modPath == "math" && len(c.Args) == 1 {
+					var dunder string
+					switch method {
+					case "ceil":
+						dunder = "__ceil__"
+					case "floor":
+						dunder = "__floor__"
+					case "trunc":
+						dunder = "__trunc__"
+					}
+					if dunder != "" {
+						if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+							if fn := g.lookupMethod(t.Name, dunder); fn != nil {
+								_ = fn
+								if err := g.expr(c.Args[0]); err != nil {
+									return err
+								}
+								g.writef(".%s()", exportedDunder(dunder))
+								return nil
+							}
+						}
+					}
+				}
 				if fn := lookupStdlibFunc(modPath, method); fn != nil {
 					if fn.GoImport != "" {
 						g.addImport(fn.GoImport)
@@ -3606,6 +3659,33 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinBisect(synth, true)
 		case "bisect.insort":
 			return g.builtinInsort(synth)
+		}
+		// User-class numeric dunder dispatch for math.ceil / math.floor /
+		// math.trunc: when the lone argument is a user class instance with
+		// the corresponding dunder, route through the method instead of
+		// the math stdlib helper.
+		if path == "math" && len(m.Args) == 1 {
+			var dunder string
+			switch m.Method {
+			case "ceil":
+				dunder = "__ceil__"
+			case "floor":
+				dunder = "__floor__"
+			case "trunc":
+				dunder = "__trunc__"
+			}
+			if dunder != "" {
+				if t := g.effectiveType(m.Args[0]); t != nil && t.Kind == ir.TyNamed {
+					if fn := g.lookupMethod(t.Name, dunder); fn != nil {
+						_ = fn
+						if err := g.expr(m.Args[0]); err != nil {
+							return err
+						}
+						g.writef(".%s()", exportedDunder(dunder))
+						return nil
+					}
+				}
+			}
 		}
 		if fn := lookupStdlibFunc(path, m.Method); fn != nil {
 			if fn.GoImport != "" {
@@ -6238,6 +6318,16 @@ func exportedDunder(name string) string {
 		return "Irshift"
 	case "__imatmul__":
 		return "Imatmul"
+	case "__format__":
+		return "Format"
+	case "__round__":
+		return "Round"
+	case "__ceil__":
+		return "Ceil"
+	case "__floor__":
+		return "Floor"
+	case "__trunc__":
+		return "Trunc"
 	}
 	return name
 }
@@ -8172,6 +8262,36 @@ func (g *gen) builtinAbs(c *ir.Call) error {
 func (g *gen) builtinRound(c *ir.Call) error {
 	if len(c.Keywords) != 0 {
 		return fmt.Errorf("round() takes no keyword arguments")
+	}
+	// User-class __round__: `round(obj)` → `obj.Round()`,
+	// `round(obj, n)` → `obj.Round(n)`. When the method takes an `n`
+	// parameter and the call omits it, fill in the parameter's declared
+	// default (or 0) so the Go signature stays satisfied.
+	if len(c.Args) >= 1 {
+		if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+			if fn := g.lookupMethod(t.Name, "__round__"); fn != nil {
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(".Round(")
+				switch {
+				case len(c.Args) == 2:
+					if err := g.expr(c.Args[1]); err != nil {
+						return err
+					}
+				case len(fn.Params) >= 1:
+					if fn.Params[0].Default != nil {
+						if err := g.expr(fn.Params[0].Default); err != nil {
+							return err
+						}
+					} else {
+						g.writef("int64(0)")
+					}
+				}
+				g.writef(")")
+				return nil
+			}
+		}
 	}
 	if len(c.Args) == 2 {
 		g.addImport("math")
