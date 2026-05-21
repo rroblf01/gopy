@@ -285,6 +285,39 @@ var stdlibModules = map[string]stdlibModule{
 			"guess_extension": {GoFunc: "__gopy_mimetypes_guess_ext", Helper: helperMimetypesGuessExt, HelperImports: []string{"mime"}, RetKind: "str"},
 		},
 	},
+	"pickle": {
+		Funcs: map[string]stdlibFunc{
+			"dumps": {GoFunc: "__gopy_pickle_dumps", Helper: helperPickleDumps, HelperImports: []string{"encoding/json"}, RetKind: "str"},
+			"loads": {GoFunc: "__gopy_pickle_loads", Helper: helperPickleLoads, HelperImports: []string{"encoding/json"}},
+		},
+	},
+	"configparser": {
+		Funcs: map[string]stdlibFunc{
+			"ConfigParser": {GoFunc: "__gopy_configparser_new", Helper: helperConfigParserNew, RetTag: "__ConfigParser", ExtraHelpers: map[string]string{"__ConfigParser": helperConfigParserType}, HelperImports: []string{"bufio", "os", "strings"}},
+		},
+	},
+	"email": {
+		Subs: map[string]stdlibModule{
+			"utils": {
+				Funcs: map[string]stdlibFunc{
+					"formatdate":   {GoFunc: "__gopy_email_formatdate", Helper: helperEmailFormatdate, HelperImports: []string{"time"}, RetKind: "str"},
+					"parsedate":    {GoFunc: "__gopy_email_parsedate", Helper: helperEmailParsedate, HelperImports: []string{"time"}},
+					"format_datetime": {GoFunc: "__gopy_email_format_datetime", Helper: helperEmailFormatDatetime, HelperImports: []string{"time"}, RetKind: "str"},
+				},
+			},
+		},
+	},
+	"argparse": {
+		Funcs: map[string]stdlibFunc{
+			"ArgumentParser": {GoFunc: "__gopy_argparse_new", Helper: helperArgparseNew, RetTag: "__ArgParser", ExtraHelpers: map[string]string{"__ArgParser": helperArgparseType}, HelperImports: []string{"os", "strconv", "strings", "fmt"}},
+		},
+	},
+	"io": {
+		Funcs: map[string]stdlibFunc{
+			"StringIO": {GoFunc: "__gopy_io_stringio_new", Helper: helperIOStringIONew, RetTag: "__StringIO", ExtraHelpers: map[string]string{"__StringIO": helperIOStringIOType}},
+			"BytesIO":  {GoFunc: "__gopy_io_bytesio_new", Helper: helperIOBytesIONew, RetTag: "__StringIO", ExtraHelpers: map[string]string{"__StringIO": helperIOStringIOType}},
+		},
+	},
 	"weakref": {
 		Funcs: map[string]stdlibFunc{
 			// gopy has no notion of weak references (Go GC handles it).
@@ -371,6 +404,7 @@ var stdlibModules = map[string]stdlibModule{
 			"gethostname":   {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
 			"getfqdn":       {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
 			"gethostbyname": {GoFunc: "__gopy_socket_gethostbyname", Helper: helperSocketGethostbyname, HelperImports: []string{"net"}, RetKind: "str"},
+			"gethostbyaddr": {GoFunc: "__gopy_socket_gethostbyaddr", Helper: helperSocketGethostbyaddr, HelperImports: []string{"net"}},
 			"socket":        {GoFunc: "__gopy_socket_new", Helper: helperSocketNew, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 			"create_connection": {GoFunc: "__gopy_socket_create_conn", Helper: helperSocketCreateConn, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 		},
@@ -441,6 +475,7 @@ var stdlibModules = map[string]stdlibModule{
 			"heappushpop": {GoFunc: "__gopy_heappushpop_unused"},
 			"nsmallest":   {GoFunc: "__gopy_nsmallest_unused"},
 			"nlargest":    {GoFunc: "__gopy_nlargest_unused"},
+			"merge":       {GoFunc: "__gopy_heapq_merge_unused"},
 		},
 	},
 	"bisect": {
@@ -544,7 +579,11 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			// typing.cast at runtime is the identity — dispatched in
 			// transpile.go's call() so the second arg passes through.
-			"cast": {GoFunc: "__gopy_typing_cast_unused"},
+			"cast":           {GoFunc: "__gopy_typing_cast_unused"},
+			"get_type_hints": {GoFunc: "__gopy_typing_hints", Helper: helperTypingHints},
+			"get_args":       {GoFunc: "__gopy_typing_args", Helper: helperTypingArgs},
+			"get_origin":     {GoFunc: "__gopy_typing_origin", Helper: helperTypingOrigin},
+			"TYPE_CHECKING":  {GoFunc: "__gopy_typing_typecheck_unused"},
 		},
 	},
 	"threading": {
@@ -1672,6 +1711,22 @@ const helperSocketGethostbyname = `func __gopy_socket_gethostbyname(host string)
 	return ips[0]
 }`
 
+// helperSocketGethostbyaddr returns a 3-tuple analog (hostname, aliases, ips)
+// where aliases is always empty (Go's net.LookupAddr returns no aliases).
+const helperSocketGethostbyaddr = `func __gopy_socket_gethostbyaddr(addr string) []any {
+	names, err := net.LookupAddr(addr)
+	if err != nil || len(names) == 0 {
+		panic(NewException("herror: " + addr))
+	}
+	host := names[0]
+	if len(host) > 0 && host[len(host)-1] == '.' {
+		host = host[:len(host)-1]
+	}
+	aliases := []string{}
+	ips := []string{addr}
+	return []any{host, aliases, ips}
+}`
+
 // helperSocketType is a minimal TCP-only socket wrapper. UDP / Unix
 // streams aren't supported. .Connect((host, port)) dials; .Send / .Recv
 // move bytes as strings (gopy's bytes shim). Server side covers
@@ -1914,6 +1969,348 @@ const helperShutilWhich = `func __gopy_shutil_which(cmd string) string {
 // is callable and yields the wrapped object on invocation.
 const helperWeakrefRef = `func __gopy_weakref_ref(obj any) func() any {
 	return func() any { return obj }
+}`
+
+// helperIOStringIOType — minimal StringIO/BytesIO: gopy uses string
+// for both so a single backing type works. Writes happen at the
+// current position, overlaying existing content (matching CPython's
+// io.StringIO semantics where the cursor advances after write/read).
+const helperIOStringIOType = `type __StringIO struct {
+	data []byte
+	pos  int
+}
+
+func (s *__StringIO) Write(data string) int64 {
+	bs := []byte(data)
+	end := s.pos + len(bs)
+	if end > len(s.data) {
+		s.data = append(s.data, make([]byte, end-len(s.data))...)
+	}
+	copy(s.data[s.pos:end], bs)
+	s.pos = end
+	return int64(len(bs))
+}
+
+func (s *__StringIO) Getvalue() string { return string(s.data) }
+
+func (s *__StringIO) Read(args ...int64) string {
+	if s.pos >= len(s.data) {
+		return ""
+	}
+	rest := s.data[s.pos:]
+	if len(args) > 0 && args[0] >= 0 && int(args[0]) < len(rest) {
+		rest = rest[:args[0]]
+	}
+	s.pos += len(rest)
+	return string(rest)
+}
+
+func (s *__StringIO) Seek(args ...int64) int64 {
+	if len(args) > 0 {
+		s.pos = int(args[0])
+	}
+	return int64(s.pos)
+}
+
+func (s *__StringIO) Tell() int64 { return int64(s.pos) }
+
+func (s *__StringIO) Truncate(args ...int64) int64 {
+	n := len(s.data)
+	if len(args) > 0 {
+		n = int(args[0])
+	}
+	if n < len(s.data) {
+		s.data = s.data[:n]
+	}
+	return int64(n)
+}
+
+func (s *__StringIO) Close() {}
+
+func (s *__StringIO) Enter() *__StringIO { return s }
+func (s *__StringIO) Exit(_, _, _ any)   { s.Close() }`
+
+const helperIOStringIONew = `func __gopy_io_stringio_new(args ...string) *__StringIO {
+	s := &__StringIO{}
+	if len(args) > 0 {
+		s.data = []byte(args[0])
+	}
+	return s
+}`
+
+const helperIOBytesIONew = `func __gopy_io_bytesio_new(args ...string) *__StringIO {
+	s := &__StringIO{}
+	if len(args) > 0 {
+		s.data = []byte(args[0])
+	}
+	return s
+}`
+
+// helperTypingHints / Args / Origin — gopy doesn't carry runtime type
+// info, so reflection-style queries return empty results. Shape-
+// compatible for libraries that just probe and fall back.
+const helperTypingHints = `func __gopy_typing_hints(args ...any) map[string]any {
+	return map[string]any{}
+}`
+
+const helperTypingArgs = `func __gopy_typing_args(args ...any) []any {
+	return []any{}
+}`
+
+const helperTypingOrigin = `func __gopy_typing_origin(args ...any) any {
+	return nil
+}`
+
+// helperArgparseType — minimal ArgumentParser. add_argument records
+// flag specs; parse_args walks os.Args[1:] applying defaults, parsing
+// `--key=value` and `--key value`, plus positional args in order.
+// parse_args() returns a *__ArgNamespace; access via .Get(name).
+// CPython's attribute access (`args.name`) is approximated by .Get;
+// gopy users typically write `args.get("name")`.
+const helperArgparseType = `type __ArgSpec struct {
+	Name    string
+	Short   string
+	IsFlag  bool
+	Default any
+	Action  string
+	IsPos   bool
+}
+
+type __ArgParser struct {
+	Specs []__ArgSpec
+}
+
+type __ArgNamespace struct {
+	Values map[string]any
+}
+
+func (n *__ArgNamespace) Get(name string) any { return n.Values[name] }
+
+func (p *__ArgParser) AddArgument(args ...any) {
+	if len(args) == 0 {
+		return
+	}
+	spec := __ArgSpec{}
+	first, _ := args[0].(string)
+	if strings.HasPrefix(first, "--") {
+		spec.Name = first[2:]
+	} else if strings.HasPrefix(first, "-") {
+		spec.Short = first[1:]
+		if len(args) > 1 {
+			if alt, ok := args[1].(string); ok && strings.HasPrefix(alt, "--") {
+				spec.Name = alt[2:]
+			}
+		}
+	} else {
+		spec.IsPos = true
+		spec.Name = first
+	}
+	if spec.Name == "" && spec.Short != "" {
+		spec.Name = spec.Short
+	}
+	p.Specs = append(p.Specs, spec)
+}
+
+func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
+	var argv []string
+	if len(args) > 0 {
+		switch v := args[0].(type) {
+		case []string:
+			argv = v
+		case []any:
+			for _, x := range v {
+				argv = append(argv, fmt.Sprintf("%v", x))
+			}
+		}
+	} else {
+		argv = os.Args[1:]
+	}
+	ns := &__ArgNamespace{Values: map[string]any{}}
+	for _, s := range p.Specs {
+		if s.Default != nil {
+			ns.Values[s.Name] = s.Default
+		} else if s.IsFlag {
+			ns.Values[s.Name] = false
+		} else {
+			ns.Values[s.Name] = ""
+		}
+	}
+	posIdx := 0
+	posSpecs := []__ArgSpec{}
+	for _, s := range p.Specs {
+		if s.IsPos {
+			posSpecs = append(posSpecs, s)
+		}
+	}
+	i := 0
+	for i < len(argv) {
+		tok := argv[i]
+		if strings.HasPrefix(tok, "--") {
+			eq := strings.Index(tok, "=")
+			var name, val string
+			if eq >= 0 {
+				name = tok[2:eq]
+				val = tok[eq+1:]
+			} else {
+				name = tok[2:]
+				if i+1 < len(argv) {
+					val = argv[i+1]
+					i++
+				}
+			}
+			if v, err := strconv.ParseInt(val, 10, 64); err == nil {
+				ns.Values[name] = v
+			} else {
+				ns.Values[name] = val
+			}
+		} else if strings.HasPrefix(tok, "-") && len(tok) >= 2 {
+			short := tok[1:]
+			for _, s := range p.Specs {
+				if s.Short == short {
+					if i+1 < len(argv) {
+						ns.Values[s.Name] = argv[i+1]
+						i++
+					}
+					break
+				}
+			}
+		} else if posIdx < len(posSpecs) {
+			ns.Values[posSpecs[posIdx].Name] = tok
+			posIdx++
+		}
+		i++
+	}
+	return ns
+}`
+
+const helperArgparseNew = `func __gopy_argparse_new(args ...any) *__ArgParser { return &__ArgParser{} }`
+
+// helperConfigParserType — minimal INI parser. .read(path) loads a
+// file into nested maps; .get(section, key) returns the value.
+// .sections() / .has_section / .has_option handle membership queries.
+const helperConfigParserType = `type __ConfigParser struct {
+	data map[string]map[string]string
+}
+
+func (p *__ConfigParser) ensure() {
+	if p.data == nil {
+		p.data = map[string]map[string]string{}
+	}
+}
+
+func (p *__ConfigParser) Read(path string) []string {
+	p.ensure()
+	f, err := os.Open(path)
+	if err != nil {
+		return []string{}
+	}
+	defer f.Close()
+	section := "DEFAULT"
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = line[1 : len(line)-1]
+			if _, ok := p.data[section]; !ok {
+				p.data[section] = map[string]string{}
+			}
+			continue
+		}
+		eq := strings.Index(line, "=")
+		if eq < 0 {
+			continue
+		}
+		k := strings.TrimSpace(line[:eq])
+		v := strings.TrimSpace(line[eq+1:])
+		if _, ok := p.data[section]; !ok {
+			p.data[section] = map[string]string{}
+		}
+		p.data[section][k] = v
+	}
+	return []string{path}
+}
+
+func (p *__ConfigParser) Get(section, key string) string {
+	if s, ok := p.data[section]; ok {
+		return s[key]
+	}
+	return ""
+}
+
+func (p *__ConfigParser) Sections() []string {
+	out := []string{}
+	for k := range p.data {
+		if k != "DEFAULT" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func (p *__ConfigParser) Has_section(s string) bool {
+	_, ok := p.data[s]
+	return ok && s != "DEFAULT"
+}
+
+func (p *__ConfigParser) Has_option(section, key string) bool {
+	if s, ok := p.data[section]; ok {
+		_, k := s[key]
+		return k
+	}
+	return false
+}`
+
+const helperConfigParserNew = `func __gopy_configparser_new(args ...any) *__ConfigParser {
+	return &__ConfigParser{data: map[string]map[string]string{}}
+}`
+
+// helperEmailFormatdate — emit an RFC 2822 date string from a Unix
+// timestamp (or current time when no arg given).
+const helperEmailFormatdate = `func __gopy_email_formatdate(args ...float64) string {
+	var t time.Time
+	if len(args) > 0 {
+		t = time.Unix(int64(args[0]), 0).UTC()
+	} else {
+		t = time.Now().UTC()
+	}
+	return t.Format("Mon, 02 Jan 2006 15:04:05 -0700")
+}`
+
+const helperEmailFormatDatetime = `func __gopy_email_format_datetime(args ...any) string {
+	return time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 -0700")
+}`
+
+// helperPickleDumps / Loads — gopy uses encoding/json as a portable
+// stand-in for Python's pickle. Round-trips primitives, lists, dicts,
+// and JSON-friendly nested structures. Class instances aren't
+// auto-serialized. Output is text JSON rather than pickle's binary
+// protocol — incompatible at the wire format but functionally usable
+// for cross-process state passing within gopy programs.
+const helperPickleDumps = `func __gopy_pickle_dumps(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(NewException("pickle.dumps: " + err.Error()))
+	}
+	return string(b)
+}`
+
+const helperPickleLoads = `func __gopy_pickle_loads(s string) any {
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		panic(NewException("pickle.loads: " + err.Error()))
+	}
+	return v
+}`
+
+const helperEmailParsedate = `func __gopy_email_parsedate(s string) []any {
+	t, err := time.Parse("Mon, 02 Jan 2006 15:04:05 -0700", s)
+	if err != nil {
+		return []any{}
+	}
+	return []any{int64(t.Year()), int64(t.Month()), int64(t.Day()), int64(t.Hour()), int64(t.Minute()), int64(t.Second()), int64(0), int64(1), int64(-1)}
 }`
 
 const helperPprint = `func __gopy_pprint(args ...any) {

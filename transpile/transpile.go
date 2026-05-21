@@ -3135,6 +3135,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinNsmallest(c, false)
 			case "heapq.nlargest":
 				return g.builtinNsmallest(c, true)
+			case "heapq.merge":
+				return g.builtinHeapqMerge(c)
 			case "bisect.bisect_left":
 				return g.builtinBisect(c, false)
 			case "bisect.bisect_right", "bisect.bisect":
@@ -3949,6 +3951,29 @@ var taggedMethodRename = map[string]map[string]string{
 		"empty": "Empty",
 		"full":  "Full",
 	},
+	"__ArgParser": {
+		"add_argument": "AddArgument",
+		"parse_args":   "ParseArgs",
+	},
+	"__ConfigParser": {
+		"read":        "Read",
+		"get":         "Get",
+		"sections":    "Sections",
+		"has_section": "Has_section",
+		"has_option":  "Has_option",
+	},
+	"__ArgNamespace": {
+		"get": "Get",
+	},
+	"__StringIO": {
+		"write":    "Write",
+		"getvalue": "Getvalue",
+		"read":     "Read",
+		"seek":     "Seek",
+		"tell":     "Tell",
+		"truncate": "Truncate",
+		"close":    "Close",
+	},
 	"__Socket": {
 		"connect":    "Connect",
 		"bind":       "Bind",
@@ -4155,6 +4180,8 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinNsmallest(synth, false)
 		case "heapq.nlargest":
 			return g.builtinNsmallest(synth, true)
+		case "heapq.merge":
+			return g.builtinHeapqMerge(synth)
 		case "bisect.bisect_left":
 			return g.builtinBisect(synth, false)
 		case "bisect.bisect_right", "bisect.bisect":
@@ -7638,6 +7665,53 @@ func (g *gen) builtinCount(c *ir.Call) error {
 // returns the first n elements. `largest=true` reverses the sort to give
 // the n largest. Matches CPython's heapq.nsmallest / nlargest output for
 // typed int/float/str slices.
+// builtinHeapqMerge emits `heapq.merge(a, b)` for two pre-sorted slices
+// as a merged-output `[]any`. CPython supports N inputs and a key=; gopy
+// supports 2 unkeyed inputs and uses a generic less-than via fmt-string
+// compare when types disagree. The result is eagerly materialized.
+func (g *gen) builtinHeapqMerge(c *ir.Call) error {
+	if len(c.Args) != 2 {
+		return fmt.Errorf("heapq.merge() takes (a, b)")
+	}
+	g.writef("func() []any {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__a := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__b := ")
+	if err := g.expr(c.Args[1]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := make([]any, 0, len(__a)+len(__b))\n")
+	g.writeIndent()
+	g.writef("__i, __j := 0, 0\n")
+	g.writeIndent()
+	g.addImport("fmt")
+	g.writef("for __i < len(__a) && __j < len(__b) {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("if fmt.Sprintf(\"%%v\", __a[__i]) <= fmt.Sprintf(\"%%v\", __b[__j]) { __out = append(__out, __a[__i]); __i++ } else { __out = append(__out, __b[__j]); __j++ }\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("for __i < len(__a) { __out = append(__out, __a[__i]); __i++ }\n")
+	g.writeIndent()
+	g.writef("for __j < len(__b) { __out = append(__out, __b[__j]); __j++ }\n")
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 func (g *gen) builtinNsmallest(c *ir.Call, largest bool) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
 		return fmt.Errorf("heapq.%s() takes (n, iterable)", map[bool]string{false: "nsmallest", true: "nlargest"}[largest])
