@@ -358,11 +358,14 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"socket": {
 		Attrs: map[string]stdlibAttr{
-			"AF_INET":     {GoExpr: "int64(2)"},
-			"AF_INET6":    {GoExpr: "int64(10)"},
-			"AF_UNIX":     {GoExpr: "int64(1)"},
-			"SOCK_STREAM": {GoExpr: "int64(1)"},
-			"SOCK_DGRAM":  {GoExpr: "int64(2)"},
+			"AF_INET":      {GoExpr: "int64(2)"},
+			"AF_INET6":     {GoExpr: "int64(10)"},
+			"AF_UNIX":      {GoExpr: "int64(1)"},
+			"SOCK_STREAM":  {GoExpr: "int64(1)"},
+			"SOCK_DGRAM":   {GoExpr: "int64(2)"},
+			"SOL_SOCKET":   {GoExpr: "int64(1)"},
+			"SO_REUSEADDR": {GoExpr: "int64(2)"},
+			"SO_KEEPALIVE": {GoExpr: "int64(9)"},
 		},
 		Funcs: map[string]stdlibFunc{
 			"gethostname":   {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
@@ -1671,9 +1674,12 @@ const helperSocketGethostbyname = `func __gopy_socket_gethostbyname(host string)
 
 // helperSocketType is a minimal TCP-only socket wrapper. UDP / Unix
 // streams aren't supported. .Connect((host, port)) dials; .Send / .Recv
-// move bytes as strings (gopy's bytes shim).
+// move bytes as strings (gopy's bytes shim). Server side covers
+// .Bind, .Listen, .Accept (returns a connected __Socket).
 const helperSocketType = `type __Socket struct {
-	conn net.Conn
+	conn     net.Conn
+	listener net.Listener
+	bindAddr string
 }
 
 func (s *__Socket) Connect(addr []any) {
@@ -1687,6 +1693,39 @@ func (s *__Socket) Connect(addr []any) {
 		panic(NewException("ConnectionRefusedError: " + err.Error()))
 	}
 	s.conn = c
+}
+
+func (s *__Socket) Bind(addr []any) {
+	if len(addr) != 2 {
+		panic(NewException("socket.bind: expected (host, port)"))
+	}
+	host := fmt.Sprintf("%v", addr[0])
+	port := fmt.Sprintf("%v", addr[1])
+	s.bindAddr = host + ":" + port
+}
+
+func (s *__Socket) Listen(args ...int64) {
+	if s.bindAddr == "" {
+		panic(NewException("socket.listen: must bind() first"))
+	}
+	l, err := net.Listen("tcp", s.bindAddr)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	s.listener = l
+}
+
+func (s *__Socket) Accept() []any {
+	if s.listener == nil {
+		panic(NewException("socket.accept: must listen() first"))
+	}
+	c, err := s.listener.Accept()
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	client := &__Socket{conn: c}
+	remote := []any{c.RemoteAddr().String(), int64(0)}
+	return []any{client, remote}
 }
 
 func (s *__Socket) Send(data string) int64 {
@@ -1721,7 +1760,14 @@ func (s *__Socket) Close() {
 		s.conn.Close()
 		s.conn = nil
 	}
+	if s.listener != nil {
+		s.listener.Close()
+		s.listener = nil
+	}
 }
+
+func (s *__Socket) Setsockopt(args ...any) {}
+func (s *__Socket) Settimeout(args ...any) {}
 
 func (s *__Socket) Enter() *__Socket { return s }
 func (s *__Socket) Exit(_, _, _ any) { s.Close() }`

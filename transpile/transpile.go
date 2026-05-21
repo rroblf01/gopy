@@ -3950,11 +3950,16 @@ var taggedMethodRename = map[string]map[string]string{
 		"full":  "Full",
 	},
 	"__Socket": {
-		"connect": "Connect",
-		"send":    "Send",
-		"sendall": "Sendall",
-		"recv":    "Recv",
-		"close":   "Close",
+		"connect":    "Connect",
+		"bind":       "Bind",
+		"listen":     "Listen",
+		"accept":     "Accept",
+		"send":       "Send",
+		"sendall":    "Sendall",
+		"recv":       "Recv",
+		"close":      "Close",
+		"setsockopt": "Setsockopt",
+		"settimeout": "Settimeout",
 	},
 }
 
