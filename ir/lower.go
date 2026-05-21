@@ -1447,6 +1447,15 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		case "Name":
 			name := tgt.Str("id")
 			decl := sc.declare(name, ty)
+			if val == nil {
+				// `name: T` with no initializer — register the type in
+				// the local scope so later references see it, but don't
+				// emit a statement (Go forbids declaring a typed var
+				// without using it, and Python's bare annotation is a
+				// declaration-only hint).
+				_ = decl
+				return nil, nil
+			}
 			return &Assign{Target: name, Ty: ty, Value: val, Decl: decl}, nil
 		case "Attribute":
 			// `self.items: list[T] = []` etc. Treat as a plain attribute

@@ -8488,6 +8488,20 @@ func (g *gen) builtinAbs(c *ir.Call) error {
 		}
 	}
 	t := c.Args[0].TypeOf()
+	if t != nil && t.Kind == ir.TyComplex {
+		// abs(complex) → magnitude (float64) via Go's complex builtins.
+		g.addImport("math")
+		g.writef("math.Hypot(real(")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("), imag(")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("))")
+		return nil
+	}
 	if t == nil || (t.Kind != ir.TyInt && t.Kind != ir.TyFloat) {
 		return fmt.Errorf("abs() requires int or float, got %s", g.goType(t))
 	}

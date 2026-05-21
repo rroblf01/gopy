@@ -235,6 +235,38 @@ var stdlibModules = map[string]stdlibModule{
 			"mkstemp":     {GoFunc: "__gopy_tempfile_mkstemp", GoImport: "os", Helper: helperTempfileMkstemp},
 		},
 	},
+	"cmath": {
+		Attrs: map[string]stdlibAttr{
+			"pi":   {GoExpr: "math.Pi", GoImport: "math"},
+			"e":    {GoExpr: "math.E", GoImport: "math"},
+			"tau":  {GoExpr: "math.Pi * 2", GoImport: "math"},
+			"inf":  {GoExpr: "math.Inf(1)", GoImport: "math"},
+			"nan":  {GoExpr: "math.NaN()", GoImport: "math"},
+			"infj": {GoExpr: "complex(0, math.Inf(1))", GoImport: "math"},
+			"nanj": {GoExpr: "complex(0, math.NaN())", GoImport: "math"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"sqrt":    {GoFunc: "__gopy_cmath_sqrt", Helper: helperCmathSqrt, HelperImports: []string{"math/cmplx"}},
+			"exp":     {GoFunc: "cmplx.Exp", GoImport: "math/cmplx"},
+			"log":     {GoFunc: "cmplx.Log", GoImport: "math/cmplx"},
+			"log10":   {GoFunc: "cmplx.Log10", GoImport: "math/cmplx"},
+			"sin":     {GoFunc: "cmplx.Sin", GoImport: "math/cmplx"},
+			"cos":     {GoFunc: "cmplx.Cos", GoImport: "math/cmplx"},
+			"tan":     {GoFunc: "cmplx.Tan", GoImport: "math/cmplx"},
+			"asin":    {GoFunc: "cmplx.Asin", GoImport: "math/cmplx"},
+			"acos":    {GoFunc: "cmplx.Acos", GoImport: "math/cmplx"},
+			"atan":    {GoFunc: "cmplx.Atan", GoImport: "math/cmplx"},
+			"sinh":    {GoFunc: "cmplx.Sinh", GoImport: "math/cmplx"},
+			"cosh":    {GoFunc: "cmplx.Cosh", GoImport: "math/cmplx"},
+			"tanh":    {GoFunc: "cmplx.Tanh", GoImport: "math/cmplx"},
+			"phase":   {GoFunc: "__gopy_cmath_phase", Helper: helperCmathPhase, HelperImports: []string{"math"}, RetKind: "float"},
+			"polar":   {GoFunc: "__gopy_cmath_polar", Helper: helperCmathPolar, HelperImports: []string{"math"}},
+			"rect":    {GoFunc: "__gopy_cmath_rect", Helper: helperCmathRect, HelperImports: []string{"math"}},
+			"isnan":   {GoFunc: "cmplx.IsNaN", GoImport: "math/cmplx", RetKind: "bool"},
+			"isinf":   {GoFunc: "cmplx.IsInf", GoImport: "math/cmplx", RetKind: "bool"},
+			"isfinite": {GoFunc: "__gopy_cmath_isfinite", Helper: helperCmathIsfinite, HelperImports: []string{"math/cmplx"}, RetKind: "bool"},
+		},
+	},
 	"copy": {
 		Funcs: map[string]stdlibFunc{
 			"copy":     {GoFunc: "__gopy_copy_shallow", Helper: helperCopyShallow, HelperImports: []string{"encoding/json"}},
@@ -1785,6 +1817,22 @@ const helperMathGcd = `func __gopy_math_gcd(a, b int64) int64 {
 }`
 
 const helperMathLgamma = `func __gopy_math_lgamma(x float64) float64 { v, _ := math.Lgamma(x); return v }`
+
+const helperCmathSqrt = `func __gopy_cmath_sqrt(c complex128) complex128 { return cmplx.Sqrt(c) }`
+
+const helperCmathPhase = `func __gopy_cmath_phase(c complex128) float64 { return math.Atan2(imag(c), real(c)) }`
+
+const helperCmathPolar = `func __gopy_cmath_polar(c complex128) []any {
+	r := math.Hypot(real(c), imag(c))
+	phi := math.Atan2(imag(c), real(c))
+	return []any{r, phi}
+}`
+
+const helperCmathRect = `func __gopy_cmath_rect(r, phi float64) complex128 {
+	return complex(r*math.Cos(phi), r*math.Sin(phi))
+}`
+
+const helperCmathIsfinite = `func __gopy_cmath_isfinite(c complex128) bool { return !cmplx.IsInf(c) && !cmplx.IsNaN(c) }`
 
 // helperMathIsclose mirrors math.isclose: |a-b| <= max(rel_tol*max(|a|,|b|), abs_tol).
 // rel_tol defaults to 1e-09, abs_tol defaults to 0.0.
