@@ -883,7 +883,10 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			return &Type{Kind: TyBool}, nil
 		case "None":
 			return &Type{Kind: TyNone}, nil
-		case "Any", "Callable", "Iterable", "Iterator", "Sequence":
+		case "Any", "Callable", "Iterable", "Iterator", "Sequence",
+			"Mapping", "MutableMapping", "MutableSequence", "Collection",
+			"Hashable", "Reversible", "Container", "Sized",
+			"Final", "ClassVar", "TypeAlias", "Never", "NoReturn", "Self":
 			// typing bare aliases — lower to `any` so user code can pass
 			// values around without further annotation.
 			return &Type{Kind: TyAny}, nil
@@ -940,12 +943,54 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			// typing.Union[...] — same lowering as the `|` operator
 			// form: collapse to any. Components are not tracked.
 			return &Type{Kind: TyAny}, nil
-		case "List", "Iterable", "Sequence", "Set", "FrozenSet":
+		case "List", "Iterable", "Sequence", "Set", "FrozenSet",
+			"MutableSequence", "Collection", "Iterator", "Reversible":
 			elem, err := lowerAnnotation(n.Child("slice"))
 			if err != nil {
 				return nil, err
 			}
 			return &Type{Kind: TyList, Elem: elem}, nil
+		case "Final", "ClassVar", "Annotated":
+			// `Final[T]` / `ClassVar[T]` / `Annotated[T, ...]` carry T as
+			// the first subscript arg and metadata thereafter — gopy keeps
+			// only T, dropping the wrapper.
+			sl := n.Child("slice")
+			if sl == nil {
+				return &Type{Kind: TyAny}, nil
+			}
+			// Annotated takes (T, metadata...) — pick first elt.
+			if sl.Type() == "Tuple" {
+				elts := sl.Children("elts")
+				if len(elts) == 0 {
+					return &Type{Kind: TyAny}, nil
+				}
+				return lowerAnnotation(elts[0])
+			}
+			return lowerAnnotation(sl)
+		case "Type", "type":
+			// `Type[Foo]` — used as a runtime class object. gopy doesn't
+			// reify classes, so lower to `any`.
+			return &Type{Kind: TyAny}, nil
+		case "Mapping", "MutableMapping":
+			// typing.Mapping[K, V] / MutableMapping[K, V] — both lower
+			// like Dict[K, V] so dict.get() etc. dispatch normally.
+			sl := n.Child("slice")
+			if sl == nil || sl.Type() != "Tuple" {
+				return &Type{Kind: TyAny}, nil
+			}
+			elts := sl.Children("elts")
+			if len(elts) != 2 {
+				return &Type{Kind: TyAny}, nil
+			}
+			kt, err := lowerAnnotation(elts[0])
+			if err != nil {
+				return nil, err
+			}
+			vt, err := lowerAnnotation(elts[1])
+			if err != nil {
+				return nil, err
+			}
+			return &Type{Kind: TyDict, Key: kt, Val: vt}, nil
 		case "Tuple":
 			// typing.Tuple[T, U, ...] — match the lowercase tuple[...] path.
 			sl := n.Child("slice")
@@ -1295,20 +1340,38 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		}
 	case "AnnAssign":
 		tgt := n.Child("target")
-		if tgt.Type() != "Name" {
-			return nil, fmt.Errorf("line %d: only Name annotated-assignment supported (F1)", n.Lineno())
-		}
 		ty, err := lowerAnnotation(n.Child("annotation"))
 		if err != nil {
 			return nil, err
 		}
-		val, err := lowerExpr(n.Child("value"), sc)
-		if err != nil {
-			return nil, err
+		var val Expr
+		if v := n.Child("value"); v != nil {
+			val, err = lowerExpr(v, sc)
+			if err != nil {
+				return nil, err
+			}
 		}
-		name := tgt.Str("id")
-		decl := sc.declare(name, ty)
-		return &Assign{Target: name, Ty: ty, Value: val, Decl: decl}, nil
+		switch tgt.Type() {
+		case "Name":
+			name := tgt.Str("id")
+			decl := sc.declare(name, ty)
+			return &Assign{Target: name, Ty: ty, Value: val, Decl: decl}, nil
+		case "Attribute":
+			// `self.items: list[T] = []` etc. Treat as a plain attribute
+			// store — the annotation is parsed (so the field gets the
+			// declared type during class-body field discovery) but the
+			// statement itself emits as AssignAttr.
+			recv, err := lowerExpr(tgt.Child("value"), sc)
+			if err != nil {
+				return nil, err
+			}
+			if val == nil {
+				return nil, nil
+			}
+			return &AssignAttr{Target: recv, Name: tgt.Str("attr"), Value: val}, nil
+		default:
+			return nil, fmt.Errorf("line %d: AnnAssign target %q not supported", n.Lineno(), tgt.Type())
+		}
 	case "If":
 		cond, err := lowerExpr(n.Child("test"), sc)
 		if err != nil {
