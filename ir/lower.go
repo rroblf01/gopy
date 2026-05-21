@@ -2722,14 +2722,22 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 	for _, caseNode := range n.Children("cases") {
 		pat := caseNode.Child("pattern")
 		var classPat *MatchClassPat
+		var seqPat *MatchSeqPat
 		var patterns []Expr
-		if pat != nil && pat.Type() == "MatchClass" {
+		switch {
+		case pat != nil && pat.Type() == "MatchClass":
 			cp, err := lowerMatchClassPattern(pat, sc)
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", caseNode.Lineno(), err)
 			}
 			classPat = cp
-		} else {
+		case pat != nil && pat.Type() == "MatchSequence":
+			sp, err := lowerMatchSeqPattern(pat, sc)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", caseNode.Lineno(), err)
+			}
+			seqPat = sp
+		default:
 			ps, err := lowerMatchPattern(pat, sc)
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", caseNode.Lineno(), err)
@@ -2748,9 +2756,30 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		m.Cases = append(m.Cases, MatchCase{Patterns: patterns, Guard: guard, Body: body, ClassPat: classPat})
+		m.Cases = append(m.Cases, MatchCase{Patterns: patterns, Guard: guard, Body: body, ClassPat: classPat, SeqPat: seqPat})
 	}
 	return m, nil
+}
+
+// lowerMatchSeqPattern parses `case [v1, v2, ...]:` — fixed-length
+// sequence match against literal element patterns. Star unpacking
+// rejected for now (would require capture + remainder slicing).
+func lowerMatchSeqPattern(p parser.Node, sc *scope) (*MatchSeqPat, error) {
+	out := &MatchSeqPat{}
+	for _, sub := range p.Children("patterns") {
+		if sub.Type() == "MatchStar" {
+			return nil, fmt.Errorf("match sequence: `*` capture not supported")
+		}
+		ps, err := lowerMatchPattern(sub, sc)
+		if err != nil {
+			return nil, err
+		}
+		if len(ps) != 1 {
+			return nil, fmt.Errorf("match sequence element must produce one literal pattern")
+		}
+		out.Elements = append(out.Elements, ps[0])
+	}
+	return out, nil
 }
 
 // lowerMatchClassPattern parses `case ClassName(kw=lit, ...)`. Positional

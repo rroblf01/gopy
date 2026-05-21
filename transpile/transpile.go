@@ -1746,7 +1746,24 @@ func (g *gen) matchStmt(m *ir.Match) error {
 		if i > 0 {
 			g.writef("} else ")
 		}
-		if mc.ClassPat != nil {
+		if mc.SeqPat != nil {
+			sp := mc.SeqPat
+			g.writef("if len(__subj) == %d", len(sp.Elements))
+			for j, e := range sp.Elements {
+				g.writef(" && __subj[%d] == ", j)
+				if err := g.expr(e); err != nil {
+					return err
+				}
+			}
+			if mc.Guard != nil {
+				g.writef(" && (")
+				if err := g.boolExpr(mc.Guard); err != nil {
+					return err
+				}
+				g.writef(")")
+			}
+			g.writef(" {\n")
+		} else if mc.ClassPat != nil {
 			// `case ClassName(field=value, ...)` — type-assert __subj
 			// against the class pointer, then check each named field.
 			cp := mc.ClassPat
