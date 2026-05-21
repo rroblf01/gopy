@@ -1419,6 +1419,19 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		return &Continue{}, nil
 	case "With":
 		return lowerWith(n, sc)
+	case "Assert":
+		cond, err := lowerExpr(n.Child("test"), sc)
+		if err != nil {
+			return nil, err
+		}
+		var msg Expr
+		if m := n.Child("msg"); m != nil {
+			msg, err = lowerExpr(m, sc)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return &Assert{Cond: cond, Msg: msg}, nil
 	default:
 		return nil, fmt.Errorf("line %d: unsupported statement %q", n.Lineno(), n.Type())
 	}

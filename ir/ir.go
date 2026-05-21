@@ -304,6 +304,13 @@ type WithCM struct {
 	Body    []Stmt
 }
 
+// Assert is `assert cond[, msg]`. Codegen panics with an AssertionError
+// exception when cond evaluates falsy.
+type Assert struct {
+	Cond Expr
+	Msg  Expr // optional
+}
+
 func (*ExprStmt) stmtNode()   {}
 func (*Assign) stmtNode()     {}
 func (*Return) stmtNode()     {}
@@ -317,6 +324,7 @@ func (*Try) stmtNode()        {}
 func (*Raise) stmtNode()      {}
 func (*WithFile) stmtNode()   {}
 func (*WithCM) stmtNode()     {}
+func (*Assert) stmtNode()     {}
 func (*Yield) stmtNode()      {}
 func (*YieldFrom) stmtNode()  {}
 func (*Break) stmtNode()      {}

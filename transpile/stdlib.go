@@ -102,6 +102,7 @@ var stdlibModules = map[string]stdlibModule{
 			"trunc":    {GoFunc: "__gopy_math_trunc", GoImport: "math", Helper: helperMathTrunc, RetKind: "int"},
 			"fmod":     {GoFunc: "math.Mod", GoImport: "math", RetKind: "float"},
 			"gcd":      {GoFunc: "__gopy_math_gcd", Helper: helperMathGcd, RetKind: "int"},
+			"lcm":      {GoFunc: "__gopy_math_lcm", Helper: helperMathLcm, ExtraHelpers: map[string]string{"__gopy_math_gcd": helperMathGcd}, RetKind: "int"},
 			"isnan":    {GoFunc: "math.IsNaN", GoImport: "math", RetKind: "bool"},
 			"isinf":    {GoFunc: "__gopy_math_isinf", GoImport: "math", Helper: helperMathIsInf, RetKind: "bool"},
 			"isfinite": {GoFunc: "__gopy_math_isfinite", GoImport: "math", Helper: helperMathIsFinite, RetKind: "bool"},
@@ -1529,6 +1530,18 @@ const helperMathGcd = `func __gopy_math_gcd(a, b int64) int64 {
 		a, b = b, a%b
 	}
 	return a
+}`
+
+const helperMathLcm = `func __gopy_math_lcm(a, b int64) int64 {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	g := __gopy_math_gcd(a, b)
+	r := a / g * b
+	if r < 0 {
+		r = -r
+	}
+	return r
 }`
 
 const helperMathDegrees = `func __gopy_math_degrees(r float64) float64 { return r * 180 / math.Pi }`

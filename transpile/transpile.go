@@ -900,6 +900,8 @@ func (g *gen) stmt(s ir.Stmt) error {
 		return g.withFile(x)
 	case *ir.WithCM:
 		return g.withCM(x)
+	case *ir.Assert:
+		return g.assertStmt(x)
 	case *ir.Match:
 		return g.matchStmt(x)
 	case *ir.LocalFunc:
@@ -1324,6 +1326,79 @@ const helperFileWrite = `func __gopy_fh_write(f *os.File, s string) {
 // teardown runs even on panic, then emits the body. Wrapping the whole
 // block in an IIFE scopes the defer to the `with` block rather than the
 // enclosing function.
+// assertStmt emits `assert cond[, msg]`. The condition is run through
+// the same truthiness helper used by `if`, then we panic with an
+// AssertionError-tagged Exception so existing try/except wiring catches
+// it. CPython disables asserts under `python -O`; gopy keeps them on
+// since there's no equivalent compile-mode switch.
+func (g *gen) assertStmt(a *ir.Assert) error {
+	g.writeIndent()
+	g.writef("if !(")
+	if err := g.emitTruthy(a.Cond); err != nil {
+		return err
+	}
+	g.writef(") {\n")
+	g.indent++
+	g.writeIndent()
+	if a.Msg != nil {
+		g.addImport("fmt")
+		g.writef("panic(NewException(fmt.Sprintf(\"%%v\", ")
+		if err := g.boxedExpr(a.Msg); err != nil {
+			return err
+		}
+		g.writef(")))\n")
+	} else {
+		g.writef("panic(NewException(\"\"))\n")
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	return nil
+}
+
+// emitTruthy emits a Go bool expression for a value, applying Python's
+// truthiness rules: empty containers/strings → false, zero numbers →
+// false, nil → false, anything else → true. Already-bool expressions
+// pass through unchanged.
+func (g *gen) emitTruthy(e ir.Expr) error {
+	t := g.effectiveType(e)
+	if t == nil {
+		return g.boolExpr(e)
+	}
+	switch t.Kind {
+	case ir.TyBool:
+		return g.boolExpr(e)
+	case ir.TyInt, ir.TyFloat:
+		if err := g.expr(e); err != nil {
+			return err
+		}
+		g.writef(" != 0")
+		return nil
+	case ir.TyStr, ir.TyList, ir.TyDict:
+		g.writef("len(")
+		if err := g.expr(e); err != nil {
+			return err
+		}
+		g.writef(") > 0")
+		return nil
+	case ir.TyNamed:
+		if fn := g.lookupMethod(t.Name, "__bool__"); fn != nil {
+			_ = fn
+			if err := g.expr(e); err != nil {
+				return err
+			}
+			g.writef(".Bool()")
+			return nil
+		}
+		if err := g.expr(e); err != nil {
+			return err
+		}
+		g.writef(" != nil")
+		return nil
+	}
+	return g.boolExpr(e)
+}
+
 func (g *gen) withCM(w *ir.WithCM) error {
 	t := g.effectiveType(w.Ctx)
 	if t == nil || t.Kind != ir.TyNamed {
