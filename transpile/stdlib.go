@@ -277,6 +277,27 @@ var stdlibModules = map[string]stdlibModule{
 			"deepcopy": {GoFunc: "__gopy_copy_deep", Helper: helperCopyDeep, HelperImports: []string{"encoding/json"}},
 		},
 	},
+	"weakref": {
+		Funcs: map[string]stdlibFunc{
+			// gopy has no notion of weak references (Go GC handles it).
+			// Both forms collapse to identity-pass-through helpers so
+			// libraries that use weakref keep compiling.
+			"ref":   {GoFunc: "__gopy_weakref_ref", Helper: helperWeakrefRef},
+			"proxy": {GoFunc: "__gopy_weakref_ref", Helper: helperWeakrefRef},
+		},
+	},
+	"pprint": {
+		Funcs: map[string]stdlibFunc{
+			"pprint": {GoFunc: "__gopy_pprint", Helper: helperPprint, HelperImports: []string{"fmt"}},
+			"pformat": {GoFunc: "__gopy_pformat", Helper: helperPformat, HelperImports: []string{"fmt"}, RetKind: "str"},
+		},
+	},
+	"traceback": {
+		Funcs: map[string]stdlibFunc{
+			"format_exc": {GoFunc: "__gopy_traceback_format_exc", Helper: helperTracebackFormatExc, RetKind: "str"},
+			"print_exc":  {GoFunc: "__gopy_traceback_print_exc", Helper: helperTracebackPrintExc, HelperImports: []string{"fmt", "os"}},
+		},
+	},
 	"asyncio": {
 		Funcs: map[string]stdlibFunc{
 			"run":   {GoFunc: "__gopy_asyncio_run_unused"},
@@ -1704,6 +1725,39 @@ const helperShutilWhich = `func __gopy_shutil_which(cmd string) string {
 		return ""
 	}
 	return p
+}`
+
+// helperWeakrefRef is a pass-through: gopy doesn't model weak refs.
+// Returning a closure matches CPython's API shape where the result
+// is callable and yields the wrapped object on invocation.
+const helperWeakrefRef = `func __gopy_weakref_ref(obj any) func() any {
+	return func() any { return obj }
+}`
+
+const helperPprint = `func __gopy_pprint(args ...any) {
+	for i, a := range args {
+		if i > 0 {
+			fmt.Print(" ")
+		}
+		fmt.Printf("%#v", a)
+	}
+	fmt.Println()
+}`
+
+const helperPformat = `func __gopy_pformat(v any) string {
+	return fmt.Sprintf("%#v", v)
+}`
+
+// helperTracebackFormatExc returns a stub traceback string. gopy
+// doesn't carry frame info through panics, so the message is just a
+// shape-compatible placeholder for libraries that log on exception.
+const helperTracebackFormatExc = `func __gopy_traceback_format_exc() string {
+	return "Traceback (most recent call last):\n  (gopy: full traceback unavailable)\n"
+}`
+
+const helperTracebackPrintExc = `func __gopy_traceback_print_exc() {
+	fmt.Fprintln(os.Stderr, "Traceback (most recent call last):")
+	fmt.Fprintln(os.Stderr, "  (gopy: full traceback unavailable)")
 }`
 
 const helperTempfileMkdtemp = `func __gopy_tempfile_mkdtemp(args ...string) string {
