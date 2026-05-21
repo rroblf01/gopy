@@ -335,11 +335,36 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 	// — they don't appear as Go-level embeds.
 	var rawBases []string
 	for _, b := range n.Children("bases") {
+		// Accept Attribute bases like `abc.ABC` or subscripted bases like
+		// `Generic[T]` / `Protocol[T]` as no-op markers — they carry no
+		// codegen consequence and would otherwise block parsing of code
+		// that mirrors common Python typing patterns.
+		if b.Type() == "Attribute" {
+			attr := b.Str("attr")
+			if attr == "ABC" || attr == "ABCMeta" || attr == "Protocol" || attr == "Generic" {
+				continue
+			}
+			return nil, fmt.Errorf("class %s: complex base expressions not supported", name)
+		}
+		if b.Type() == "Subscript" {
+			val := b.Child("value")
+			if val != nil && val.Type() == "Name" {
+				switch val.Str("id") {
+				case "Generic", "Protocol":
+					continue
+				}
+			}
+			return nil, fmt.Errorf("class %s: complex base expressions not supported", name)
+		}
 		if b.Type() != "Name" {
 			return nil, fmt.Errorf("class %s: complex base expressions not supported", name)
 		}
 		bn := b.Str("id")
-		if bn == "object" {
+		switch bn {
+		case "object", "ABC", "ABCMeta", "Protocol", "Generic":
+			// Marker bases: not real Go embeds, just type-system hints
+			// in CPython. Drop them so the rest of inheritance handling
+			// sees a clean base list.
 			continue
 		}
 		rawBases = append(rawBases, bn)
@@ -484,6 +509,22 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 					continue
 				case "classmethod":
 					isClassMethod = true
+					continue
+				case "abstractmethod", "staticmethod":
+					// abstractmethod: accepted as a no-op. Without runtime
+					// reflection we can't enforce that subclasses override,
+					// so the method body still gets emitted; if a subclass
+					// inherits an abstract method that simply raises, the
+					// behavior matches CPython's runtime check.
+					// staticmethod on a method: emit as a regular method
+					// (the `self` is ignored by the caller convention).
+					continue
+				}
+			}
+			// Attribute-style decorator, e.g. @abc.abstractmethod.
+			if d.Type() == "Attribute" {
+				attr := d.Str("attr")
+				if attr == "abstractmethod" || attr == "abstractclassmethod" || attr == "abstractstaticmethod" || attr == "abstractproperty" {
 					continue
 				}
 			}
@@ -1071,6 +1112,16 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		x, err := lowerExpr(n.Child("value"), sc)
 		if err != nil {
 			return nil, err
+		}
+		// Drop bare `None` / `...` placeholder expression statements (the
+		// canonical body for an `@abstractmethod` stub, or a docstring-
+		// style standalone constant). Keeping them emits invalid Go.
+		if _, ok := x.(*NoneLit); ok {
+			return nil, nil
+		}
+		if _, ok := x.(*StrLit); ok {
+			// Bare string literal statements are docstrings — skip.
+			return nil, nil
 		}
 		return &ExprStmt{X: x}, nil
 	case "Return":

@@ -35,6 +35,11 @@ def node_to_dict(node):
                 result["value"] = v.decode("utf-8", "replace")
             elif v is None:
                 result["_const_kind"] = "none"
+            elif v is Ellipsis:
+                # `...` placeholder body for abstract methods / stubs.
+                # Lower as None so it disappears from generated code.
+                result["_const_kind"] = "none"
+                result["value"] = None
         return result
     if isinstance(node, list):
         return [node_to_dict(x) for x in node]

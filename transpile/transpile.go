@@ -597,6 +597,15 @@ func (g *gen) fn(fn *ir.Func) error {
 	if err := g.stmts(fn.Body); err != nil {
 		return err
 	}
+	// Abstract / stub bodies lowered to nothing still need to satisfy Go's
+	// "missing return" rule when the signature has a non-void return.
+	// Emit a panic so the method exists at runtime but loudly refuses to
+	// be called — matches Python's "abstract method not implemented" model.
+	if len(fn.Body) == 0 && fn.Ret != nil && fn.Ret.Kind != ir.TyNone {
+		g.needsException = true
+		g.writeIndent()
+		g.writef("%s", "panic(NewException(\"NotImplementedError: abstract method "+fn.Name+"\"))\n")
+	}
 	g.indent--
 	g.writef("}\n")
 	return nil
@@ -3546,6 +3555,11 @@ var taggedMethodRename = map[string]map[string]string{
 		"substitute":      "Substitute",
 		"safe_substitute": "SafeSubstitute",
 	},
+	"__HTTPResponse": {
+		"read":    "Read",
+		"close":   "Close",
+		"getcode": "Getcode",
+	},
 }
 
 // taggedMethodRetTag tracks the tag of a tagged-method call's return
@@ -3632,6 +3646,10 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 		"params":   {GoName: "Params", Ty: &ir.Type{Kind: ir.TyStr}},
 		"query":    {GoName: "Query", Ty: &ir.Type{Kind: ir.TyStr}},
 		"fragment": {GoName: "Fragment", Ty: &ir.Type{Kind: ir.TyStr}},
+	},
+	"__HTTPResponse": {
+		"status":  {GoName: "Status", Ty: &ir.Type{Kind: ir.TyInt}},
+		"headers": {GoName: "Headers", Ty: &ir.Type{Kind: ir.TyDict, Key: &ir.Type{Kind: ir.TyStr}, Val: &ir.Type{Kind: ir.TyStr}}},
 	},
 }
 

@@ -147,6 +147,11 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"urllib": {
 		Subs: map[string]stdlibModule{
+			"request": {
+				Funcs: map[string]stdlibFunc{
+					"urlopen": {GoFunc: "__gopy_url_urlopen", Helper: helperURLOpen, HelperImports: []string{"io", "net/http"}, RetTag: "__HTTPResponse", ExtraHelpers: map[string]string{"__HTTPResponse": helperHTTPResponseType}},
+				},
+			},
 			"parse": {
 				Funcs: map[string]stdlibFunc{
 					"quote":        {GoFunc: "__gopy_url_quote", GoImport: "net/url", Helper: helperURLQuote, HelperImports: []string{"strings", "fmt"}, RetKind: "str"},
@@ -1088,6 +1093,48 @@ const helperB16Decode = `func __gopy_b16decode(s string) string {
 		panic(err)
 	}
 	return string(out)
+}`
+
+// helperHTTPResponseType is the gopy-side wrapper around a captured HTTP
+// response body. .read() returns the full body as a string (matching
+// CPython's bytes-as-str pass-through), .status holds the HTTP code,
+// and .headers is a map[string]string keyed by canonical header name.
+const helperHTTPResponseType = `type __HTTPResponse struct {
+	body    string
+	consumed bool
+	Status  int64
+	Headers map[string]string
+}
+
+func (r *__HTTPResponse) Read() string {
+	if r.consumed {
+		return ""
+	}
+	r.consumed = true
+	return r.body
+}
+
+func (r *__HTTPResponse) Close() {}
+
+func (r *__HTTPResponse) Getcode() int64 { return r.Status }`
+
+const helperURLOpen = `func __gopy_url_urlopen(url string) *__HTTPResponse {
+	resp, err := http.Get(url)
+	if err != nil {
+		panic(NewException("URLError: " + err.Error()))
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		panic(NewException("URLError: " + err.Error()))
+	}
+	headers := map[string]string{}
+	for k, v := range resp.Header {
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+	return &__HTTPResponse{body: string(body), Status: int64(resp.StatusCode), Headers: headers}
 }`
 
 // helperURLQuote mirrors CPython's urllib.parse.quote default safe=/:
