@@ -2725,6 +2725,26 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 		var seqPat *MatchSeqPat
 		var mapPat *MatchMapPat
 		var patterns []Expr
+		capture := ""
+		// `case Foo(...) as b:` / `case [...] as b:` etc. — unwrap to the
+		// inner pattern and stash the capture name on the case.
+		if pat != nil && pat.Type() == "MatchAs" {
+			if inner := pat.Child("pattern"); inner != nil {
+				capture = pat.Str("name")
+				pat = inner
+			} else if name := pat.Str("name"); name != "" {
+				// `case name:` — bind name to the subject, no other check.
+				body, err := lowerBody(caseNode.Children("body"), sc)
+				if err != nil {
+					return nil, err
+				}
+				m.Cases = append(m.Cases, MatchCase{
+					Body:    body,
+					Capture: name,
+				})
+				continue
+			}
+		}
 		switch {
 		case pat != nil && pat.Type() == "MatchClass":
 			cp, err := lowerMatchClassPattern(pat, sc)
@@ -2763,7 +2783,7 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		m.Cases = append(m.Cases, MatchCase{Patterns: patterns, Guard: guard, Body: body, ClassPat: classPat, SeqPat: seqPat, MapPat: mapPat})
+		m.Cases = append(m.Cases, MatchCase{Patterns: patterns, Guard: guard, Body: body, ClassPat: classPat, SeqPat: seqPat, MapPat: mapPat, Capture: capture})
 	}
 	return m, nil
 }

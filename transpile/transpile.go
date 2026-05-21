@@ -1793,13 +1793,32 @@ func (g *gen) matchStmt(m *ir.Match) error {
 			g.writef(" {\n")
 		} else if mc.ClassPat != nil {
 			// `case ClassName(field=value, ...)` — type-assert __subj
-			// against the class pointer, then check each named field.
+			// against the class pointer (or Go primitive for int/str/
+			// float/bool), then check each named field.
 			cp := mc.ClassPat
-			g.writef("if __cm, __cmok := any(__subj).(*%s); __cmok", cp.ClassName)
-			for j, attr := range cp.KwdAttrs {
-				g.writef(" && __cm.%s == ", attr)
-				if err := g.expr(cp.KwdValues[j]); err != nil {
-					return err
+			primitive, goPrim := "", ""
+			switch cp.ClassName {
+			case "int":
+				primitive, goPrim = "int", "int64"
+			case "float":
+				primitive, goPrim = "float", "float64"
+			case "str":
+				primitive, goPrim = "str", "string"
+			case "bool":
+				primitive, goPrim = "bool", "bool"
+			}
+			if primitive != "" {
+				g.writef("if __cm, __cmok := any(__subj).(%s); __cmok", goPrim)
+				if len(cp.KwdAttrs) > 0 {
+					return fmt.Errorf("match class pattern: %s() takes no field patterns", primitive)
+				}
+			} else {
+				g.writef("if __cm, __cmok := any(__subj).(*%s); __cmok", cp.ClassName)
+				for j, attr := range cp.KwdAttrs {
+					g.writef(" && __cm.%s == ", attr)
+					if err := g.expr(cp.KwdValues[j]); err != nil {
+						return err
+					}
 				}
 			}
 			if mc.Guard != nil {
@@ -1813,6 +1832,22 @@ func (g *gen) matchStmt(m *ir.Match) error {
 			g.indent++
 			g.writeIndent()
 			g.writef("_ = __cm\n")
+			if mc.Capture != "" {
+				g.writeIndent()
+				g.writef("%s := __cm\n", mc.Capture)
+				g.writeIndent()
+				g.writef("_ = %s\n", mc.Capture)
+			}
+			g.indent--
+		} else if mc.Capture != "" && len(mc.Patterns) == 0 && mc.Guard == nil {
+			// `case name:` — bind name to subject, act as default arm.
+			g.writef("{\n")
+			hadUnconditionalDefault = true
+			g.indent++
+			g.writeIndent()
+			g.writef("%s := __subj\n", mc.Capture)
+			g.writeIndent()
+			g.writef("_ = %s\n", mc.Capture)
 			g.indent--
 		} else if len(mc.Patterns) == 0 && mc.Guard == nil {
 			// Bare wildcard — open an else with no condition.

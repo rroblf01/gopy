@@ -292,6 +292,10 @@ type MatchCase struct {
 	SeqPat *MatchSeqPat
 	// MapPat is non-nil for `case {"k": v, ...}:` arms.
 	MapPat *MatchMapPat
+	// Capture is the optional `as name` binding for class/wildcard arms.
+	// For `case x:` (bare-name pattern) Capture holds the name and all
+	// other pattern fields are empty (the arm acts as a default).
+	Capture string
 }
 
 // MatchClassPat captures a `case ClassName(kw=pat, ...)` arm. Positional
