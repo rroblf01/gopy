@@ -24,7 +24,9 @@ var stdlibModules = map[string]stdlibModule{
 			"byteorder":    {GoExpr: `"little"`},
 		},
 		Funcs: map[string]stdlibFunc{
-			"exit": {GoFunc: "os.Exit", GoImport: "os", IntArg0: true},
+			"exit":       {GoFunc: "os.Exit", GoImport: "os", IntArg0: true},
+			"getsizeof":  {GoFunc: "__gopy_sys_getsizeof", Helper: helperSysGetsizeof, HelperImports: []string{"unsafe", "reflect"}, RetKind: "int"},
+			"intern":     {GoFunc: "__gopy_sys_intern", Helper: helperSysIntern, RetKind: "str"},
 		},
 	},
 	"os": {
@@ -156,6 +158,7 @@ var stdlibModules = map[string]stdlibModule{
 			"md5":    {GoFunc: "__gopy_hashlib_md5", GoImport: "crypto/md5", Helper: helperHashlibMd5, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/sha256", "crypto/sha1", "crypto/sha512"}},
 			"sha1":   {GoFunc: "__gopy_hashlib_sha1", GoImport: "crypto/sha1", Helper: helperHashlibSha1, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha256", "crypto/sha512"}},
 			"sha512": {GoFunc: "__gopy_hashlib_sha512", GoImport: "crypto/sha512", Helper: helperHashlibSha512, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha256", "crypto/sha1"}},
+			"new":    {GoFunc: "__gopy_hashlib_new", Helper: helperHashlibNew, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha1", "crypto/sha256", "crypto/sha512"}},
 		},
 	},
 	"secrets": {
@@ -164,6 +167,7 @@ var stdlibModules = map[string]stdlibModule{
 			"token_urlsafe": {GoFunc: "__gopy_secrets_token_urlsafe", GoImport: "crypto/rand", Helper: helperSecretsTokenUrl, HelperImports: []string{"encoding/base64"}, RetKind: "str"},
 			"token_bytes":   {GoFunc: "__gopy_secrets_token_bytes", GoImport: "crypto/rand", Helper: helperSecretsTokenBytes, RetKind: "str"},
 			"randbelow":     {GoFunc: "__gopy_secrets_randbelow", Helper: helperSecretsRandbelow, HelperImports: []string{"crypto/rand", "math/big"}, RetKind: "int"},
+			"compare_digest": {GoFunc: "__gopy_compare_digest", Helper: helperCompareDigest, HelperImports: []string{"crypto/subtle"}, RetKind: "bool"},
 		},
 	},
 	"base64": {
@@ -331,6 +335,15 @@ var stdlibModules = map[string]stdlibModule{
 			"Decimal": {GoFunc: "__gopy_decimal_new", Helper: helperDecimalNew, RetTag: "__Decimal", ExtraHelpers: map[string]string{"__Decimal": helperDecimalType}, HelperImports: []string{"fmt", "strconv"}},
 		},
 	},
+	"binascii": {
+		Funcs: map[string]stdlibFunc{
+			"hexlify":   {GoFunc: "__gopy_binascii_hexlify", Helper: helperBinasciiHexlify, HelperImports: []string{"encoding/hex"}, RetKind: "str"},
+			"b2a_hex":   {GoFunc: "__gopy_binascii_hexlify", Helper: helperBinasciiHexlify, HelperImports: []string{"encoding/hex"}, RetKind: "str"},
+			"unhexlify": {GoFunc: "__gopy_binascii_unhexlify", Helper: helperBinasciiUnhexlify, HelperImports: []string{"encoding/hex"}, RetKind: "str"},
+			"a2b_hex":   {GoFunc: "__gopy_binascii_unhexlify", Helper: helperBinasciiUnhexlify, HelperImports: []string{"encoding/hex"}, RetKind: "str"},
+			"crc32":     {GoFunc: "__gopy_binascii_crc32", Helper: helperBinasciiCrc32, HelperImports: []string{"hash/crc32"}, RetKind: "int"},
+		},
+	},
 	"pickle": {
 		Funcs: map[string]stdlibFunc{
 			"dumps": {GoFunc: "__gopy_pickle_dumps", Helper: helperPickleDumps, HelperImports: []string{"encoding/json"}, RetKind: "str"},
@@ -383,6 +396,44 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"format_exc": {GoFunc: "__gopy_traceback_format_exc", Helper: helperTracebackFormatExc, RetKind: "str"},
 			"print_exc":  {GoFunc: "__gopy_traceback_print_exc", Helper: helperTracebackPrintExc, HelperImports: []string{"fmt", "os"}},
+		},
+	},
+	"signal": {
+		Attrs: map[string]stdlibAttr{
+			"SIGINT":  {GoExpr: "int64(2)"},
+			"SIGTERM": {GoExpr: "int64(15)"},
+			"SIGHUP":  {GoExpr: "int64(1)"},
+			"SIGQUIT": {GoExpr: "int64(3)"},
+			"SIGKILL": {GoExpr: "int64(9)"},
+			"SIGUSR1": {GoExpr: "int64(10)"},
+			"SIGUSR2": {GoExpr: "int64(12)"},
+			"SIG_DFL": {GoExpr: "any(0)"},
+			"SIG_IGN": {GoExpr: "any(1)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"signal":     {GoFunc: "__gopy_signal_noop", Helper: helperSignalNoop},
+			"getsignal":  {GoFunc: "__gopy_signal_noop", Helper: helperSignalNoop},
+			"set_wakeup_fd": {GoFunc: "__gopy_signal_noop_int", Helper: helperSignalNoopInt, RetKind: "int"},
+		},
+	},
+	"atexit": {
+		Funcs: map[string]stdlibFunc{
+			"register":   {GoFunc: "__gopy_atexit_noop", Helper: helperAtexitNoop},
+			"unregister": {GoFunc: "__gopy_atexit_noop", Helper: helperAtexitNoop},
+		},
+	},
+	"gc": {
+		Funcs: map[string]stdlibFunc{
+			"collect":   {GoFunc: "__gopy_gc_collect", Helper: helperGCCollect, HelperImports: []string{"runtime"}, RetKind: "int"},
+			"disable":   {GoFunc: "__gopy_gc_noop", Helper: helperGCNoop},
+			"enable":    {GoFunc: "__gopy_gc_noop", Helper: helperGCNoop},
+			"isenabled": {GoFunc: "__gopy_gc_enabled", Helper: helperGCEnabled, RetKind: "bool"},
+		},
+	},
+	"contextlib": {
+		Funcs: map[string]stdlibFunc{
+			"contextmanager": {GoFunc: "__gopy_contextmanager_unused"},
+			"suppress":       {GoFunc: "__gopy_suppress_unused"},
 		},
 	},
 	"asyncio": {
@@ -1359,6 +1410,20 @@ const helperHashlibSha256 = `func __gopy_hashlib_sha256(data string) *__Hasher {
 
 const helperHashlibSha512 = `func __gopy_hashlib_sha512(data string) *__Hasher {
 	return &__Hasher{data: []byte(data), algo: "sha512"}
+}`
+
+// helperHashlibNew dispatches by algorithm name ("sha256", "md5", etc.).
+// Optional second argument is the initial data fed to update().
+const helperHashlibNew = `func __gopy_hashlib_new(args ...string) *__Hasher {
+	if len(args) == 0 {
+		panic(NewException("ValueError: hashlib.new() requires an algorithm name"))
+	}
+	algo := args[0]
+	var data []byte
+	if len(args) > 1 {
+		data = []byte(args[1])
+	}
+	return &__Hasher{data: data, algo: algo}
 }`
 
 const helperHashlibSha1 = `func __gopy_hashlib_sha1(data string) *__Hasher {
@@ -3018,6 +3083,81 @@ const helperDecimalNew = `func __gopy_decimal_new(args ...any) *__Decimal {
 	}
 	return &__Decimal{Repr: "0", V: 0}
 }`
+
+// helperCompareDigest constant-time string compare via crypto/subtle.
+const helperCompareDigest = `func __gopy_compare_digest(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}`
+
+const helperBinasciiHexlify = `func __gopy_binascii_hexlify(s string) string { return hex.EncodeToString([]byte(s)) }`
+
+const helperBinasciiUnhexlify = `func __gopy_binascii_unhexlify(s string) string {
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		panic(NewException("binascii.Error: " + err.Error()))
+	}
+	return string(b)
+}`
+
+const helperBinasciiCrc32 = `func __gopy_binascii_crc32(args ...any) int64 {
+	s, _ := args[0].(string)
+	return int64(crc32.ChecksumIEEE([]byte(s)))
+}`
+
+// helperSignalNoop / NoopInt — gopy doesn't install OS signal handlers
+// from transpiled Python. Accept and discard so libraries calling
+// signal.signal(SIGINT, h) compile.
+const helperSignalNoop = `func __gopy_signal_noop(args ...any) any { return nil }`
+const helperSignalNoopInt = `func __gopy_signal_noop_int(args ...any) int64 { return 0 }`
+
+// helperAtexitNoop — gopy doesn't run deferred Python callbacks at
+// exit. Accept registration silently.
+const helperAtexitNoop = `func __gopy_atexit_noop(args ...any) any { return nil }`
+
+// helperGCCollect / Noop / Enabled — gopy delegates to Go's GC.
+// gc.collect() forces a runtime.GC() pass and returns 0.
+const helperGCCollect = `func __gopy_gc_collect(args ...any) int64 {
+	runtime.GC()
+	return 0
+}`
+const helperGCNoop = `func __gopy_gc_noop(args ...any) {}`
+const helperGCEnabled = `func __gopy_gc_enabled() bool { return true }`
+
+// helperSysGetsizeof — best-effort approximation. CPython returns
+// bytes including Python object overhead; gopy returns the
+// underlying Go value's size + element counts for slices/maps.
+const helperSysGetsizeof = `func __gopy_sys_getsizeof(args ...any) int64 {
+	if len(args) == 0 {
+		return 0
+	}
+	v := args[0]
+	if v == nil {
+		return 16
+	}
+	switch x := v.(type) {
+	case bool:
+		_ = x
+		return 28
+	case int64:
+		return 28
+	case float64:
+		return 24
+	case string:
+		return int64(len(x) + 49)
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		return int64(rv.Len())*int64(unsafe.Sizeof(uintptr(0))) + 56
+	case reflect.Map:
+		return int64(rv.Len())*64 + 64
+	}
+	return int64(unsafe.Sizeof(v))
+}`
+
+// helperSysIntern is a pure identity since Go interns string constants
+// at compile time and the runtime form isn't user-visible.
+const helperSysIntern = `func __gopy_sys_intern(s string) string { return s }`
 
 const helperPickleDumps = `func __gopy_pickle_dumps(v any) string {
 	b, err := json.Marshal(v)
