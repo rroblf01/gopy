@@ -1746,7 +1746,30 @@ func (g *gen) matchStmt(m *ir.Match) error {
 		if i > 0 {
 			g.writef("} else ")
 		}
-		if len(mc.Patterns) == 0 && mc.Guard == nil {
+		if mc.ClassPat != nil {
+			// `case ClassName(field=value, ...)` — type-assert __subj
+			// against the class pointer, then check each named field.
+			cp := mc.ClassPat
+			g.writef("if __cm, __cmok := any(__subj).(*%s); __cmok", cp.ClassName)
+			for j, attr := range cp.KwdAttrs {
+				g.writef(" && __cm.%s == ", attr)
+				if err := g.expr(cp.KwdValues[j]); err != nil {
+					return err
+				}
+			}
+			if mc.Guard != nil {
+				g.writef(" && (")
+				if err := g.boolExpr(mc.Guard); err != nil {
+					return err
+				}
+				g.writef(")")
+			}
+			g.writef(" {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("_ = __cm\n")
+			g.indent--
+		} else if len(mc.Patterns) == 0 && mc.Guard == nil {
 			// Bare wildcard — open an else with no condition.
 			g.writef("{\n")
 			hadUnconditionalDefault = true

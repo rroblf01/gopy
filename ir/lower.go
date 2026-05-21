@@ -1094,7 +1094,7 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			return &Type{Kind: TyNone}, nil
 		case "Any", "Callable", "Iterable", "Iterator", "Sequence",
 			"Mapping", "MutableMapping", "MutableSequence", "Collection",
-			"Hashable", "Reversible", "Container", "Sized",
+			"Hashable", "Reversible", "Container", "Sized", "object",
 			"Final", "ClassVar", "TypeAlias", "Never", "NoReturn", "Self":
 			// typing bare aliases — lower to `any` so user code can pass
 			// values around without further annotation.
@@ -2721,9 +2721,20 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 	m := &Match{Subject: subject}
 	for _, caseNode := range n.Children("cases") {
 		pat := caseNode.Child("pattern")
-		patterns, err := lowerMatchPattern(pat, sc)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", caseNode.Lineno(), err)
+		var classPat *MatchClassPat
+		var patterns []Expr
+		if pat != nil && pat.Type() == "MatchClass" {
+			cp, err := lowerMatchClassPattern(pat, sc)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", caseNode.Lineno(), err)
+			}
+			classPat = cp
+		} else {
+			ps, err := lowerMatchPattern(pat, sc)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", caseNode.Lineno(), err)
+			}
+			patterns = ps
 		}
 		var guard Expr
 		if g := caseNode.Child("guard"); g != nil {
@@ -2737,9 +2748,45 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		m.Cases = append(m.Cases, MatchCase{Patterns: patterns, Guard: guard, Body: body})
+		m.Cases = append(m.Cases, MatchCase{Patterns: patterns, Guard: guard, Body: body, ClassPat: classPat})
 	}
 	return m, nil
+}
+
+// lowerMatchClassPattern parses `case ClassName(kw=lit, ...)`. Positional
+// captures (`Cls(x, y)`) and nested class patterns aren't supported yet.
+func lowerMatchClassPattern(p parser.Node, sc *scope) (*MatchClassPat, error) {
+	cls := p.Child("cls")
+	if cls == nil || cls.Type() != "Name" {
+		return nil, fmt.Errorf("match class pattern: class must be a bare Name")
+	}
+	out := &MatchClassPat{ClassName: cls.Str("id")}
+	if pos := p.Children("patterns"); len(pos) > 0 {
+		return nil, fmt.Errorf("match class pattern: positional captures not supported (use keyword form: Class(field=value))")
+	}
+	attrs := p["kwd_attrs"]
+	rawAttrs, _ := attrs.([]any)
+	for _, a := range rawAttrs {
+		s, _ := a.(string)
+		out.KwdAttrs = append(out.KwdAttrs, s)
+	}
+	for _, kp := range p.Children("kwd_patterns") {
+		if kp.Type() != "MatchValue" && kp.Type() != "MatchSingleton" {
+			return nil, fmt.Errorf("match class pattern: only literal kwd patterns supported")
+		}
+		ps, err := lowerMatchPattern(kp, sc)
+		if err != nil {
+			return nil, err
+		}
+		if len(ps) != 1 {
+			return nil, fmt.Errorf("match class pattern: kwd pattern must produce one value")
+		}
+		out.KwdValues = append(out.KwdValues, ps[0])
+	}
+	if len(out.KwdAttrs) != len(out.KwdValues) {
+		return nil, fmt.Errorf("match class pattern: kwd attrs / values length mismatch")
+	}
+	return out, nil
 }
 
 // lowerMatchPattern returns the literal-value expressions a `case`

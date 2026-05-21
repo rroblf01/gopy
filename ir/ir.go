@@ -284,6 +284,17 @@ type MatchCase struct {
 	Patterns []Expr
 	Guard    Expr
 	Body     []Stmt
+	// ClassPat is non-nil for `case ClassName(field=value, ...):` arms.
+	// When set, Patterns is empty.
+	ClassPat *MatchClassPat
+}
+
+// MatchClassPat captures a `case ClassName(kw=pat, ...)` arm. Positional
+// captures aren't supported yet; only literal kwd patterns.
+type MatchClassPat struct {
+	ClassName string
+	KwdAttrs  []string
+	KwdValues []Expr
 }
 
 // Break and Continue map directly to Go's break / continue inside the
