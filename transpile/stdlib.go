@@ -349,10 +349,19 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"socket": {
+		Attrs: map[string]stdlibAttr{
+			"AF_INET":     {GoExpr: "int64(2)"},
+			"AF_INET6":    {GoExpr: "int64(10)"},
+			"AF_UNIX":     {GoExpr: "int64(1)"},
+			"SOCK_STREAM": {GoExpr: "int64(1)"},
+			"SOCK_DGRAM":  {GoExpr: "int64(2)"},
+		},
 		Funcs: map[string]stdlibFunc{
 			"gethostname":   {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
 			"getfqdn":       {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
 			"gethostbyname": {GoFunc: "__gopy_socket_gethostbyname", Helper: helperSocketGethostbyname, HelperImports: []string{"net"}, RetKind: "str"},
+			"socket":        {GoFunc: "__gopy_socket_new", Helper: helperSocketNew, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
+			"create_connection": {GoFunc: "__gopy_socket_create_conn", Helper: helperSocketCreateConn, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 		},
 	},
 	"platform": {
@@ -1600,6 +1609,75 @@ const helperSocketGethostbyname = `func __gopy_socket_gethostbyname(host string)
 		panic(NewException("gaierror: " + host))
 	}
 	return ips[0]
+}`
+
+// helperSocketType is a minimal TCP-only socket wrapper. UDP / Unix
+// streams aren't supported. .Connect((host, port)) dials; .Send / .Recv
+// move bytes as strings (gopy's bytes shim).
+const helperSocketType = `type __Socket struct {
+	conn net.Conn
+}
+
+func (s *__Socket) Connect(addr []any) {
+	if len(addr) != 2 {
+		panic(NewException("socket.connect: expected (host, port)"))
+	}
+	host := fmt.Sprintf("%v", addr[0])
+	port := fmt.Sprintf("%v", addr[1])
+	c, err := net.Dial("tcp", host+":"+port)
+	if err != nil {
+		panic(NewException("ConnectionRefusedError: " + err.Error()))
+	}
+	s.conn = c
+}
+
+func (s *__Socket) Send(data string) int64 {
+	if s.conn == nil {
+		panic(NewException("socket.send: not connected"))
+	}
+	n, err := s.conn.Write([]byte(data))
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return int64(n)
+}
+
+func (s *__Socket) Sendall(data string) {
+	s.Send(data)
+}
+
+func (s *__Socket) Recv(n int64) string {
+	if s.conn == nil {
+		panic(NewException("socket.recv: not connected"))
+	}
+	buf := make([]byte, n)
+	read, err := s.conn.Read(buf)
+	if err != nil && err != io.EOF {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return string(buf[:read])
+}
+
+func (s *__Socket) Close() {
+	if s.conn != nil {
+		s.conn.Close()
+		s.conn = nil
+	}
+}
+
+func (s *__Socket) Enter() *__Socket { return s }
+func (s *__Socket) Exit(_, _, _ any) { s.Close() }`
+
+const helperSocketNew = `func __gopy_socket_new(args ...int64) *__Socket {
+	// Family / type are accepted but only TCP/INET combos do anything
+	// at Connect() time. Return a fresh, disconnected socket.
+	return &__Socket{}
+}`
+
+const helperSocketCreateConn = `func __gopy_socket_create_conn(addr []any, args ...int64) *__Socket {
+	s := &__Socket{}
+	s.Connect(addr)
+	return s
 }`
 
 const helperPlatformSystem = `func __gopy_platform_system() string {

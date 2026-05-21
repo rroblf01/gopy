@@ -3949,6 +3949,13 @@ var taggedMethodRename = map[string]map[string]string{
 		"empty": "Empty",
 		"full":  "Full",
 	},
+	"__Socket": {
+		"connect": "Connect",
+		"send":    "Send",
+		"sendall": "Sendall",
+		"recv":    "Recv",
+		"close":   "Close",
+	},
 }
 
 // taggedMethodRetTag tracks the tag of a tagged-method call's return
