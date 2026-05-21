@@ -42,6 +42,11 @@ def main() -> None:
     ci = Circle(1.0)
     describe(sq)
     describe(ci)
+    shapes: list[Shape] = [Square(3.0), Circle(2.0)]
+    total: float = 0.0
+    for s in shapes:
+        total = total + s.area()
+    print(round(total, 4))
 
 
 if __name__ == "__main__":

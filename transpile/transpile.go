@@ -813,6 +813,25 @@ func (g *gen) stmt(s ir.Stmt) error {
 				g.writef("%s{}\n", g.goType(x.Ty))
 				return nil
 			}
+			// Non-empty list literal with a heterogeneous element type
+			// (e.g. `list[Shape]` holding `Square` / `Circle`): emit with
+			// the declared element type so Go's structural typing converts
+			// each entry into the interface value implicitly.
+			if ll, ok := x.Value.(*ir.ListLit); ok && len(ll.Elems) > 0 && x.Ty.Elem != nil {
+				if cls, ok := g.classes[x.Ty.Elem.Name]; ok && cls.IsInterface && len(cls.InterfaceMethods) > 0 && len(cls.Fields) == 0 && !cls.HasInit && len(cls.MethodNames) == len(cls.InterfaceMethods) {
+					g.writef("%s{", g.goType(x.Ty))
+					for i, e := range ll.Elems {
+						if i > 0 {
+							g.writef(", ")
+						}
+						if err := g.expr(e); err != nil {
+							return err
+						}
+					}
+					g.writef("}\n")
+					return nil
+				}
+			}
 		}
 		if x.Ty != nil && x.Ty.Kind == ir.TyDict {
 			if dl, ok := x.Value.(*ir.DictLit); ok && len(dl.Keys) == 0 {
