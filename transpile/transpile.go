@@ -1746,7 +1746,35 @@ func (g *gen) matchStmt(m *ir.Match) error {
 		if i > 0 {
 			g.writef("} else ")
 		}
-		if mc.SeqPat != nil {
+		if mc.MapPat != nil {
+			mp := mc.MapPat
+			g.writef("if ")
+			if len(mp.Keys) == 0 {
+				g.writef("true")
+			}
+			for j, k := range mp.Keys {
+				if j > 0 {
+					g.writef(" && ")
+				}
+				g.writef("func() bool { __mv, __mok := __subj[")
+				if err := g.expr(k); err != nil {
+					return err
+				}
+				g.writef("]; return __mok && __mv == ")
+				if err := g.expr(mp.Values[j]); err != nil {
+					return err
+				}
+				g.writef(" }()")
+			}
+			if mc.Guard != nil {
+				g.writef(" && (")
+				if err := g.boolExpr(mc.Guard); err != nil {
+					return err
+				}
+				g.writef(")")
+			}
+			g.writef(" {\n")
+		} else if mc.SeqPat != nil {
 			sp := mc.SeqPat
 			g.writef("if len(__subj) == %d", len(sp.Elements))
 			for j, e := range sp.Elements {

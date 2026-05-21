@@ -290,6 +290,8 @@ type MatchCase struct {
 	// SeqPat is non-nil for `case [v1, v2, ...]:` arms. When set, the
 	// other pattern fields are empty.
 	SeqPat *MatchSeqPat
+	// MapPat is non-nil for `case {"k": v, ...}:` arms.
+	MapPat *MatchMapPat
 }
 
 // MatchClassPat captures a `case ClassName(kw=pat, ...)` arm. Positional
@@ -304,6 +306,15 @@ type MatchClassPat struct {
 // match with literal element patterns. Star unpacking isn't supported.
 type MatchSeqPat struct {
 	Elements []Expr
+}
+
+// MatchMapPat captures `case {"k": v, ...}:` — checks each (key, value)
+// pair is present and matches. Additional keys in the subject are
+// allowed (matches CPython's partial-match semantics). `**rest` capture
+// isn't supported.
+type MatchMapPat struct {
+	Keys   []Expr
+	Values []Expr
 }
 
 // Break and Continue map directly to Go's break / continue inside the

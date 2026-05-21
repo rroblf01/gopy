@@ -2723,6 +2723,7 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 		pat := caseNode.Child("pattern")
 		var classPat *MatchClassPat
 		var seqPat *MatchSeqPat
+		var mapPat *MatchMapPat
 		var patterns []Expr
 		switch {
 		case pat != nil && pat.Type() == "MatchClass":
@@ -2737,6 +2738,12 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 				return nil, fmt.Errorf("line %d: %w", caseNode.Lineno(), err)
 			}
 			seqPat = sp
+		case pat != nil && pat.Type() == "MatchMapping":
+			mp, err := lowerMatchMapPattern(pat, sc)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", caseNode.Lineno(), err)
+			}
+			mapPat = mp
 		default:
 			ps, err := lowerMatchPattern(pat, sc)
 			if err != nil {
@@ -2756,9 +2763,42 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		m.Cases = append(m.Cases, MatchCase{Patterns: patterns, Guard: guard, Body: body, ClassPat: classPat, SeqPat: seqPat})
+		m.Cases = append(m.Cases, MatchCase{Patterns: patterns, Guard: guard, Body: body, ClassPat: classPat, SeqPat: seqPat, MapPat: mapPat})
 	}
 	return m, nil
+}
+
+// lowerMatchMapPattern parses `case {"k": v, ...}:` — partial-match
+// mapping pattern. Each (key, value) pair must exist in the subject
+// and match. `**rest` capture isn't supported.
+func lowerMatchMapPattern(p parser.Node, sc *scope) (*MatchMapPat, error) {
+	if rest := p["rest"]; rest != nil {
+		if s, ok := rest.(string); ok && s != "" {
+			return nil, fmt.Errorf("match mapping: `**` rest capture not supported")
+		}
+	}
+	out := &MatchMapPat{}
+	keys := p.Children("keys")
+	values := p.Children("patterns")
+	if len(keys) != len(values) {
+		return nil, fmt.Errorf("match mapping: keys/patterns length mismatch")
+	}
+	for i, k := range keys {
+		ke, err := lowerExpr(k, sc)
+		if err != nil {
+			return nil, err
+		}
+		ps, err := lowerMatchPattern(values[i], sc)
+		if err != nil {
+			return nil, err
+		}
+		if len(ps) != 1 {
+			return nil, fmt.Errorf("match mapping: value must be a single literal pattern")
+		}
+		out.Keys = append(out.Keys, ke)
+		out.Values = append(out.Values, ps[0])
+	}
+	return out, nil
 }
 
 // lowerMatchSeqPattern parses `case [v1, v2, ...]:` — fixed-length
