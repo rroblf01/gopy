@@ -224,6 +224,12 @@ var stdlibModules = map[string]stdlibModule{
 			"deepcopy": {GoFunc: "__gopy_copy_deep", Helper: helperCopyDeep, HelperImports: []string{"encoding/json"}},
 		},
 	},
+	"queue": {
+		Funcs: map[string]stdlibFunc{
+			"Queue":     {GoFunc: "__gopy_queue_new", Helper: helperQueueNew, RetTag: "__Queue", ExtraHelpers: map[string]string{"__Queue": helperQueueType}, HelperImports: []string{"sync"}},
+			"LifoQueue": {GoFunc: "__gopy_lifo_queue_new", Helper: helperLifoQueueNew, RetTag: "__Queue", ExtraHelpers: map[string]string{"__Queue": helperQueueType}, HelperImports: []string{"sync"}},
+		},
+	},
 	"html": {
 		Funcs: map[string]stdlibFunc{
 			"escape":   {GoFunc: "__gopy_html_escape", Helper: helperHTMLEscape, HelperImports: []string{"strings"}, RetKind: "str"},
@@ -955,6 +961,56 @@ func (l *__Lock) Enter() *__Lock           { l.held = true; return l }
 func (l *__Lock) Exit() bool               { l.held = false; return false }`
 
 const helperThreadingLock = `func __gopy_threading_lock() *__Lock { return &__Lock{} }`
+
+// helperQueueType is a minimal FIFO/LIFO container modeled on
+// queue.Queue. Goroutine-safe via the embedded mutex. Empty() / Qsize()
+// mirror Python's introspection; Get() panics on empty (Python blocks
+// instead — gopy doesn't have a blocking channel-of-any backing it yet).
+const helperQueueType = `type __Queue struct {
+	mu    sync.Mutex
+	items []any
+	lifo  bool
+}
+
+func (q *__Queue) Put(v any) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.items = append(q.items, v)
+}
+
+func (q *__Queue) Get() any {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		panic(NewException("queue.Empty"))
+	}
+	if q.lifo {
+		v := q.items[len(q.items)-1]
+		q.items = q.items[:len(q.items)-1]
+		return v
+	}
+	v := q.items[0]
+	q.items = q.items[1:]
+	return v
+}
+
+func (q *__Queue) Qsize() int64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return int64(len(q.items))
+}
+
+func (q *__Queue) Empty() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items) == 0
+}
+
+func (q *__Queue) Full() bool { return false }`
+
+const helperQueueNew = `func __gopy_queue_new(args ...int64) *__Queue { return &__Queue{} }`
+
+const helperLifoQueueNew = `func __gopy_lifo_queue_new(args ...int64) *__Queue { return &__Queue{lifo: true} }`
 
 // helperCSVDictReader returns []map[string]string for each data row using
 // the first row as column headers. Mirrors csv.DictReader's most common

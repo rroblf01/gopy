@@ -2286,6 +2286,34 @@ func (g *gen) expr(e ir.Expr) error {
 					return nil
 				}
 			}
+			// `obj.__class__.__name__` — the inner __class__ already emits
+			// `__gopy_type(obj)` (a *__Type), so we just need its .Name.
+			if attr, ok := x.Recv.(*ir.Attribute); ok && attr.Name == "__class__" {
+				if err := g.expr(x.Recv); err != nil {
+					return err
+				}
+				g.writef(".Name")
+				return nil
+			}
+			// `Foo.__name__` where Foo is a registered class name → "Foo".
+			if n, ok := x.Recv.(*ir.Name); ok {
+				if _, ok := g.classes[n.N]; ok {
+					g.writef("%q", n.N)
+					return nil
+				}
+			}
+		}
+		// `obj.__class__` is equivalent to `type(obj)` — returns the
+		// gopy __Type tag wrapper so `.__name__` / `.__qualname__` work.
+		if x.Name == "__class__" {
+			g.addImport("fmt")
+			g.helpers["__gopy_type"] = helperGopyType
+			g.writef("__gopy_type(")
+			if err := g.boxedExpr(x.Recv); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
 		}
 		// Enum member access: `Color.RED` → `ColorRED`.
 		if n, ok := x.Recv.(*ir.Name); ok {
@@ -3582,6 +3610,13 @@ var taggedMethodRename = map[string]map[string]string{
 		"read":    "Read",
 		"close":   "Close",
 		"getcode": "Getcode",
+	},
+	"__Queue": {
+		"put":   "Put",
+		"get":   "Get",
+		"qsize": "Qsize",
+		"empty": "Empty",
+		"full":  "Full",
 	},
 }
 
