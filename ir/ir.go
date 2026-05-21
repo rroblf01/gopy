@@ -81,6 +81,10 @@ type Func struct {
 	// keyword arguments not matching any Param; codegen exposes them
 	// as `<name> map[string]any` inside the body.
 	Kwarg *Param
+	// TypeParams holds PEP 695 type parameter names declared with the
+	// `def f[T, U](...)` syntax. Codegen emits them as Go generics
+	// constrained to `any`.
+	TypeParams []string
 }
 
 func (*Func) declNode() {}

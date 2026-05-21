@@ -943,6 +943,11 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		return nil, fmt.Errorf("line %d: decorator %q not supported", n.Lineno(), name)
 	}
 	f := &Func{Name: n.Str("name")}
+	for _, tp := range n.Children("type_params") {
+		if tp.Type() == "TypeVar" {
+			f.TypeParams = append(f.TypeParams, tp.Str("name"))
+		}
+	}
 	args := n.Child("args")
 	if args == nil {
 		return nil, fmt.Errorf("FunctionDef %q missing args", f.Name)

@@ -595,7 +595,21 @@ func (g *gen) fn(fn *ir.Func) error {
 			}
 		}
 	}
-	g.writef("%s(", methodName)
+	g.writef("%s", methodName)
+	if len(fn.TypeParams) > 0 && fn.Receiver == nil {
+		// Go generics: `func name[T any, U any](...)`. Only free
+		// functions can be generic — Go methods can't introduce new
+		// type parameters separately from their receiver.
+		g.writef("[")
+		for i, tp := range fn.TypeParams {
+			if i > 0 {
+				g.writef(", ")
+			}
+			g.writef("%s any", tp)
+		}
+		g.writef("]")
+	}
+	g.writef("(")
 	for i, p := range fn.Params {
 		if i > 0 {
 			g.writef(", ")
