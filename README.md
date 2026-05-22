@@ -211,6 +211,22 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - `urllib.error` (`URLError` / `HTTPError` / `ContentTooShortError`), `urllib.robotparser.RobotFileParser`, `urllib.response.addinfourl` registered as stubs
 - `wsgiref` submodules: `wsgiref.util` (`shift_path_info` / `setup_testing_defaults` / `request_uri` / `application_uri` / `guess_scheme` / `FileWrapper` / `is_hop_by_hop`), `wsgiref.headers.Headers`, `wsgiref.simple_server` (`WSGIServer` / `WSGIRequestHandler` / `make_server` / `demo_app`), `wsgiref.handlers` (`BaseHandler` / `SimpleHandler` / `CGIHandler` / `IISCGIHandler`) registered as stubs
 - `typing` extras: `TypeGuard` / `TypeIs` / `ParamSpec` / `Concatenate` / `NotRequired` / `Required` / `ReadOnly` / `dataclass_transform` / `deprecated` / `TypeAliasType` are all identity passthroughs (usable as decorators / no-op annotations)
+- `threading` extras: `Event` / `Condition` / `Semaphore` / `BoundedSemaphore` / `Barrier` / `Thread` / `Timer` / `local` / `current_thread` / `main_thread` / `enumerate` / `excepthook` / `settrace` / `setprofile` / `stack_size` registered as stubs; `threading.active_count()` returns `1`, `threading.get_ident()` / `get_native_id()` return `1` (gopy generates synchronous Go — no real thread tracking)
+- `asyncio` extras: `gather` / `create_task` / `wait` / `wait_for` / `shield` / `as_completed` / `ensure_future` / `current_task` / `all_tasks` / `get_event_loop` / `new_event_loop` / `set_event_loop` / `get_running_loop` / `Lock` / `Event` / `Condition` / `Semaphore` / `BoundedSemaphore` / `Queue` / `LifoQueue` / `PriorityQueue` / `Task` / `Future` / `AbstractEventLoop` / `CancelledError` / `TimeoutError` / `InvalidStateError` / `open_connection` / `start_server` / `iscoroutine` / `iscoroutinefunction` registered as stubs (existing async-to-sync lowering still applies for `await`)
+- `selectors`: `BaseSelector` / `DefaultSelector` / `SelectSelector` / `PollSelector` / `EpollSelector` / `DevpollSelector` / `KqueueSelector` / `SelectorKey` registered as stubs
+- `concurrent.futures` (`ThreadPoolExecutor` / `ProcessPoolExecutor` / `Executor` / `Future` / `wait` / `as_completed` / `CancelledError` / `TimeoutError` / `BrokenExecutor` / `InvalidStateError`) plus `FIRST_COMPLETED` / `FIRST_EXCEPTION` / `ALL_COMPLETED` string constants
+- `multiprocessing` extras: `current_process` / `active_children` / `freeze_support` / `set_start_method` / `get_start_method` / `get_context` / `Process` / `Pool` / `Lock` / `RLock` / `Event` / `Condition` / `Semaphore` / `BoundedSemaphore` / `Barrier` / `Queue` / `JoinableQueue` / `SimpleQueue` / `Pipe` / `Manager` / `Value` / `Array` registered as stubs
+- `decimal` extras: rounding mode strings `ROUND_UP` / `ROUND_DOWN` / `ROUND_CEILING` / `ROUND_FLOOR` / `ROUND_HALF_UP` / `ROUND_HALF_DOWN` / `ROUND_HALF_EVEN` / `ROUND_05UP`, limits `MAX_PREC` / `MAX_EMAX` / `MIN_EMIN`, plus `Context` / `getcontext` / `setcontext` / `localcontext` / `BasicContext` / `ExtendedContext` / `DefaultContext` and decimal exception classes registered as stubs
+- `textwrap.TextWrapper` registered as a stub
+- `abc.ABC` / `ABCMeta` registered as stubs; `abstractmethod` / `abstractproperty` / `abstractclassmethod` / `abstractstaticmethod` / `update_abstractmethods` are identity decorators
+- `contextvars.ContextVar` / `Context` / `copy_context` / `Token` registered as stubs
+- `traceback` extras: `print_exception` / `format_exception` / `format_stack` / `print_stack` / `extract_stack` / `extract_tb` / `print_tb` / `format_tb` / `format_list` / `clear_frames` / `walk_stack` / `walk_tb` / `StackSummary` / `FrameSummary` / `TracebackException`. `print_exception` writes args to stderr; `format_exception` returns string slice; the rest are no-op / empty-return stubs (gopy doesn't carry Python-level frames)
+- `ssl` constants (`PROTOCOL_TLS` / `TLS_CLIENT` / `TLS_SERVER` / `TLSv1` / `TLSv1_1` / `TLSv1_2`, `CERT_NONE` / `CERT_OPTIONAL` / `CERT_REQUIRED`, `VERIFY_*`, `OP_NO_*`, `HAS_SNI` / `HAS_ECDH` / `HAS_ALPN` / `HAS_NPN`) plus `create_default_context` / `SSLContext` / `wrap_socket` / `get_server_certificate` / `Purpose` / `SSLSocket` / `SSLObject` / `SSLSession` and `SSL*Error` classes registered as stubs
+- `mmap` constants (`ACCESS_READ` / `WRITE` / `COPY` / `DEFAULT`, `MAP_SHARED` / `PRIVATE` / `ANONYMOUS` / `ANON`, `PROT_READ` / `WRITE` / `EXEC`, `PAGESIZE`, `ALLOCATIONGRANULARITY`); `mmap.mmap` registered as a stub
+- `plistlib` (`load` / `loads` / `dump` / `dumps` / `InvalidFileException` / `UID`) plus `FMT_XML` / `FMT_BINARY` constants — all registered as stubs
+- `smtplib` (`SMTP` / `SMTP_SSL` / `LMTP` + 10 exception classes), `imaplib` (`IMAP4` / `IMAP4_SSL` / `IMAP4_stream`), `poplib` (`POP3` / `POP3_SSL` / `error_proto`), `ftplib` (`FTP` / `FTP_TLS` + error classes + `FTP_PORT` / `MAXLINE` constants), `telnetlib.Telnet`, `nntplib` (`NNTP` / `NNTP_SSL` / `NNTPError`) registered as stubs
+- `xmlrpc.client` (`ServerProxy` / `MultiCall` / `Binary` / `DateTime` / `Fault` / `ProtocolError` / `ResponseError` / `Error` / `Transport` / `SafeTransport` / `loads` / `dumps`), `xmlrpc.server` (`SimpleXMLRPCServer` / `DocXMLRPCServer` / handler classes) registered as stubs
+- `xml.dom.minidom` (`Document` / `DocumentType` / `Element` / `Attr` / `Text` / `Comment` / `Node` / `NodeList` / `parseString` / `parse` / `getDOMImplementation`), `xml.sax` (`make_parser` / `parse` / `parseString` / `ContentHandler` / `ErrorHandler` / `SAXException` / `SAXParseException`) registered as stubs
 - HTTP GET: `urllib.request.urlopen(url)` returns an `HTTPResponse`-like wrapper with `.read()` (body as str), `.status`, `.headers` (dict), `.close()`, `.getcode()` — minimal subset, no POST yet
 - `html.escape(s)` (replaces `& < > " '`) and `html.unescape(s)` (via Go's `html.UnescapeString` for the full entity set)
 - `secrets.token_hex(n)` / `secrets.token_urlsafe(n)` / `secrets.token_bytes(n)` / `secrets.randbelow(n)` — backed by `crypto/rand`
@@ -320,13 +336,13 @@ CPython 3.x vs. the `gopy`-transpiled Go binary, on identical CPU-bound workload
 
 <!-- BENCH_START -->
 
-_Generated by `scripts/update_bench.sh` on 2026-05-22T08:58:02Z._
+_Generated by `scripts/update_bench.sh` on 2026-05-22T09:38:04Z._
 
 | Benchmark | CPython (ms) | gopy Go (ms) | Speedup | Python RSS (MB) | gopy RSS (MB) | RSS save |
 |-----------|-------------:|-------------:|--------:|----------------:|--------------:|---------:|
-| bench_class | 46.40 | 1.57 | 29.6x | 12.84 | 5.68 | 2.26x |
-| bench_fib | 135.47 | 5.35 | 25.3x | 12.95 | 5.21 | 2.49x |
-| bench_loop | 104.91 | 1.72 | 61.0x | 12.91 | 5.31 | 2.43x |
+| bench_class | 46.46 | 1.51 | 30.8x | 12.83 | 5.55 | 2.31x |
+| bench_fib | 136.88 | 5.47 | 25.0x | 12.83 | 5.56 | 2.31x |
+| bench_loop | 109.94 | 1.91 | 57.6x | 12.72 | 5.14 | 2.47x |
 
 _Hardware: Linux 6.18.32-1-lts x86_64. Go: go1.26.3-X:nodwarf5. Python: 3.14.5._
 

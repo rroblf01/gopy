@@ -416,6 +416,41 @@ var stdlibModules = map[string]stdlibModule{
 					},
 				},
 			},
+			"dom": {
+				Subs: map[string]stdlibModule{
+					"minidom": {
+						Funcs: map[string]stdlibFunc{
+							"Document":             {GoFunc: "__gopy_dom_doc_unused"},
+							"DocumentType":         {GoFunc: "__gopy_dom_doc_unused"},
+							"Element":              {GoFunc: "__gopy_dom_elem_unused"},
+							"Attr":                 {GoFunc: "__gopy_dom_attr_unused"},
+							"Text":                 {GoFunc: "__gopy_dom_text_unused"},
+							"Comment":              {GoFunc: "__gopy_dom_comment_unused"},
+							"Node":                 {GoFunc: "__gopy_dom_node_unused"},
+							"NodeList":             {GoFunc: "__gopy_dom_nodelist_unused"},
+							"parseString":          {GoFunc: "__gopy_dom_parse_str_unused"},
+							"parse":                {GoFunc: "__gopy_dom_parse_unused"},
+							"getDOMImplementation": {GoFunc: "__gopy_dom_impl_unused"},
+						},
+					},
+				},
+				Funcs: map[string]stdlibFunc{
+					"Node":              {GoFunc: "__gopy_dom_node_unused"},
+					"DOMException":      {GoFunc: "__gopy_dom_err_unused"},
+					"DOMImplementation": {GoFunc: "__gopy_dom_impl_unused"},
+				},
+			},
+			"sax": {
+				Funcs: map[string]stdlibFunc{
+					"make_parser":     {GoFunc: "__gopy_sax_parser_unused"},
+					"parse":           {GoFunc: "__gopy_sax_parse_unused"},
+					"parseString":     {GoFunc: "__gopy_sax_parse_unused"},
+					"ContentHandler":  {GoFunc: "__gopy_sax_handler_unused"},
+					"ErrorHandler":    {GoFunc: "__gopy_sax_handler_unused"},
+					"SAXException":    {GoFunc: "__gopy_sax_err_unused"},
+					"SAXParseException": {GoFunc: "__gopy_sax_err_unused"},
+				},
+			},
 		},
 	},
 	"http": {
@@ -467,8 +502,38 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"decimal": {
+		Attrs: map[string]stdlibAttr{
+			"ROUND_UP":         {GoExpr: `"ROUND_UP"`},
+			"ROUND_DOWN":       {GoExpr: `"ROUND_DOWN"`},
+			"ROUND_CEILING":    {GoExpr: `"ROUND_CEILING"`},
+			"ROUND_FLOOR":      {GoExpr: `"ROUND_FLOOR"`},
+			"ROUND_HALF_UP":    {GoExpr: `"ROUND_HALF_UP"`},
+			"ROUND_HALF_DOWN":  {GoExpr: `"ROUND_HALF_DOWN"`},
+			"ROUND_HALF_EVEN":  {GoExpr: `"ROUND_HALF_EVEN"`},
+			"ROUND_05UP":       {GoExpr: `"ROUND_05UP"`},
+			"MAX_PREC":         {GoExpr: "int64(999999999999999999)"},
+			"MAX_EMAX":         {GoExpr: "int64(999999999999999999)"},
+			"MIN_EMIN":         {GoExpr: "int64(-999999999999999999)"},
+		},
 		Funcs: map[string]stdlibFunc{
-			"Decimal": {GoFunc: "__gopy_decimal_new", Helper: helperDecimalNew, RetTag: "__Decimal", ExtraHelpers: map[string]string{"__Decimal": helperDecimalType}, HelperImports: []string{"fmt", "strconv"}},
+			"Decimal":          {GoFunc: "__gopy_decimal_new", Helper: helperDecimalNew, RetTag: "__Decimal", ExtraHelpers: map[string]string{"__Decimal": helperDecimalType}, HelperImports: []string{"fmt", "strconv"}},
+			"Context":          {GoFunc: "__gopy_decimal_ctx_unused"},
+			"getcontext":       {GoFunc: "__gopy_decimal_getctx_unused"},
+			"setcontext":       {GoFunc: "__gopy_decimal_setctx_unused"},
+			"localcontext":     {GoFunc: "__gopy_decimal_localctx_unused"},
+			"BasicContext":     {GoFunc: "__gopy_decimal_basicctx_unused"},
+			"ExtendedContext":  {GoFunc: "__gopy_decimal_extctx_unused"},
+			"DefaultContext":   {GoFunc: "__gopy_decimal_defctx_unused"},
+			"InvalidOperation": {GoFunc: "__gopy_decimal_err_unused"},
+			"DivisionByZero":   {GoFunc: "__gopy_decimal_err_unused"},
+			"Overflow":         {GoFunc: "__gopy_decimal_err_unused"},
+			"Underflow":        {GoFunc: "__gopy_decimal_err_unused"},
+			"Inexact":          {GoFunc: "__gopy_decimal_err_unused"},
+			"Rounded":          {GoFunc: "__gopy_decimal_err_unused"},
+			"Subnormal":        {GoFunc: "__gopy_decimal_err_unused"},
+			"Clamped":          {GoFunc: "__gopy_decimal_err_unused"},
+			"FloatOperation":   {GoFunc: "__gopy_decimal_err_unused"},
+			"DecimalException": {GoFunc: "__gopy_decimal_err_unused"},
 		},
 	},
 	"binascii": {
@@ -608,8 +673,23 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"traceback": {
 		Funcs: map[string]stdlibFunc{
-			"format_exc": {GoFunc: "__gopy_traceback_format_exc", Helper: helperTracebackFormatExc, RetKind: "str"},
-			"print_exc":  {GoFunc: "__gopy_traceback_print_exc", Helper: helperTracebackPrintExc, HelperImports: []string{"fmt", "os"}},
+			"format_exc":        {GoFunc: "__gopy_traceback_format_exc", Helper: helperTracebackFormatExc, RetKind: "str"},
+			"print_exc":         {GoFunc: "__gopy_traceback_print_exc", Helper: helperTracebackPrintExc, HelperImports: []string{"fmt", "os"}},
+			"print_exception":   {GoFunc: "__gopy_traceback_print_exception", Helper: helperTracebackPrintException, HelperImports: []string{"fmt", "os"}},
+			"format_exception":  {GoFunc: "__gopy_traceback_format_exception", Helper: helperTracebackFormatException, HelperImports: []string{"fmt"}},
+			"format_stack":      {GoFunc: "__gopy_traceback_format_stack", Helper: helperTracebackFormatStack},
+			"print_stack":       {GoFunc: "__gopy_traceback_print_stack", Helper: helperTracebackPrintStack},
+			"extract_stack":     {GoFunc: "__gopy_traceback_extract_stack", Helper: helperTracebackExtractStack},
+			"extract_tb":        {GoFunc: "__gopy_traceback_extract_tb_unused"},
+			"print_tb":          {GoFunc: "__gopy_traceback_print_tb_unused"},
+			"format_tb":         {GoFunc: "__gopy_traceback_format_tb_unused"},
+			"format_list":       {GoFunc: "__gopy_traceback_format_list_unused"},
+			"clear_frames":      {GoFunc: "__gopy_traceback_clear_unused"},
+			"walk_stack":        {GoFunc: "__gopy_traceback_walk_unused"},
+			"walk_tb":           {GoFunc: "__gopy_traceback_walk_tb_unused"},
+			"StackSummary":      {GoFunc: "__gopy_traceback_stack_summary_unused"},
+			"FrameSummary":      {GoFunc: "__gopy_traceback_frame_summary_unused"},
+			"TracebackException": {GoFunc: "__gopy_traceback_exception_unused"},
 		},
 	},
 	"inspect": {
@@ -685,6 +765,16 @@ var stdlibModules = map[string]stdlibModule{
 		Attrs: map[string]stdlibAttr{
 			"EVENT_READ":  {GoExpr: "int64(1)"},
 			"EVENT_WRITE": {GoExpr: "int64(2)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"BaseSelector":    {GoFunc: "__gopy_selectors_unused"},
+			"DefaultSelector": {GoFunc: "__gopy_selectors_unused"},
+			"SelectSelector":  {GoFunc: "__gopy_selectors_unused"},
+			"PollSelector":    {GoFunc: "__gopy_selectors_unused"},
+			"EpollSelector":   {GoFunc: "__gopy_selectors_unused"},
+			"DevpollSelector": {GoFunc: "__gopy_selectors_unused"},
+			"KqueueSelector":  {GoFunc: "__gopy_selectors_unused"},
+			"SelectorKey":     {GoFunc: "__gopy_selectors_unused"},
 		},
 	},
 	"errno": {
@@ -974,8 +1064,39 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"asyncio": {
 		Funcs: map[string]stdlibFunc{
-			"run":   {GoFunc: "__gopy_asyncio_run_unused"},
-			"sleep": {GoFunc: "__gopy_asyncio_sleep_unused"},
+			"run":             {GoFunc: "__gopy_asyncio_run_unused"},
+			"sleep":           {GoFunc: "__gopy_asyncio_sleep_unused"},
+			"gather":          {GoFunc: "__gopy_asyncio_gather_unused"},
+			"create_task":     {GoFunc: "__gopy_asyncio_create_task_unused"},
+			"wait":            {GoFunc: "__gopy_asyncio_wait_unused"},
+			"wait_for":        {GoFunc: "__gopy_asyncio_wait_for_unused"},
+			"shield":          {GoFunc: "__gopy_asyncio_shield_unused"},
+			"as_completed":    {GoFunc: "__gopy_asyncio_as_completed_unused"},
+			"ensure_future":   {GoFunc: "__gopy_asyncio_ensure_future_unused"},
+			"current_task":    {GoFunc: "__gopy_asyncio_current_task_unused"},
+			"all_tasks":       {GoFunc: "__gopy_asyncio_all_tasks_unused"},
+			"get_event_loop":  {GoFunc: "__gopy_asyncio_get_loop_unused"},
+			"new_event_loop":  {GoFunc: "__gopy_asyncio_new_loop_unused"},
+			"set_event_loop":  {GoFunc: "__gopy_asyncio_set_loop_unused"},
+			"get_running_loop": {GoFunc: "__gopy_asyncio_running_loop_unused"},
+			"Lock":            {GoFunc: "__gopy_asyncio_lock_unused"},
+			"Event":           {GoFunc: "__gopy_asyncio_event_unused"},
+			"Condition":       {GoFunc: "__gopy_asyncio_cond_unused"},
+			"Semaphore":       {GoFunc: "__gopy_asyncio_sem_unused"},
+			"BoundedSemaphore": {GoFunc: "__gopy_asyncio_sem_unused"},
+			"Queue":           {GoFunc: "__gopy_asyncio_queue_unused"},
+			"LifoQueue":       {GoFunc: "__gopy_asyncio_queue_unused"},
+			"PriorityQueue":   {GoFunc: "__gopy_asyncio_queue_unused"},
+			"Task":            {GoFunc: "__gopy_asyncio_task_unused"},
+			"Future":          {GoFunc: "__gopy_asyncio_future_unused"},
+			"AbstractEventLoop": {GoFunc: "__gopy_asyncio_abstract_loop_unused"},
+			"CancelledError":  {GoFunc: "__gopy_asyncio_cancel_err_unused"},
+			"TimeoutError":    {GoFunc: "__gopy_asyncio_timeout_err_unused"},
+			"InvalidStateError": {GoFunc: "__gopy_asyncio_state_err_unused"},
+			"open_connection": {GoFunc: "__gopy_asyncio_open_conn_unused"},
+			"start_server":    {GoFunc: "__gopy_asyncio_start_server_unused"},
+			"iscoroutine":     {GoFunc: "__gopy_asyncio_iscoro_unused"},
+			"iscoroutinefunction": {GoFunc: "__gopy_asyncio_iscoro_fn_unused"},
 		},
 	},
 	"queue": {
@@ -1302,11 +1423,12 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"textwrap": {
 		Funcs: map[string]stdlibFunc{
-			"dedent":  {GoFunc: "__gopy_textwrap_dedent", Helper: helperTextwrapDedent, RetKind: "str", HelperImports: []string{"strings"}},
-			"indent":  {GoFunc: "__gopy_textwrap_indent", Helper: helperTextwrapIndent, RetKind: "str", HelperImports: []string{"strings"}},
-			"fill":    {GoFunc: "__gopy_textwrap_fill", Helper: helperTextwrapFill, RetKind: "str", HelperImports: []string{"strings"}},
-			"wrap":    {GoFunc: "__gopy_textwrap_wrap", Helper: helperTextwrapWrap, HelperImports: []string{"strings"}},
-			"shorten": {GoFunc: "__gopy_textwrap_shorten", Helper: helperTextwrapShorten, HelperImports: []string{"strings"}, RetKind: "str"},
+			"dedent":      {GoFunc: "__gopy_textwrap_dedent", Helper: helperTextwrapDedent, RetKind: "str", HelperImports: []string{"strings"}},
+			"indent":      {GoFunc: "__gopy_textwrap_indent", Helper: helperTextwrapIndent, RetKind: "str", HelperImports: []string{"strings"}},
+			"fill":        {GoFunc: "__gopy_textwrap_fill", Helper: helperTextwrapFill, RetKind: "str", HelperImports: []string{"strings"}},
+			"wrap":        {GoFunc: "__gopy_textwrap_wrap", Helper: helperTextwrapWrap, HelperImports: []string{"strings"}},
+			"shorten":     {GoFunc: "__gopy_textwrap_shorten", Helper: helperTextwrapShorten, HelperImports: []string{"strings"}, RetKind: "str"},
+			"TextWrapper": {GoFunc: "__gopy_textwrap_class_unused"},
 		},
 	},
 	"re": {
@@ -1396,8 +1518,26 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"threading": {
 		Funcs: map[string]stdlibFunc{
-			"Lock":  {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}},
-			"RLock": {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}},
+			"Lock":          {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}},
+			"RLock":         {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}},
+			"Event":         {GoFunc: "__gopy_threading_event_unused"},
+			"Condition":     {GoFunc: "__gopy_threading_cond_unused"},
+			"Semaphore":     {GoFunc: "__gopy_threading_sem_unused"},
+			"BoundedSemaphore": {GoFunc: "__gopy_threading_sem_unused"},
+			"Barrier":       {GoFunc: "__gopy_threading_barrier_unused"},
+			"Thread":        {GoFunc: "__gopy_threading_thread_unused"},
+			"Timer":         {GoFunc: "__gopy_threading_timer_unused"},
+			"local":         {GoFunc: "__gopy_threading_local_unused"},
+			"current_thread": {GoFunc: "__gopy_threading_current_thread_unused"},
+			"main_thread":   {GoFunc: "__gopy_threading_main_thread_unused"},
+			"active_count":  {GoFunc: "__gopy_threading_active_count", Helper: helperThreadingActiveCount, RetKind: "int"},
+			"enumerate":     {GoFunc: "__gopy_threading_enumerate_unused"},
+			"get_ident":     {GoFunc: "__gopy_threading_get_ident", Helper: helperThreadingGetIdent, RetKind: "int"},
+			"get_native_id": {GoFunc: "__gopy_threading_get_ident", Helper: helperThreadingGetIdent, RetKind: "int"},
+			"settrace":      {GoFunc: "__gopy_threading_settrace_unused"},
+			"setprofile":    {GoFunc: "__gopy_threading_setprofile_unused"},
+			"stack_size":    {GoFunc: "__gopy_threading_stack_size_unused"},
+			"excepthook":    {GoFunc: "__gopy_threading_excepthook_unused"},
 		},
 	},
 	"pathlib": {
@@ -1501,7 +1641,29 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"multiprocessing": {
 		Funcs: map[string]stdlibFunc{
-			"cpu_count": {GoFunc: "runtime.NumCPU", GoImport: "runtime", RetKind: "int"},
+			"cpu_count":         {GoFunc: "runtime.NumCPU", GoImport: "runtime", RetKind: "int"},
+			"current_process":   {GoFunc: "__gopy_mp_current_process_unused"},
+			"active_children":   {GoFunc: "__gopy_mp_active_children_unused"},
+			"freeze_support":    {GoFunc: "__gopy_mp_freeze_unused"},
+			"set_start_method":  {GoFunc: "__gopy_mp_start_method_unused"},
+			"get_start_method":  {GoFunc: "__gopy_mp_start_method_unused"},
+			"get_context":       {GoFunc: "__gopy_mp_context_unused"},
+			"Process":           {GoFunc: "__gopy_mp_process_unused"},
+			"Pool":              {GoFunc: "__gopy_mp_pool_unused"},
+			"Lock":              {GoFunc: "__gopy_mp_lock_unused"},
+			"RLock":             {GoFunc: "__gopy_mp_lock_unused"},
+			"Event":             {GoFunc: "__gopy_mp_event_unused"},
+			"Condition":         {GoFunc: "__gopy_mp_cond_unused"},
+			"Semaphore":         {GoFunc: "__gopy_mp_sem_unused"},
+			"BoundedSemaphore":  {GoFunc: "__gopy_mp_sem_unused"},
+			"Barrier":           {GoFunc: "__gopy_mp_barrier_unused"},
+			"Queue":             {GoFunc: "__gopy_mp_queue_unused"},
+			"JoinableQueue":     {GoFunc: "__gopy_mp_queue_unused"},
+			"SimpleQueue":       {GoFunc: "__gopy_mp_queue_unused"},
+			"Pipe":              {GoFunc: "__gopy_mp_pipe_unused"},
+			"Manager":           {GoFunc: "__gopy_mp_manager_unused"},
+			"Value":             {GoFunc: "__gopy_mp_value_unused"},
+			"Array":             {GoFunc: "__gopy_mp_array_unused"},
 		},
 	},
 	"token": {
@@ -1693,6 +1855,218 @@ var stdlibModules = map[string]stdlibModule{
 					"IISCGIHandler":  {GoFunc: "__gopy_wsgi_iiscgi_unused"},
 				},
 			},
+		},
+	},
+	"concurrent": {
+		Subs: map[string]stdlibModule{
+			"futures": {
+				Attrs: map[string]stdlibAttr{
+					"FIRST_COMPLETED":   {GoExpr: `"FIRST_COMPLETED"`},
+					"FIRST_EXCEPTION":   {GoExpr: `"FIRST_EXCEPTION"`},
+					"ALL_COMPLETED":     {GoExpr: `"ALL_COMPLETED"`},
+				},
+				Funcs: map[string]stdlibFunc{
+					"ThreadPoolExecutor":  {GoFunc: "__gopy_cf_tpool_unused"},
+					"ProcessPoolExecutor": {GoFunc: "__gopy_cf_ppool_unused"},
+					"Executor":            {GoFunc: "__gopy_cf_exec_unused"},
+					"Future":              {GoFunc: "__gopy_cf_future_unused"},
+					"wait":                {GoFunc: "__gopy_cf_wait_unused"},
+					"as_completed":        {GoFunc: "__gopy_cf_as_completed_unused"},
+					"CancelledError":      {GoFunc: "__gopy_cf_cancel_err_unused"},
+					"TimeoutError":        {GoFunc: "__gopy_cf_timeout_err_unused"},
+					"BrokenExecutor":      {GoFunc: "__gopy_cf_broken_err_unused"},
+					"InvalidStateError":   {GoFunc: "__gopy_cf_state_err_unused"},
+				},
+			},
+		},
+	},
+	"abc": {
+		Funcs: map[string]stdlibFunc{
+			"ABC":                  {GoFunc: "__gopy_abc_unused"},
+			"ABCMeta":              {GoFunc: "__gopy_abc_unused"},
+			"abstractmethod":       {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"abstractproperty":     {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"abstractclassmethod":  {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"abstractstaticmethod": {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"get_cache_token":      {GoFunc: "__gopy_abc_cache_token_unused"},
+			"update_abstractmethods": {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+		},
+	},
+	"contextvars": {
+		Funcs: map[string]stdlibFunc{
+			"ContextVar":    {GoFunc: "__gopy_cv_unused"},
+			"Context":       {GoFunc: "__gopy_cv_unused"},
+			"copy_context":  {GoFunc: "__gopy_cv_copy_unused"},
+			"Token":         {GoFunc: "__gopy_cv_token_unused"},
+		},
+	},
+	"plistlib": {
+		Attrs: map[string]stdlibAttr{
+			"FMT_XML":    {GoExpr: "int64(1)"},
+			"FMT_BINARY": {GoExpr: "int64(2)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"load":          {GoFunc: "__gopy_plist_load_unused"},
+			"loads":         {GoFunc: "__gopy_plist_loads_unused"},
+			"dump":          {GoFunc: "__gopy_plist_dump_unused"},
+			"dumps":         {GoFunc: "__gopy_plist_dumps_unused"},
+			"InvalidFileException": {GoFunc: "__gopy_plist_err_unused"},
+			"UID":           {GoFunc: "__gopy_plist_uid_unused"},
+		},
+	},
+	"smtplib": {
+		Attrs: map[string]stdlibAttr{
+			"SMTP_PORT":     {GoExpr: "int64(25)"},
+			"SMTP_SSL_PORT": {GoExpr: "int64(465)"},
+			"LMTP_PORT":     {GoExpr: "int64(2003)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"SMTP":               {GoFunc: "__gopy_smtp_unused"},
+			"SMTP_SSL":           {GoFunc: "__gopy_smtp_unused"},
+			"LMTP":               {GoFunc: "__gopy_smtp_unused"},
+			"SMTPException":      {GoFunc: "__gopy_smtp_err_unused"},
+			"SMTPServerDisconnected": {GoFunc: "__gopy_smtp_err_unused"},
+			"SMTPResponseException": {GoFunc: "__gopy_smtp_err_unused"},
+			"SMTPSenderRefused":  {GoFunc: "__gopy_smtp_err_unused"},
+			"SMTPRecipientsRefused": {GoFunc: "__gopy_smtp_err_unused"},
+			"SMTPDataError":      {GoFunc: "__gopy_smtp_err_unused"},
+			"SMTPConnectError":   {GoFunc: "__gopy_smtp_err_unused"},
+			"SMTPHeloError":      {GoFunc: "__gopy_smtp_err_unused"},
+			"SMTPNotSupportedError": {GoFunc: "__gopy_smtp_err_unused"},
+			"SMTPAuthenticationError": {GoFunc: "__gopy_smtp_err_unused"},
+		},
+	},
+	"imaplib": {
+		Funcs: map[string]stdlibFunc{
+			"IMAP4":      {GoFunc: "__gopy_imap_unused"},
+			"IMAP4_SSL":  {GoFunc: "__gopy_imap_unused"},
+			"IMAP4_stream": {GoFunc: "__gopy_imap_unused"},
+		},
+	},
+	"poplib": {
+		Funcs: map[string]stdlibFunc{
+			"POP3":     {GoFunc: "__gopy_pop_unused"},
+			"POP3_SSL": {GoFunc: "__gopy_pop_unused"},
+			"error_proto": {GoFunc: "__gopy_pop_err_unused"},
+		},
+	},
+	"ftplib": {
+		Attrs: map[string]stdlibAttr{
+			"FTP_PORT":      {GoExpr: "int64(21)"},
+			"MAXLINE":       {GoExpr: "int64(8192)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"FTP":     {GoFunc: "__gopy_ftp_unused"},
+			"FTP_TLS": {GoFunc: "__gopy_ftp_unused"},
+			"all_errors": {GoFunc: "__gopy_ftp_err_unused"},
+			"error_reply": {GoFunc: "__gopy_ftp_err_unused"},
+			"error_temp":  {GoFunc: "__gopy_ftp_err_unused"},
+			"error_perm":  {GoFunc: "__gopy_ftp_err_unused"},
+			"error_proto": {GoFunc: "__gopy_ftp_err_unused"},
+		},
+	},
+	"telnetlib": {
+		Funcs: map[string]stdlibFunc{
+			"Telnet": {GoFunc: "__gopy_telnet_unused"},
+		},
+	},
+	"nntplib": {
+		Funcs: map[string]stdlibFunc{
+			"NNTP":     {GoFunc: "__gopy_nntp_unused"},
+			"NNTP_SSL": {GoFunc: "__gopy_nntp_unused"},
+			"NNTPError": {GoFunc: "__gopy_nntp_err_unused"},
+		},
+	},
+	"xmlrpc": {
+		Subs: map[string]stdlibModule{
+			"client": {
+				Funcs: map[string]stdlibFunc{
+					"ServerProxy":      {GoFunc: "__gopy_xmlrpc_server_proxy_unused"},
+					"MultiCall":        {GoFunc: "__gopy_xmlrpc_multicall_unused"},
+					"Binary":           {GoFunc: "__gopy_xmlrpc_binary_unused"},
+					"DateTime":         {GoFunc: "__gopy_xmlrpc_datetime_unused"},
+					"Fault":            {GoFunc: "__gopy_xmlrpc_fault_unused"},
+					"ProtocolError":    {GoFunc: "__gopy_xmlrpc_err_unused"},
+					"ResponseError":    {GoFunc: "__gopy_xmlrpc_err_unused"},
+					"Error":            {GoFunc: "__gopy_xmlrpc_err_unused"},
+					"Transport":        {GoFunc: "__gopy_xmlrpc_transport_unused"},
+					"SafeTransport":    {GoFunc: "__gopy_xmlrpc_transport_unused"},
+					"loads":            {GoFunc: "__gopy_xmlrpc_loads_unused"},
+					"dumps":            {GoFunc: "__gopy_xmlrpc_dumps_unused"},
+				},
+			},
+			"server": {
+				Funcs: map[string]stdlibFunc{
+					"SimpleXMLRPCServer":  {GoFunc: "__gopy_xmlrpc_server_unused"},
+					"DocXMLRPCServer":     {GoFunc: "__gopy_xmlrpc_server_unused"},
+					"CGIXMLRPCRequestHandler": {GoFunc: "__gopy_xmlrpc_handler_unused"},
+					"SimpleXMLRPCRequestHandler": {GoFunc: "__gopy_xmlrpc_handler_unused"},
+				},
+			},
+		},
+	},
+	"ssl": {
+		Attrs: map[string]stdlibAttr{
+			"PROTOCOL_TLS":            {GoExpr: "int64(2)"},
+			"PROTOCOL_TLS_CLIENT":     {GoExpr: "int64(16)"},
+			"PROTOCOL_TLS_SERVER":     {GoExpr: "int64(17)"},
+			"PROTOCOL_TLSv1":          {GoExpr: "int64(3)"},
+			"PROTOCOL_TLSv1_1":        {GoExpr: "int64(4)"},
+			"PROTOCOL_TLSv1_2":        {GoExpr: "int64(5)"},
+			"CERT_NONE":               {GoExpr: "int64(0)"},
+			"CERT_OPTIONAL":           {GoExpr: "int64(1)"},
+			"CERT_REQUIRED":           {GoExpr: "int64(2)"},
+			"VERIFY_DEFAULT":          {GoExpr: "int64(0)"},
+			"VERIFY_CRL_CHECK_LEAF":   {GoExpr: "int64(4)"},
+			"VERIFY_CRL_CHECK_CHAIN":  {GoExpr: "int64(12)"},
+			"VERIFY_X509_STRICT":      {GoExpr: "int64(32)"},
+			"VERIFY_X509_TRUSTED_FIRST": {GoExpr: "int64(32768)"},
+			"OP_NO_SSLv2":             {GoExpr: "int64(16777216)"},
+			"OP_NO_SSLv3":             {GoExpr: "int64(33554432)"},
+			"OP_NO_TLSv1":             {GoExpr: "int64(67108864)"},
+			"OP_NO_TLSv1_1":           {GoExpr: "int64(268435456)"},
+			"HAS_SNI":                 {GoExpr: "true"},
+			"HAS_ECDH":                {GoExpr: "true"},
+			"HAS_ALPN":                {GoExpr: "true"},
+			"HAS_NPN":                 {GoExpr: "true"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"create_default_context":  {GoFunc: "__gopy_ssl_ctx_unused"},
+			"SSLContext":              {GoFunc: "__gopy_ssl_ctx_unused"},
+			"wrap_socket":             {GoFunc: "__gopy_ssl_wrap_unused"},
+			"get_default_verify_paths": {GoFunc: "__gopy_ssl_paths_unused"},
+			"get_server_certificate":  {GoFunc: "__gopy_ssl_get_cert_unused"},
+			"SSLError":                {GoFunc: "__gopy_ssl_err_unused"},
+			"SSLZeroReturnError":      {GoFunc: "__gopy_ssl_err_unused"},
+			"SSLWantReadError":        {GoFunc: "__gopy_ssl_err_unused"},
+			"SSLWantWriteError":       {GoFunc: "__gopy_ssl_err_unused"},
+			"SSLSyscallError":         {GoFunc: "__gopy_ssl_err_unused"},
+			"SSLEOFError":             {GoFunc: "__gopy_ssl_err_unused"},
+			"CertificateError":        {GoFunc: "__gopy_ssl_err_unused"},
+			"SSLObject":               {GoFunc: "__gopy_ssl_obj_unused"},
+			"SSLSocket":               {GoFunc: "__gopy_ssl_socket_unused"},
+			"SSLSession":              {GoFunc: "__gopy_ssl_session_unused"},
+			"Purpose":                 {GoFunc: "__gopy_ssl_purpose_unused"},
+		},
+	},
+	"mmap": {
+		Attrs: map[string]stdlibAttr{
+			"ACCESS_READ":    {GoExpr: "int64(1)"},
+			"ACCESS_WRITE":   {GoExpr: "int64(2)"},
+			"ACCESS_COPY":    {GoExpr: "int64(3)"},
+			"ACCESS_DEFAULT": {GoExpr: "int64(0)"},
+			"MAP_SHARED":     {GoExpr: "int64(1)"},
+			"MAP_PRIVATE":    {GoExpr: "int64(2)"},
+			"MAP_ANONYMOUS":  {GoExpr: "int64(32)"},
+			"MAP_ANON":       {GoExpr: "int64(32)"},
+			"PROT_READ":      {GoExpr: "int64(1)"},
+			"PROT_WRITE":     {GoExpr: "int64(2)"},
+			"PROT_EXEC":      {GoExpr: "int64(4)"},
+			"PAGESIZE":       {GoExpr: "int64(4096)"},
+			"ALLOCATIONGRANULARITY": {GoExpr: "int64(4096)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"mmap": {GoFunc: "__gopy_mmap_unused"},
 		},
 	},
 }
@@ -6955,6 +7329,23 @@ const helperEmailMakeMsgid = `func __gopy_email_make_msgid(args ...string) strin
 	if host == "" { host = "localhost" }
 	return fmt.Sprintf("<%d.%d@%s>", time.Now().UnixNano(), os.Getpid(), host)
 }`
+
+const helperThreadingActiveCount = `func __gopy_threading_active_count() int64 { return int64(1) }`
+const helperThreadingGetIdent = `func __gopy_threading_get_ident() int64 { return int64(1) }`
+
+const helperTracebackPrintException = `func __gopy_traceback_print_exception(args ...any) {
+	for _, a := range args { fmt.Fprintf(os.Stderr, "%v\n", a) }
+}`
+
+const helperTracebackFormatException = `func __gopy_traceback_format_exception(args ...any) []string {
+	out := make([]string, len(args))
+	for i, a := range args { out[i] = fmt.Sprint(a) }
+	return out
+}`
+
+const helperTracebackFormatStack = `func __gopy_traceback_format_stack() []string { return []string{} }`
+const helperTracebackPrintStack = `func __gopy_traceback_print_stack() {}`
+const helperTracebackExtractStack = `func __gopy_traceback_extract_stack() []any { return []any{} }`
 
 const helperNetrcNew = `func __gopy_netrc_new(args ...string) map[string]any {
 	path := ""
