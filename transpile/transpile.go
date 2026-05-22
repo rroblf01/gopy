@@ -363,6 +363,7 @@ type gen struct {
 	body           strings.Builder
 	imports        map[string]bool
 	indent         int
+	tmpCounter     int
 	classes        map[string]*ir.Class            // class name → decl (for super() lookup)
 	funcs          map[string]*ir.Func             // free function name → decl (for kwarg/default resolution)
 	methods        map[string]map[string]*ir.Func  // class name → method name → method decl
@@ -1052,6 +1053,40 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("continue\n")
 		return nil
 	case *ir.MultiAssign:
+		// Stdlib helpers returning a slice: rewrite as
+		//   __multi := f(); a, b := __multi[0], __multi[1]
+		// so `a, b = stdlib.func()` works when the underlying helper
+		// returns []T rather than a multi-value Go function.
+		if len(x.Values) == 1 && g.callReturnsSlice(x.Values[0]) {
+			g.tmpCounter++
+			tmp := fmt.Sprintf("__multi_%d", g.tmpCounter)
+			g.writeIndent()
+			g.writef("%s := ", tmp)
+			if err := g.expr(x.Values[0]); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			for i, t := range x.Targets {
+				if i > 0 {
+					g.writef(", ")
+				}
+				g.writef("%s", t)
+			}
+			if x.Decl {
+				g.writef(" := ")
+			} else {
+				g.writef(" = ")
+			}
+			for i := range x.Targets {
+				if i > 0 {
+					g.writef(", ")
+				}
+				g.writef("%s[%d]", tmp, i)
+			}
+			g.writef("\n")
+			return nil
+		}
 		g.writeIndent()
 		for i, t := range x.Targets {
 			if i > 0 {
@@ -2328,6 +2363,19 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.StrLit:
 		g.writef("%s", strconv.Quote(x.V))
 	case *ir.Name:
+		// Bare type/class names appearing in value position (e.g.
+		// `isclass(C)`, `assert_type(x, int)`) — Go has no first-class
+		// type values, so emit a string sentinel instead. The receiving
+		// helpers either ignore the arg or only check its string form.
+		switch x.N {
+		case "int", "str", "float", "bool", "bytes", "list", "dict", "tuple", "set", "frozenset", "object", "type", "complex":
+			g.writef("%q", x.N)
+			return nil
+		}
+		if _, isClass := g.classes[x.N]; isClass {
+			g.writef("%q", x.N)
+			return nil
+		}
 		g.writef("%s", x.N)
 	case *ir.BinOp:
 		// Operator overloading for the tagged datetime / timedelta types.
@@ -2710,6 +2758,54 @@ func (g *gen) expr(e ir.Expr) error {
 				}
 				g.writef("%s", attr.GoExpr)
 				return nil
+			}
+		}
+		// Submodule attribute: html.entities.name2codepoint,
+		// datetime.timezone.utc, etc. The receiver itself is a nested
+		// Attribute chain whose terminal name resolves to a Subs entry.
+		if recv, ok := x.Recv.(*ir.Attribute); ok {
+			path := []string{}
+			cur := ir.Expr(recv)
+			for {
+				if at, ok := cur.(*ir.Attribute); ok {
+					path = append([]string{at.Name}, path...)
+					cur = at.Recv
+					continue
+				}
+				break
+			}
+			if root, ok := cur.(*ir.Name); ok {
+				if mod, ok := stdlibModules[root.N]; ok {
+					m := &mod
+					found := true
+					for _, p := range path {
+						sub, ok := m.Subs[p]
+						if !ok {
+							found = false
+							break
+						}
+						m = &sub
+					}
+					if found {
+						if attr, ok := m.Attrs[x.Name]; ok {
+							if attr.GoImport != "" {
+								g.addImport(attr.GoImport)
+							}
+							if attr.Helper != "" {
+								key := attr.HelperName
+								if key == "" {
+									key = attr.GoExpr
+								}
+								g.helpers[key] = attr.Helper
+								for _, imp := range attr.HelperImports {
+									g.addImport(imp)
+								}
+							}
+							g.writef("%s", attr.GoExpr)
+							return nil
+						}
+					}
+				}
 			}
 		}
 		// Tagged-attribute dispatch (e.g. CompletedProcess.stdout).
@@ -10762,8 +10858,79 @@ func (g *gen) emitInOp(x *ir.CmpOp) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("`in` / `not in` requires receiver with known str / dict / list type")
+	// Fallback: receiver type unknown at codegen time. Route through
+	// a runtime helper that pattern-matches the concrete container
+	// type (string / map / slice). Lets `x in helper_returning_list()`
+	// work when the list was returned from a slice-helper with no
+	// declared RetKind.
+	g.helpers["__gopy_contains_any"] = helperContainsAny
+	g.addImport("strings")
+	g.addImport("fmt")
+	if negate {
+		g.writef("(!__gopy_contains_any(")
+	} else {
+		g.writef("__gopy_contains_any(")
+	}
+	if err := g.expr(x.R); err != nil {
+		return err
+	}
+	g.writef(", ")
+	if err := g.expr(x.L); err != nil {
+		return err
+	}
+	if negate {
+		g.writef("))")
+	} else {
+		g.writef(")")
+	}
+	return nil
 }
+
+const helperContainsAny = `func __gopy_contains_any(haystack, needle any) bool {
+	switch h := haystack.(type) {
+	case string:
+		if n, ok := needle.(string); ok { return strings.Contains(h, n) }
+		return false
+	case map[string]any:
+		if k, ok := needle.(string); ok { _, ok := h[k]; return ok }
+		return false
+	case map[string]string:
+		if k, ok := needle.(string); ok { _, ok := h[k]; return ok }
+		return false
+	case map[string]int64:
+		if k, ok := needle.(string); ok { _, ok := h[k]; return ok }
+		return false
+	case []any:
+		for _, v := range h { if fmt.Sprint(v) == fmt.Sprint(needle) { return true } }
+		return false
+	case []string:
+		if n, ok := needle.(string); ok {
+			for _, v := range h { if v == n { return true } }
+		}
+		return false
+	case []int64:
+		if n, ok := needle.(int64); ok {
+			for _, v := range h { if v == n { return true } }
+		}
+		return false
+	case []int:
+		if n, ok := needle.(int); ok {
+			for _, v := range h { if v == n { return true } }
+		}
+		return false
+	case []float64:
+		if n, ok := needle.(float64); ok {
+			for _, v := range h { if v == n { return true } }
+		}
+		return false
+	case []bool:
+		if n, ok := needle.(bool); ok {
+			for _, v := range h { if v == n { return true } }
+		}
+		return false
+	}
+	return false
+}`
 
 // emitMethodOp renders `recv.Method(arg)` — used by BinOp rewriting when
 // operator overloading on tagged stdlib types needs to delegate to a Go
@@ -10915,6 +11082,58 @@ func (g *gen) stdlibCallRetType(e ir.Expr) *ir.Type {
 		return &ir.Type{Kind: ir.TyBool}
 	}
 	return nil
+}
+
+// callReturnsSlice reports whether the given expression is a Call /
+// MethodCall against a stdlib helper that is known to return a Go
+// slice (rather than multi-return Go values or a primitive). Used by
+// MultiAssign codegen to destructure `a, b = helper()` via an indexed
+// temp variable.
+func (g *gen) callReturnsSlice(e ir.Expr) bool {
+	var path, method string
+	switch x := e.(type) {
+	case *ir.Call:
+		n, ok := x.Func.(*ir.Name)
+		if !ok {
+			return false
+		}
+		p, hit := g.aliases[n.N]
+		if !hit {
+			return false
+		}
+		segs := splitDotted(p)
+		if len(segs) < 2 {
+			return false
+		}
+		path = strings.Join(segs[:len(segs)-1], ".")
+		method = segs[len(segs)-1]
+	case *ir.MethodCall:
+		p, ok := stdlibPathOf(x.Recv, g.aliases)
+		if !ok {
+			return false
+		}
+		path = p
+		method = x.Method
+	default:
+		return false
+	}
+	fn := lookupStdlibFunc(path, method)
+	if fn == nil {
+		return false
+	}
+	// Primitive returns are clearly not slices.
+	if fn.RetKind == "str" || fn.RetKind == "int" || fn.RetKind == "float" || fn.RetKind == "bool" {
+		return false
+	}
+	// Tagged opaque returns aren't slices either.
+	if fn.RetTag != "" {
+		return false
+	}
+	// Otherwise the helper likely returns []T / []any. Allowing the
+	// false positive here is safe — Go would fail at compile time if
+	// the result isn't indexable, which is preferable to silently
+	// emitting an invalid `a, b := f()` form.
+	return fn.Helper != ""
 }
 
 // userCallRetType returns the declared return type of a user-defined
