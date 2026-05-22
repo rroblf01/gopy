@@ -85,24 +85,36 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"time": {
+		Attrs: map[string]stdlibAttr{
+			"CLOCK_REALTIME":  {GoExpr: "int64(0)"},
+			"CLOCK_MONOTONIC": {GoExpr: "int64(1)"},
+		},
 		Funcs: map[string]stdlibFunc{
-			"time":         {GoFunc: "__gopy_time_now_seconds", GoImport: "time", Helper: helperTimeNowSeconds, RetKind: "float"},
-			"sleep":        {GoFunc: "__gopy_time_sleep", GoImport: "time", Helper: helperTimeSleep},
-			"monotonic":    {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
-			"perf_counter": {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
-			"time_ns":      {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
-			"strftime":     {GoFunc: "__gopy_time_strftime", GoImport: "time", Helper: helperTimeStrftime, HelperImports: []string{"strings"}, RetKind: "str"},
-			"localtime":    {GoFunc: "__gopy_time_localtime", GoImport: "time", Helper: helperTimeLocaltime},
-			"gmtime":       {GoFunc: "__gopy_time_gmtime", GoImport: "time", Helper: helperTimeGmtime},
-			"mktime":       {GoFunc: "__gopy_time_mktime", GoImport: "time", Helper: helperTimeMktime, RetKind: "float"},
+			"time":             {GoFunc: "__gopy_time_now_seconds", GoImport: "time", Helper: helperTimeNowSeconds, RetKind: "float"},
+			"sleep":            {GoFunc: "__gopy_time_sleep", GoImport: "time", Helper: helperTimeSleep},
+			"monotonic":        {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
+			"perf_counter":     {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
+			"perf_counter_ns":  {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
+			"monotonic_ns":     {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
+			"process_time":     {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
+			"process_time_ns":  {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
+			"thread_time":      {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
+			"thread_time_ns":   {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
+			"time_ns":          {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
+			"strftime":         {GoFunc: "__gopy_time_strftime", GoImport: "time", Helper: helperTimeStrftime, HelperImports: []string{"strings"}, RetKind: "str"},
+			"localtime":        {GoFunc: "__gopy_time_localtime", GoImport: "time", Helper: helperTimeLocaltime},
+			"gmtime":           {GoFunc: "__gopy_time_gmtime", GoImport: "time", Helper: helperTimeGmtime},
+			"mktime":           {GoFunc: "__gopy_time_mktime", GoImport: "time", Helper: helperTimeMktime, RetKind: "float"},
 		},
 	},
 	"json": {
 		Funcs: map[string]stdlibFunc{
-			"dumps": {GoFunc: "__gopy_json_dumps", GoImport: "encoding/json", Helper: helperJSONDumps, HelperImports: []string{"strings"}},
-			"loads": {GoFunc: "__gopy_json_loads", GoImport: "encoding/json", Helper: helperJSONLoads},
-			"load":  {GoFunc: "__gopy_json_load", GoImport: "encoding/json", Helper: helperJSONLoad, HelperImports: []string{"io"}},
-			"dump":  {GoFunc: "__gopy_json_dump", GoImport: "encoding/json", Helper: helperJSONDump, HelperImports: []string{"strings"}},
+			"dumps":      {GoFunc: "__gopy_json_dumps", GoImport: "encoding/json", Helper: helperJSONDumps, HelperImports: []string{"strings"}},
+			"loads":      {GoFunc: "__gopy_json_loads", GoImport: "encoding/json", Helper: helperJSONLoads},
+			"load":       {GoFunc: "__gopy_json_load", GoImport: "encoding/json", Helper: helperJSONLoad, HelperImports: []string{"io"}},
+			"dump":       {GoFunc: "__gopy_json_dump", GoImport: "encoding/json", Helper: helperJSONDump, HelperImports: []string{"strings"}},
+			"JSONEncoder": {GoFunc: "__gopy_json_encoder_unused"},
+			"JSONDecoder": {GoFunc: "__gopy_json_decoder_unused"},
 		},
 	},
 	"math": {
@@ -198,6 +210,8 @@ var stdlibModules = map[string]stdlibModule{
 			"b32decode":         {GoFunc: "__gopy_b32decode", GoImport: "encoding/base32", Helper: helperB32Decode, RetKind: "str"},
 			"b16encode":         {GoFunc: "__gopy_b16encode", GoImport: "encoding/hex", Helper: helperB16Encode, HelperImports: []string{"strings"}, RetKind: "str"},
 			"b16decode":         {GoFunc: "__gopy_b16decode", GoImport: "encoding/hex", Helper: helperB16Decode, RetKind: "str"},
+			"a85encode":         {GoFunc: "__gopy_a85encode", GoImport: "encoding/ascii85", Helper: helperA85Encode, RetKind: "str"},
+			"a85decode":         {GoFunc: "__gopy_a85decode", GoImport: "encoding/ascii85", Helper: helperA85Decode, RetKind: "str"},
 		},
 	},
 	"urllib": {
@@ -419,14 +433,23 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"inspect": {
 		Funcs: map[string]stdlibFunc{
-			"signature":   {GoFunc: "__gopy_inspect_sig", Helper: helperInspectSig, RetKind: "str"},
-			"getsource":   {GoFunc: "__gopy_inspect_source", Helper: helperInspectSource, RetKind: "str"},
-			"getmembers":  {GoFunc: "__gopy_inspect_members", Helper: helperInspectMembers},
-			"isfunction":  {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
-			"isclass":     {GoFunc: "__gopy_inspect_isclass", Helper: helperInspectIsclass, RetKind: "bool"},
-			"ismethod":    {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
-			"currentframe": {GoFunc: "__gopy_inspect_frame", Helper: helperInspectFrame},
-			"stack":       {GoFunc: "__gopy_inspect_stack", Helper: helperInspectStack},
+			"signature":       {GoFunc: "__gopy_inspect_sig", Helper: helperInspectSig, RetKind: "str"},
+			"getsource":       {GoFunc: "__gopy_inspect_source", Helper: helperInspectSource, RetKind: "str"},
+			"getmembers":      {GoFunc: "__gopy_inspect_members", Helper: helperInspectMembers},
+			"isfunction":      {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"isclass":         {GoFunc: "__gopy_inspect_isclass", Helper: helperInspectIsclass, RetKind: "bool"},
+			"ismethod":        {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"isbuiltin":       {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"iscoroutine":     {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"iscoroutinefunction": {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"isgenerator":     {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"isgeneratorfunction": {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"isawaitable":     {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
+			"getfullargspec":  {GoFunc: "__gopy_inspect_argspec", Helper: helperInspectArgspec, RetKind: "str"},
+			"getmodule":       {GoFunc: "__gopy_inspect_getmodule", Helper: helperInspectGetmodule, RetKind: "str"},
+			"getfile":         {GoFunc: "__gopy_inspect_getfile", Helper: helperInspectGetfile, RetKind: "str"},
+			"currentframe":    {GoFunc: "__gopy_inspect_frame", Helper: helperInspectFrame},
+			"stack":           {GoFunc: "__gopy_inspect_stack", Helper: helperInspectStack},
 		},
 	},
 	"operator": {
@@ -434,6 +457,22 @@ var stdlibModules = map[string]stdlibModule{
 			"add":         {GoFunc: "__gopy_operator_add", Helper: helperOpAdd, RetKind: "int"},
 			"sub":         {GoFunc: "__gopy_operator_sub", Helper: helperOpSub, RetKind: "int"},
 			"mul":         {GoFunc: "__gopy_operator_mul", Helper: helperOpMul, RetKind: "int"},
+			"truediv":     {GoFunc: "__gopy_operator_truediv", Helper: helperOpTruediv, RetKind: "float"},
+			"floordiv":    {GoFunc: "__gopy_operator_floordiv", Helper: helperOpFloordiv, RetKind: "int"},
+			"mod":         {GoFunc: "__gopy_operator_mod", Helper: helperOpMod, RetKind: "int"},
+			"neg":         {GoFunc: "__gopy_operator_neg", Helper: helperOpNeg, RetKind: "int"},
+			"pos":         {GoFunc: "__gopy_operator_pos", Helper: helperOpPos, RetKind: "int"},
+			"abs":         {GoFunc: "__gopy_operator_abs", Helper: helperOpAbs, RetKind: "int"},
+			"lt":          {GoFunc: "__gopy_operator_lt", Helper: helperOpLt, RetKind: "bool"},
+			"le":          {GoFunc: "__gopy_operator_le", Helper: helperOpLe, RetKind: "bool"},
+			"eq":          {GoFunc: "__gopy_operator_eq", Helper: helperOpEq, RetKind: "bool"},
+			"ne":          {GoFunc: "__gopy_operator_ne", Helper: helperOpNe, RetKind: "bool"},
+			"gt":          {GoFunc: "__gopy_operator_gt", Helper: helperOpGt, RetKind: "bool"},
+			"ge":          {GoFunc: "__gopy_operator_ge", Helper: helperOpGe, RetKind: "bool"},
+			"not_":        {GoFunc: "__gopy_operator_not", Helper: helperOpNot, RetKind: "bool"},
+			"truth":       {GoFunc: "__gopy_operator_truth", Helper: helperOpTruth, RetKind: "bool"},
+			"is_":         {GoFunc: "__gopy_operator_is", Helper: helperOpIs, RetKind: "bool"},
+			"is_not":      {GoFunc: "__gopy_operator_isnot", Helper: helperOpIsnot, RetKind: "bool"},
 			"itemgetter":  {GoFunc: "__gopy_operator_itemgetter", Helper: helperOpItemgetter},
 			"attrgetter":  {GoFunc: "__gopy_operator_attrgetter", Helper: helperOpAttrgetter},
 		},
@@ -713,7 +752,10 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"glob": {
 		Funcs: map[string]stdlibFunc{
-			"glob": {GoFunc: "__gopy_glob", GoImport: "path/filepath", Helper: helperGlob},
+			"glob":      {GoFunc: "__gopy_glob", GoImport: "path/filepath", Helper: helperGlob},
+			"iglob":     {GoFunc: "__gopy_glob", GoImport: "path/filepath", Helper: helperGlob},
+			"has_magic": {GoFunc: "__gopy_glob_has_magic", Helper: helperGlobHasMagic, HelperImports: []string{"strings"}, RetKind: "bool"},
+			"escape":    {GoFunc: "__gopy_glob_escape", Helper: helperGlobEscape, HelperImports: []string{"strings"}, RetKind: "str"},
 		},
 	},
 	"calendar": {
@@ -724,9 +766,11 @@ var stdlibModules = map[string]stdlibModule{
 			"day_abbr":   {GoExpr: `[]string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}`},
 		},
 		Funcs: map[string]stdlibFunc{
-			"isleap":     {GoFunc: "__gopy_cal_isleap", Helper: helperCalIsleap, RetKind: "bool"},
-			"monthrange": {GoFunc: "__gopy_cal_monthrange", GoImport: "time", Helper: helperCalMonthrange},
-			"weekday":    {GoFunc: "__gopy_cal_weekday", GoImport: "time", Helper: helperCalWeekday, RetKind: "int"},
+			"isleap":        {GoFunc: "__gopy_cal_isleap", Helper: helperCalIsleap, RetKind: "bool"},
+			"monthrange":    {GoFunc: "__gopy_cal_monthrange", GoImport: "time", Helper: helperCalMonthrange},
+			"weekday":       {GoFunc: "__gopy_cal_weekday", GoImport: "time", Helper: helperCalWeekday, RetKind: "int"},
+			"monthcalendar": {GoFunc: "__gopy_cal_monthcal", GoImport: "time", Helper: helperCalMonthcalendar, ExtraHelpers: map[string]string{"__gopy_cal_monthrange": helperCalMonthrange}},
+			"leapdays":      {GoFunc: "__gopy_cal_leapdays", Helper: helperCalLeapdays, ExtraHelpers: map[string]string{"__gopy_cal_isleap": helperCalIsleap}, RetKind: "int"},
 		},
 	},
 	"socket": {
@@ -954,6 +998,14 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"csv": {
+		Attrs: map[string]stdlibAttr{
+			"QUOTE_ALL":           {GoExpr: "int64(1)"},
+			"QUOTE_MINIMAL":       {GoExpr: "int64(0)"},
+			"QUOTE_NONNUMERIC":    {GoExpr: "int64(2)"},
+			"QUOTE_NONE":          {GoExpr: "int64(3)"},
+			"QUOTE_STRINGS":       {GoExpr: "int64(4)"},
+			"QUOTE_NOTNULL":       {GoExpr: "int64(5)"},
+		},
 		Funcs: map[string]stdlibFunc{
 			"reader":     {GoFunc: "__gopy_csv_reader", GoImport: "encoding/csv", Helper: helperCSVReader, HelperImports: []string{"strings"}},
 			"writer":     {GoFunc: "__gopy_csv_writer_new", GoImport: "encoding/csv", Helper: helperCSVWriterNew, RetTag: "__CSVWriter", ExtraHelpers: map[string]string{"__CSVWriter": helperCSVWriterType}},
@@ -970,12 +1022,19 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			// typing.cast at runtime is the identity — dispatched in
 			// transpile.go's call() so the second arg passes through.
-			"cast":           {GoFunc: "__gopy_typing_cast_unused"},
-			"get_type_hints": {GoFunc: "__gopy_typing_hints", Helper: helperTypingHints},
-			"get_args":       {GoFunc: "__gopy_typing_args", Helper: helperTypingArgs},
-			"get_origin":     {GoFunc: "__gopy_typing_origin", Helper: helperTypingOrigin},
-			"NewType":        {GoFunc: "__gopy_typing_newtype", Helper: helperTypingNewtype},
-			"TYPE_CHECKING":  {GoFunc: "__gopy_typing_typecheck_unused"},
+			"cast":              {GoFunc: "__gopy_typing_cast_unused"},
+			"get_type_hints":    {GoFunc: "__gopy_typing_hints", Helper: helperTypingHints},
+			"get_args":          {GoFunc: "__gopy_typing_args", Helper: helperTypingArgs},
+			"get_origin":        {GoFunc: "__gopy_typing_origin", Helper: helperTypingOrigin},
+			"NewType":           {GoFunc: "__gopy_typing_newtype", Helper: helperTypingNewtype},
+			"TYPE_CHECKING":     {GoFunc: "__gopy_typing_typecheck_unused"},
+			"runtime_checkable": {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"override":          {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"final":             {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"no_type_check":     {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"assert_type":       {GoFunc: "__gopy_typing_assert_type", Helper: helperTypingAssertType},
+			"assert_never":      {GoFunc: "__gopy_typing_assert_never", Helper: helperTypingAssertNever},
+			"reveal_type":       {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
 		},
 	},
 	"threading": {
@@ -5846,6 +5905,149 @@ const helperTextwrapWrap = `func __gopy_textwrap_wrap(s string, width int64) []s
 	lines = append(lines, cur)
 	return lines
 }`
+
+const helperInspectArgspec = `func __gopy_inspect_argspec(_ any) string { return "FullArgSpec()" }`
+
+const helperInspectGetmodule = `func __gopy_inspect_getmodule(_ any) string { return "main" }`
+
+const helperInspectGetfile = `func __gopy_inspect_getfile(_ any) string { return "<gopy>" }`
+
+const helperGlobHasMagic = `func __gopy_glob_has_magic(s string) bool {
+	return strings.ContainsAny(s, "*?[")
+}`
+
+const helperGlobEscape = `func __gopy_glob_escape(s string) string {
+	out := strings.Builder{}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '*' || c == '?' || c == '[' {
+			out.WriteByte('[')
+			out.WriteByte(c)
+			out.WriteByte(']')
+		} else {
+			out.WriteByte(c)
+		}
+	}
+	return out.String()
+}`
+
+const helperCalMonthcalendar = `func __gopy_cal_monthcal(year, month int64) [][]int64 {
+	pair := __gopy_cal_monthrange(year, month)
+	firstWeekday := pair[0]
+	daysInMonth := pair[1]
+	weeks := [][]int64{}
+	week := make([]int64, 7)
+	for i := int64(0); i < firstWeekday; i++ { week[i] = 0 }
+	day := int64(1)
+	wd := firstWeekday
+	for day <= daysInMonth {
+		week[wd] = day
+		wd++
+		if wd == 7 {
+			weeks = append(weeks, week)
+			week = make([]int64, 7)
+			wd = 0
+		}
+		day++
+	}
+	if wd != 0 {
+		weeks = append(weeks, week)
+	}
+	return weeks
+}`
+
+const helperCalLeapdays = `func __gopy_cal_leapdays(y1, y2 int64) int64 {
+	count := int64(0)
+	for y := y1; y < y2; y++ {
+		if __gopy_cal_isleap(y) { count++ }
+	}
+	return count
+}`
+
+const helperOpTruediv = `func __gopy_operator_truediv(a, b any) float64 {
+	af, _ := __gopy_to_float(a)
+	bf, _ := __gopy_to_float(b)
+	return af / bf
+}
+func __gopy_to_float(x any) (float64, bool) {
+	switch v := x.(type) {
+	case int: return float64(v), true
+	case int64: return float64(v), true
+	case float64: return v, true
+	case float32: return float64(v), true
+	}
+	return 0, false
+}`
+
+const helperOpFloordiv = `func __gopy_operator_floordiv(a, b int64) int64 {
+	q := a / b
+	if (a%b != 0) && ((a < 0) != (b < 0)) { q-- }
+	return q
+}`
+
+const helperOpMod = `func __gopy_operator_mod(a, b int64) int64 {
+	r := a % b
+	if r != 0 && ((r < 0) != (b < 0)) { r += b }
+	return r
+}`
+
+const helperOpNeg = `func __gopy_operator_neg(a int64) int64 { return -a }`
+const helperOpPos = `func __gopy_operator_pos(a int64) int64 { return a }`
+const helperOpAbs = `func __gopy_operator_abs(a int64) int64 { if a < 0 { return -a }; return a }`
+const helperOpLt = `func __gopy_operator_lt(a, b int64) bool { return a < b }`
+const helperOpLe = `func __gopy_operator_le(a, b int64) bool { return a <= b }`
+const helperOpEq = `func __gopy_operator_eq(a, b any) bool { return a == b }`
+const helperOpNe = `func __gopy_operator_ne(a, b any) bool { return a != b }`
+const helperOpGt = `func __gopy_operator_gt(a, b int64) bool { return a > b }`
+const helperOpGe = `func __gopy_operator_ge(a, b int64) bool { return a >= b }`
+const helperOpNot = `func __gopy_operator_not(a any) bool {
+	switch v := a.(type) {
+	case bool: return !v
+	case int: return v == 0
+	case int64: return v == 0
+	case float64: return v == 0
+	case string: return v == ""
+	case nil: return true
+	}
+	return false
+}`
+const helperOpTruth = `func __gopy_operator_truth(a any) bool {
+	switch v := a.(type) {
+	case bool: return v
+	case int: return v != 0
+	case int64: return v != 0
+	case float64: return v != 0
+	case string: return v != ""
+	case nil: return false
+	}
+	return true
+}`
+const helperOpIs = `func __gopy_operator_is(a, b any) bool { return a == b }`
+const helperOpIsnot = `func __gopy_operator_isnot(a, b any) bool { return a != b }`
+
+const helperA85Encode = `func __gopy_a85encode(s string) string {
+	in := []byte(s)
+	maxLen := ascii85.MaxEncodedLen(len(in))
+	out := make([]byte, maxLen)
+	n := ascii85.Encode(out, in)
+	return string(out[:n])
+}`
+
+const helperA85Decode = `func __gopy_a85decode(s string) string {
+	in := []byte(s)
+	out := make([]byte, len(in))
+	n, _, _ := ascii85.Decode(out, in, true)
+	return string(out[:n])
+}`
+
+const helperTypingPassthrough = `func __gopy_typing_passthrough(args ...any) any {
+	if len(args) > 0 { return args[0] }
+	return nil
+}`
+
+const helperTypingAssertType = `func __gopy_typing_assert_type(val any, _ any) any { return val }`
+
+const helperTypingAssertNever = `func __gopy_typing_assert_never(_ any) { panic("assert_never reached") }`
 
 const helperTextwrapShorten = `func __gopy_textwrap_shorten(s string, width int64) string {
 	words := strings.Fields(s)
