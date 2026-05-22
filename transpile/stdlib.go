@@ -54,6 +54,15 @@ var stdlibModules = map[string]stdlibModule{
 			"urandom":   {GoFunc: "__gopy_os_urandom", Helper: helperOsUrandom, HelperImports: []string{"crypto/rand"}, RetKind: "str"},
 			"walk":      {GoFunc: "__gopy_os_walk", Helper: helperOsWalk, HelperImports: []string{"os", "path/filepath"}},
 			"chdir":     {GoFunc: "os.Chdir", GoImport: "os"},
+			"getpid":    {GoFunc: "__gopy_os_getpid", GoImport: "os", Helper: helperOsGetpid, RetKind: "int"},
+			"getppid":   {GoFunc: "__gopy_os_getppid", GoImport: "os", Helper: helperOsGetppid, RetKind: "int"},
+			"getuid":    {GoFunc: "__gopy_os_getuid", GoImport: "os", Helper: helperOsGetuid, RetKind: "int"},
+			"geteuid":   {GoFunc: "__gopy_os_geteuid", GoImport: "os", Helper: helperOsGeteuid, RetKind: "int"},
+			"getgid":    {GoFunc: "__gopy_os_getgid", GoImport: "os", Helper: helperOsGetgid, RetKind: "int"},
+			"getegid":   {GoFunc: "__gopy_os_getegid", GoImport: "os", Helper: helperOsGetegid, RetKind: "int"},
+			"getlogin":  {GoFunc: "__gopy_os_getlogin", GoImport: "os", Helper: helperOsGetlogin, HelperImports: []string{"os/user"}, RetKind: "str"},
+			"system":    {GoFunc: "__gopy_os_system", Helper: helperOsSystem, HelperImports: []string{"os/exec", "os"}, RetKind: "int"},
+			"fspath":    {GoFunc: "__gopy_os_fspath", Helper: helperOsFspath, RetKind: "str"},
 		},
 		Subs: map[string]stdlibModule{
 			"path": {
@@ -80,6 +89,8 @@ var stdlibModules = map[string]stdlibModule{
 					"realpath":     {GoFunc: "__gopy_path_realpath", GoImport: "path/filepath", Helper: helperPathRealpath, RetKind: "str"},
 					"commonpath":   {GoFunc: "__gopy_path_commonpath", GoImport: "path/filepath", Helper: helperPathCommonpath, HelperImports: []string{"strings"}, RetKind: "str"},
 					"normcase":     {GoFunc: "__gopy_path_normcase", Helper: helperPathNormcase, RetKind: "str"},
+					"ismount":      {GoFunc: "__gopy_path_ismount", Helper: helperPathIsmount, HelperImports: []string{"os"}, RetKind: "bool"},
+					"splitdrive":   {GoFunc: "__gopy_path_splitdrive", Helper: helperPathSplitdrive},
 				},
 			},
 		},
@@ -189,6 +200,7 @@ var stdlibModules = map[string]stdlibModule{
 			"sha224": {GoFunc: "__gopy_hashlib_sha224", GoImport: "crypto/sha256", Helper: helperHashlibSha224, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha1", "crypto/sha512"}},
 			"sha384": {GoFunc: "__gopy_hashlib_sha384", GoImport: "crypto/sha512", Helper: helperHashlibSha384, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha1", "crypto/sha256"}},
 			"new":    {GoFunc: "__gopy_hashlib_new", Helper: helperHashlibNew, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha1", "crypto/sha256", "crypto/sha512"}},
+			"pbkdf2_hmac": {GoFunc: "__gopy_hashlib_pbkdf2", Helper: helperHashlibPbkdf2, HelperImports: []string{"crypto/hmac", "crypto/sha1", "crypto/sha256", "crypto/sha512", "crypto/md5", "hash", "encoding/binary", "encoding/hex"}, RetKind: "str"},
 		},
 	},
 	"secrets": {
@@ -502,22 +514,58 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"errno": {
 		Attrs: map[string]stdlibAttr{
-			"EACCES":   {GoExpr: "int64(13)"},
-			"EBADF":    {GoExpr: "int64(9)"},
-			"EBUSY":    {GoExpr: "int64(16)"},
-			"ECONNREFUSED": {GoExpr: "int64(111)"},
-			"EEXIST":   {GoExpr: "int64(17)"},
-			"EINTR":    {GoExpr: "int64(4)"},
-			"EINVAL":   {GoExpr: "int64(22)"},
-			"EIO":      {GoExpr: "int64(5)"},
-			"EISDIR":   {GoExpr: "int64(21)"},
-			"ENOENT":   {GoExpr: "int64(2)"},
-			"ENOMEM":   {GoExpr: "int64(12)"},
-			"ENOSPC":   {GoExpr: "int64(28)"},
-			"ENOTDIR":  {GoExpr: "int64(20)"},
-			"EPERM":    {GoExpr: "int64(1)"},
-			"EPIPE":    {GoExpr: "int64(32)"},
-			"ETIMEDOUT": {GoExpr: "int64(110)"},
+			"EACCES":          {GoExpr: "int64(13)"},
+			"EBADF":           {GoExpr: "int64(9)"},
+			"EBUSY":           {GoExpr: "int64(16)"},
+			"ECONNREFUSED":    {GoExpr: "int64(111)"},
+			"EEXIST":          {GoExpr: "int64(17)"},
+			"EINTR":           {GoExpr: "int64(4)"},
+			"EINVAL":          {GoExpr: "int64(22)"},
+			"EIO":             {GoExpr: "int64(5)"},
+			"EISDIR":          {GoExpr: "int64(21)"},
+			"ENOENT":          {GoExpr: "int64(2)"},
+			"ENOMEM":          {GoExpr: "int64(12)"},
+			"ENOSPC":          {GoExpr: "int64(28)"},
+			"ENOTDIR":         {GoExpr: "int64(20)"},
+			"EPERM":           {GoExpr: "int64(1)"},
+			"EPIPE":           {GoExpr: "int64(32)"},
+			"ETIMEDOUT":       {GoExpr: "int64(110)"},
+			"EAGAIN":          {GoExpr: "int64(11)"},
+			"EWOULDBLOCK":     {GoExpr: "int64(11)"},
+			"ECHILD":          {GoExpr: "int64(10)"},
+			"EFAULT":          {GoExpr: "int64(14)"},
+			"ENFILE":          {GoExpr: "int64(23)"},
+			"EMFILE":          {GoExpr: "int64(24)"},
+			"ENOTTY":          {GoExpr: "int64(25)"},
+			"EXDEV":           {GoExpr: "int64(18)"},
+			"EROFS":           {GoExpr: "int64(30)"},
+			"ESPIPE":          {GoExpr: "int64(29)"},
+			"ENXIO":           {GoExpr: "int64(6)"},
+			"EDOM":            {GoExpr: "int64(33)"},
+			"ERANGE":          {GoExpr: "int64(34)"},
+			"ECONNRESET":      {GoExpr: "int64(104)"},
+			"ECONNABORTED":    {GoExpr: "int64(103)"},
+			"EADDRINUSE":      {GoExpr: "int64(98)"},
+			"EADDRNOTAVAIL":   {GoExpr: "int64(99)"},
+			"EHOSTUNREACH":    {GoExpr: "int64(113)"},
+			"EHOSTDOWN":       {GoExpr: "int64(112)"},
+			"ENETUNREACH":     {GoExpr: "int64(101)"},
+			"ENETDOWN":        {GoExpr: "int64(100)"},
+			"EINPROGRESS":     {GoExpr: "int64(115)"},
+			"EALREADY":        {GoExpr: "int64(114)"},
+			"EISCONN":         {GoExpr: "int64(106)"},
+			"ENOTCONN":        {GoExpr: "int64(107)"},
+			"ENOTSOCK":        {GoExpr: "int64(88)"},
+			"EAFNOSUPPORT":    {GoExpr: "int64(97)"},
+			"EPROTOTYPE":      {GoExpr: "int64(91)"},
+			"EPROTONOSUPPORT": {GoExpr: "int64(93)"},
+			"EOPNOTSUPP":      {GoExpr: "int64(95)"},
+			"EPFNOSUPPORT":    {GoExpr: "int64(96)"},
+			"ELOOP":           {GoExpr: "int64(40)"},
+			"ENAMETOOLONG":    {GoExpr: "int64(36)"},
+			"ENOTEMPTY":       {GoExpr: "int64(39)"},
+			"EDQUOT":          {GoExpr: "int64(122)"},
+			"EOVERFLOW":       {GoExpr: "int64(75)"},
 		},
 	},
 	"stat": {
@@ -555,6 +603,7 @@ var stdlibModules = map[string]stdlibModule{
 			"S_ISSOCK": {GoFunc: "__gopy_stat_issock", Helper: helperStatIssock, RetKind: "bool"},
 			"S_IMODE":  {GoFunc: "__gopy_stat_imode", Helper: helperStatImode, RetKind: "int"},
 			"S_IFMT":   {GoFunc: "__gopy_stat_ifmt", Helper: helperStatIfmt, RetKind: "int"},
+			"filemode": {GoFunc: "__gopy_stat_filemode", Helper: helperStatFilemode, RetKind: "str"},
 		},
 	},
 	"fnmatch": {
@@ -682,15 +731,38 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"signal": {
 		Attrs: map[string]stdlibAttr{
-			"SIGINT":  {GoExpr: "int64(2)"},
-			"SIGTERM": {GoExpr: "int64(15)"},
-			"SIGHUP":  {GoExpr: "int64(1)"},
-			"SIGQUIT": {GoExpr: "int64(3)"},
-			"SIGKILL": {GoExpr: "int64(9)"},
-			"SIGUSR1": {GoExpr: "int64(10)"},
-			"SIGUSR2": {GoExpr: "int64(12)"},
-			"SIG_DFL": {GoExpr: "any(0)"},
-			"SIG_IGN": {GoExpr: "any(1)"},
+			"SIGINT":   {GoExpr: "int64(2)"},
+			"SIGTERM":  {GoExpr: "int64(15)"},
+			"SIGHUP":   {GoExpr: "int64(1)"},
+			"SIGQUIT":  {GoExpr: "int64(3)"},
+			"SIGKILL":  {GoExpr: "int64(9)"},
+			"SIGUSR1":  {GoExpr: "int64(10)"},
+			"SIGUSR2":  {GoExpr: "int64(12)"},
+			"SIGCHLD":  {GoExpr: "int64(17)"},
+			"SIGSTOP":  {GoExpr: "int64(19)"},
+			"SIGCONT":  {GoExpr: "int64(18)"},
+			"SIGPIPE":  {GoExpr: "int64(13)"},
+			"SIGALRM":  {GoExpr: "int64(14)"},
+			"SIGSEGV":  {GoExpr: "int64(11)"},
+			"SIGFPE":   {GoExpr: "int64(8)"},
+			"SIGBUS":   {GoExpr: "int64(7)"},
+			"SIGABRT":  {GoExpr: "int64(6)"},
+			"SIGILL":   {GoExpr: "int64(4)"},
+			"SIGTRAP":  {GoExpr: "int64(5)"},
+			"SIGTSTP":  {GoExpr: "int64(20)"},
+			"SIGTTIN":  {GoExpr: "int64(21)"},
+			"SIGTTOU":  {GoExpr: "int64(22)"},
+			"SIGURG":   {GoExpr: "int64(23)"},
+			"SIGXCPU":  {GoExpr: "int64(24)"},
+			"SIGXFSZ":  {GoExpr: "int64(25)"},
+			"SIGVTALRM": {GoExpr: "int64(26)"},
+			"SIGPROF":  {GoExpr: "int64(27)"},
+			"SIGWINCH": {GoExpr: "int64(28)"},
+			"SIGIO":    {GoExpr: "int64(29)"},
+			"SIGSYS":   {GoExpr: "int64(31)"},
+			"NSIG":     {GoExpr: "int64(65)"},
+			"SIG_DFL":  {GoExpr: "any(0)"},
+			"SIG_IGN":  {GoExpr: "any(1)"},
 		},
 		Funcs: map[string]stdlibFunc{
 			"signal":     {GoFunc: "__gopy_signal_noop", Helper: helperSignalNoop},
@@ -803,6 +875,9 @@ var stdlibModules = map[string]stdlibModule{
 			"ntohs":         {GoFunc: "__gopy_socket_htons", Helper: helperSocketHtons, RetKind: "int"},
 			"socket":        {GoFunc: "__gopy_socket_new", Helper: helperSocketNew, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 			"create_connection": {GoFunc: "__gopy_socket_create_conn", Helper: helperSocketCreateConn, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
+			"if_nameindex":     {GoFunc: "__gopy_socket_if_nameindex", Helper: helperSocketIfNameindex, HelperImports: []string{"net"}},
+			"if_indextoname":   {GoFunc: "__gopy_socket_if_indextoname", Helper: helperSocketIfIndextoname, HelperImports: []string{"net"}, RetKind: "str"},
+			"if_nametoindex":   {GoFunc: "__gopy_socket_if_nametoindex", Helper: helperSocketIfNametoindex, HelperImports: []string{"net"}, RetKind: "int"},
 		},
 	},
 	"platform": {
@@ -947,6 +1022,9 @@ var stdlibModules = map[string]stdlibModule{
 			"median_high":   {GoFunc: "__gopy_stats_median_high", GoImport: "sort", Helper: helperStatsMedianHigh, RetKind: "float"},
 			"harmonic_mean": {GoFunc: "__gopy_stats_harmonic", Helper: helperStatsHarmonic, RetKind: "float"},
 			"pvariance":     {GoFunc: "__gopy_stats_pvariance", Helper: helperStatsPvariance, RetKind: "float"},
+			"correlation":   {GoFunc: "__gopy_stats_correlation", Helper: helperStatsCorrelation, HelperImports: []string{"math"}, RetKind: "float"},
+			"covariance":    {GoFunc: "__gopy_stats_covariance", Helper: helperStatsCovariance, RetKind: "float"},
+			"geometric_mean": {GoFunc: "__gopy_stats_geomean", Helper: helperStatsGeoMean, HelperImports: []string{"math"}, RetKind: "float"},
 		},
 	},
 	"uuid": {
@@ -1169,6 +1247,19 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"encodestring": {GoFunc: "__gopy_quopri_encode", Helper: helperQuopriEncode, HelperImports: []string{"fmt", "strings"}, RetKind: "str"},
 			"decodestring": {GoFunc: "__gopy_quopri_decode", Helper: helperQuopriDecode, HelperImports: []string{"strings", "strconv"}, RetKind: "str"},
+		},
+	},
+	"graphlib": {
+		Funcs: map[string]stdlibFunc{
+			"TopologicalSorter": {GoFunc: "__gopy_graphlib_toposort_unused"},
+		},
+	},
+	"sysconfig": {
+		Funcs: map[string]stdlibFunc{
+			"get_paths":      {GoFunc: "__gopy_sysconfig_get_paths", Helper: helperSysconfigGetPaths, HelperImports: []string{"os"}},
+			"get_platform":   {GoFunc: "__gopy_sysconfig_platform", Helper: helperSysconfigPlatform, HelperImports: []string{"runtime"}, RetKind: "str"},
+			"get_python_version": {GoFunc: "__gopy_sysconfig_pyversion", Helper: helperSysconfigPyVersion, RetKind: "str"},
+			"get_config_var":     {GoFunc: "__gopy_sysconfig_config_var", Helper: helperSysconfigConfigVar, RetKind: "str"},
 		},
 	},
 }
@@ -6048,6 +6139,210 @@ const helperTypingPassthrough = `func __gopy_typing_passthrough(args ...any) any
 const helperTypingAssertType = `func __gopy_typing_assert_type(val any, _ any) any { return val }`
 
 const helperTypingAssertNever = `func __gopy_typing_assert_never(_ any) { panic("assert_never reached") }`
+
+const helperStatFilemode = `func __gopy_stat_filemode(mode int64) string {
+	t := byte('?')
+	switch mode & 0o170000 {
+	case 0o100000: t = '-'
+	case 0o040000: t = 'd'
+	case 0o120000: t = 'l'
+	case 0o020000: t = 'c'
+	case 0o060000: t = 'b'
+	case 0o010000: t = 'p'
+	case 0o140000: t = 's'
+	}
+	bits := []byte{t}
+	rwx := func(r, w, x int64, sticky byte, setid bool) []byte {
+		out := []byte{'-', '-', '-'}
+		if mode&r != 0 { out[0] = 'r' }
+		if mode&w != 0 { out[1] = 'w' }
+		if mode&x != 0 {
+			if setid { out[2] = 's' } else { out[2] = 'x' }
+		} else if setid {
+			out[2] = 'S'
+		}
+		_ = sticky
+		return out
+	}
+	bits = append(bits, rwx(0o400, 0o200, 0o100, 0, mode&0o4000 != 0)...)
+	bits = append(bits, rwx(0o040, 0o020, 0o010, 0, mode&0o2000 != 0)...)
+	other := rwx(0o004, 0o002, 0o001, 0, false)
+	if mode&0o1000 != 0 {
+		if mode&0o001 != 0 { other[2] = 't' } else { other[2] = 'T' }
+	}
+	bits = append(bits, other...)
+	return string(bits)
+}`
+
+const helperOsGetpid = `func __gopy_os_getpid() int64 { return int64(os.Getpid()) }`
+const helperOsGetppid = `func __gopy_os_getppid() int64 { return int64(os.Getppid()) }`
+const helperOsGetuid = `func __gopy_os_getuid() int64 { return int64(os.Getuid()) }`
+const helperOsGeteuid = `func __gopy_os_geteuid() int64 { return int64(os.Geteuid()) }`
+const helperOsGetgid = `func __gopy_os_getgid() int64 { return int64(os.Getgid()) }`
+const helperOsGetegid = `func __gopy_os_getegid() int64 { return int64(os.Getegid()) }`
+
+const helperOsGetlogin = `func __gopy_os_getlogin() string {
+	u, err := user.Current()
+	if err != nil { return "" }
+	return u.Username
+}`
+
+const helperOsSystem = `func __gopy_os_system(cmd string) int64 {
+	c := exec.Command("sh", "-c", cmd)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	c.Stdin = os.Stdin
+	if err := c.Run(); err != nil {
+		if e, ok := err.(*exec.ExitError); ok { return int64(e.ExitCode()) }
+		return int64(1)
+	}
+	return 0
+}`
+
+const helperOsFspath = `func __gopy_os_fspath(p any) string {
+	if s, ok := p.(string); ok { return s }
+	return ""
+}`
+
+const helperPathIsmount = `func __gopy_path_ismount(p string) bool {
+	if p == "/" { return true }
+	info, err := os.Lstat(p)
+	if err != nil { return false }
+	parent, err2 := os.Lstat(p + "/..")
+	if err2 != nil { return false }
+	si, ok1 := info.Sys().(interface{ Dev() uint64 })
+	sp, ok2 := parent.Sys().(interface{ Dev() uint64 })
+	if ok1 && ok2 { return si.Dev() != sp.Dev() }
+	return false
+}`
+
+const helperPathSplitdrive = `func __gopy_path_splitdrive(p string) []string {
+	return []string{"", p}
+}`
+
+const helperStatsCorrelation = `func __gopy_stats_correlation(xs, ys []float64) float64 {
+	n := float64(len(xs))
+	if n != float64(len(ys)) || n < 2 { return 0 }
+	var mx, my float64
+	for i := range xs { mx += xs[i]; my += ys[i] }
+	mx /= n; my /= n
+	var num, dx2, dy2 float64
+	for i := range xs {
+		dx := xs[i] - mx
+		dy := ys[i] - my
+		num += dx * dy
+		dx2 += dx * dx
+		dy2 += dy * dy
+	}
+	if dx2 == 0 || dy2 == 0 { return 0 }
+	return num / math.Sqrt(dx2*dy2)
+}`
+
+const helperStatsCovariance = `func __gopy_stats_covariance(xs, ys []float64) float64 {
+	n := float64(len(xs))
+	if n != float64(len(ys)) || n < 2 { return 0 }
+	var mx, my float64
+	for i := range xs { mx += xs[i]; my += ys[i] }
+	mx /= n; my /= n
+	var num float64
+	for i := range xs { num += (xs[i] - mx) * (ys[i] - my) }
+	return num / (n - 1)
+}`
+
+const helperStatsGeoMean = `func __gopy_stats_geomean(xs []float64) float64 {
+	if len(xs) == 0 { return 0 }
+	sum := 0.0
+	for _, x := range xs { sum += math.Log(x) }
+	return math.Exp(sum / float64(len(xs)))
+}`
+
+const helperHashlibPbkdf2 = `func __gopy_hashlib_pbkdf2(algo, pwd, salt string, iters int64, dklen ...int64) string {
+	var h func() hash.Hash
+	hashLen := 0
+	switch algo {
+	case "sha1": h = sha1.New; hashLen = 20
+	case "sha256": h = sha256.New; hashLen = 32
+	case "sha512": h = sha512.New; hashLen = 64
+	case "md5": h = md5.New; hashLen = 16
+	default: h = sha256.New; hashLen = 32
+	}
+	dkl := hashLen
+	if len(dklen) > 0 { dkl = int(dklen[0]) }
+	pwdb := []byte(pwd)
+	saltb := []byte(salt)
+	blocks := (dkl + hashLen - 1) / hashLen
+	out := make([]byte, 0, dkl)
+	for i := 1; i <= blocks; i++ {
+		ib := make([]byte, 4)
+		binary.BigEndian.PutUint32(ib, uint32(i))
+		mac := hmac.New(h, pwdb)
+		mac.Write(saltb)
+		mac.Write(ib)
+		u := mac.Sum(nil)
+		t := make([]byte, len(u))
+		copy(t, u)
+		for j := int64(1); j < iters; j++ {
+			mac = hmac.New(h, pwdb)
+			mac.Write(u)
+			u = mac.Sum(nil)
+			for k := range t { t[k] ^= u[k] }
+		}
+		out = append(out, t...)
+	}
+	return hex.EncodeToString(out[:dkl])
+}`
+
+const helperSocketIfNameindex = `func __gopy_socket_if_nameindex() [][]any {
+	ifs, err := net.Interfaces()
+	if err != nil { return [][]any{} }
+	out := make([][]any, 0, len(ifs))
+	for _, ifc := range ifs {
+		out = append(out, []any{int64(ifc.Index), ifc.Name})
+	}
+	return out
+}`
+
+const helperSocketIfIndextoname = `func __gopy_socket_if_indextoname(idx int64) string {
+	ifc, err := net.InterfaceByIndex(int(idx))
+	if err != nil { return "" }
+	return ifc.Name
+}`
+
+const helperSocketIfNametoindex = `func __gopy_socket_if_nametoindex(name string) int64 {
+	ifc, err := net.InterfaceByName(name)
+	if err != nil { return 0 }
+	return int64(ifc.Index)
+}`
+
+const helperSysconfigGetPaths = `func __gopy_sysconfig_get_paths() map[string]string {
+	prefix := "/usr"
+	if p := os.Getenv("PREFIX"); p != "" { prefix = p }
+	return map[string]string{
+		"stdlib":      prefix + "/lib/python3",
+		"platstdlib":  prefix + "/lib/python3",
+		"purelib":     prefix + "/lib/python3/site-packages",
+		"platlib":     prefix + "/lib/python3/site-packages",
+		"include":     prefix + "/include/python3",
+		"platinclude": prefix + "/include/python3",
+		"scripts":     prefix + "/bin",
+		"data":        prefix,
+	}
+}`
+
+const helperSysconfigPlatform = `func __gopy_sysconfig_platform() string {
+	return runtime.GOOS + "-" + runtime.GOARCH
+}`
+
+const helperSysconfigPyVersion = `func __gopy_sysconfig_pyversion() string { return "3.12" }`
+
+const helperSysconfigConfigVar = `func __gopy_sysconfig_config_var(name string) string {
+	switch name {
+	case "EXT_SUFFIX": return ".so"
+	case "SOABI": return "gopy"
+	case "prefix": return "/usr"
+	}
+	return ""
+}`
 
 const helperTextwrapShorten = `func __gopy_textwrap_shorten(s string, width int64) string {
 	words := strings.Fields(s)
