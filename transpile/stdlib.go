@@ -33,6 +33,12 @@ var stdlibModules = map[string]stdlibModule{
 		Attrs: map[string]stdlibAttr{
 			"sep":     {GoExpr: `string(os.PathSeparator)`, GoImport: "os"},
 			"linesep": {GoExpr: `"\n"`},
+			"pathsep": {GoExpr: `string(os.PathListSeparator)`, GoImport: "os"},
+			"devnull": {GoExpr: `os.DevNull`, GoImport: "os"},
+			"curdir":  {GoExpr: `"."`},
+			"pardir":  {GoExpr: `".."`},
+			"extsep":  {GoExpr: `"."`},
+			"altsep":  {GoExpr: `""`},
 			"environ": {GoExpr: "__gopy_os_environ()", Helper: helperOsEnviron, HelperName: "__gopy_os_environ", HelperImports: []string{"os", "strings"}},
 		},
 		Funcs: map[string]stdlibFunc{
@@ -153,6 +159,13 @@ var stdlibModules = map[string]stdlibModule{
 			"gamma":     {GoFunc: "math.Gamma", GoImport: "math"},
 			"lgamma":    {GoFunc: "__gopy_math_lgamma", GoImport: "math", Helper: helperMathLgamma},
 			"isclose":   {GoFunc: "__gopy_math_isclose", GoImport: "math", Helper: helperMathIsclose, RetKind: "bool"},
+			"fabs":      {GoFunc: "math.Abs", GoImport: "math", RetKind: "float"},
+			"modf":      {GoFunc: "__gopy_math_modf", GoImport: "math", Helper: helperMathModf},
+			"frexp":     {GoFunc: "__gopy_math_frexp", GoImport: "math", Helper: helperMathFrexp},
+			"ldexp":     {GoFunc: "math.Ldexp", GoImport: "math", RetKind: "float"},
+			"fsum":      {GoFunc: "__gopy_math_fsum", Helper: helperMathFsum, RetKind: "float"},
+			"nextafter": {GoFunc: "math.Nextafter", GoImport: "math", RetKind: "float"},
+			"ulp":       {GoFunc: "__gopy_math_ulp", GoImport: "math", Helper: helperMathUlp, RetKind: "float"},
 		},
 	},
 	"hashlib": {
@@ -161,6 +174,8 @@ var stdlibModules = map[string]stdlibModule{
 			"md5":    {GoFunc: "__gopy_hashlib_md5", GoImport: "crypto/md5", Helper: helperHashlibMd5, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/sha256", "crypto/sha1", "crypto/sha512"}},
 			"sha1":   {GoFunc: "__gopy_hashlib_sha1", GoImport: "crypto/sha1", Helper: helperHashlibSha1, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha256", "crypto/sha512"}},
 			"sha512": {GoFunc: "__gopy_hashlib_sha512", GoImport: "crypto/sha512", Helper: helperHashlibSha512, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha256", "crypto/sha1"}},
+			"sha224": {GoFunc: "__gopy_hashlib_sha224", GoImport: "crypto/sha256", Helper: helperHashlibSha224, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha1", "crypto/sha512"}},
+			"sha384": {GoFunc: "__gopy_hashlib_sha384", GoImport: "crypto/sha512", Helper: helperHashlibSha384, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha1", "crypto/sha256"}},
 			"new":    {GoFunc: "__gopy_hashlib_new", Helper: helperHashlibNew, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha1", "crypto/sha256", "crypto/sha512"}},
 		},
 	},
@@ -471,6 +486,10 @@ var stdlibModules = map[string]stdlibModule{
 			"S_IFREG":  {GoExpr: "int64(0o100000)"},
 			"S_IFDIR":  {GoExpr: "int64(0o040000)"},
 			"S_IFLNK":  {GoExpr: "int64(0o120000)"},
+			"S_IFCHR":  {GoExpr: "int64(0o020000)"},
+			"S_IFBLK":  {GoExpr: "int64(0o060000)"},
+			"S_IFIFO":  {GoExpr: "int64(0o010000)"},
+			"S_IFSOCK": {GoExpr: "int64(0o140000)"},
 			"S_IRUSR":  {GoExpr: "int64(0o400)"},
 			"S_IWUSR":  {GoExpr: "int64(0o200)"},
 			"S_IXUSR":  {GoExpr: "int64(0o100)"},
@@ -480,11 +499,23 @@ var stdlibModules = map[string]stdlibModule{
 			"S_IROTH":  {GoExpr: "int64(0o004)"},
 			"S_IWOTH":  {GoExpr: "int64(0o002)"},
 			"S_IXOTH":  {GoExpr: "int64(0o001)"},
+			"S_ISUID":  {GoExpr: "int64(0o4000)"},
+			"S_ISGID":  {GoExpr: "int64(0o2000)"},
+			"S_ISVTX":  {GoExpr: "int64(0o1000)"},
+			"S_IRWXU":  {GoExpr: "int64(0o700)"},
+			"S_IRWXG":  {GoExpr: "int64(0o070)"},
+			"S_IRWXO":  {GoExpr: "int64(0o007)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"S_ISREG": {GoFunc: "__gopy_stat_isreg", Helper: helperStatIsreg, RetKind: "bool"},
-			"S_ISDIR": {GoFunc: "__gopy_stat_isdir", Helper: helperStatIsdir, RetKind: "bool"},
-			"S_ISLNK": {GoFunc: "__gopy_stat_islnk", Helper: helperStatIslnk, RetKind: "bool"},
+			"S_ISREG":  {GoFunc: "__gopy_stat_isreg", Helper: helperStatIsreg, RetKind: "bool"},
+			"S_ISDIR":  {GoFunc: "__gopy_stat_isdir", Helper: helperStatIsdir, RetKind: "bool"},
+			"S_ISLNK":  {GoFunc: "__gopy_stat_islnk", Helper: helperStatIslnk, RetKind: "bool"},
+			"S_ISCHR":  {GoFunc: "__gopy_stat_ischr", Helper: helperStatIschr, RetKind: "bool"},
+			"S_ISBLK":  {GoFunc: "__gopy_stat_isblk", Helper: helperStatIsblk, RetKind: "bool"},
+			"S_ISFIFO": {GoFunc: "__gopy_stat_isfifo", Helper: helperStatIsfifo, RetKind: "bool"},
+			"S_ISSOCK": {GoFunc: "__gopy_stat_issock", Helper: helperStatIssock, RetKind: "bool"},
+			"S_IMODE":  {GoFunc: "__gopy_stat_imode", Helper: helperStatImode, RetKind: "int"},
+			"S_IFMT":   {GoFunc: "__gopy_stat_ifmt", Helper: helperStatIfmt, RetKind: "int"},
 		},
 	},
 	"fnmatch": {
@@ -708,6 +739,14 @@ var stdlibModules = map[string]stdlibModule{
 			"SOL_SOCKET":   {GoExpr: "int64(1)"},
 			"SO_REUSEADDR": {GoExpr: "int64(2)"},
 			"SO_KEEPALIVE": {GoExpr: "int64(9)"},
+			"IPPROTO_TCP":  {GoExpr: "int64(6)"},
+			"IPPROTO_UDP":  {GoExpr: "int64(17)"},
+			"IPPROTO_IP":   {GoExpr: "int64(0)"},
+			"IPPROTO_ICMP": {GoExpr: "int64(1)"},
+			"TCP_NODELAY":  {GoExpr: "int64(1)"},
+			"SOCK_RAW":     {GoExpr: "int64(3)"},
+			"SOMAXCONN":    {GoExpr: "int64(128)"},
+			"AI_PASSIVE":   {GoExpr: "int64(1)"},
 		},
 		Funcs: map[string]stdlibFunc{
 			"gethostname":   {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
@@ -750,6 +789,11 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"subprocess": {
+		Attrs: map[string]stdlibAttr{
+			"PIPE":    {GoExpr: "int64(-1)"},
+			"STDOUT":  {GoExpr: "int64(-2)"},
+			"DEVNULL": {GoExpr: "int64(-3)"},
+		},
 		// run() needs to ignore Python kwargs (capture_output, text, ...)
 		// that don't have a Go equivalent. Dispatch lives in transpile.go.
 		Funcs: map[string]stdlibFunc{
@@ -770,6 +814,7 @@ var stdlibModules = map[string]stdlibModule{
 			"cached_property": {GoFunc: "__gopy_cached_prop_unused"},
 			"wraps":           {GoFunc: "__gopy_wraps_unused"},
 			"singledispatch":  {GoFunc: "__gopy_singledispatch_unused"},
+			"cmp_to_key":      {GoFunc: "__gopy_cmp_to_key_unused"},
 		},
 	},
 	"logging": {
@@ -861,18 +906,41 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"uuid": {
+		Attrs: map[string]stdlibAttr{
+			"NAMESPACE_DNS":  {GoExpr: `"6ba7b810-9dad-11d1-80b4-00c04fd430c8"`},
+			"NAMESPACE_URL":  {GoExpr: `"6ba7b811-9dad-11d1-80b4-00c04fd430c8"`},
+			"NAMESPACE_OID":  {GoExpr: `"6ba7b812-9dad-11d1-80b4-00c04fd430c8"`},
+			"NAMESPACE_X500": {GoExpr: `"6ba7b814-9dad-11d1-80b4-00c04fd430c8"`},
+		},
 		Funcs: map[string]stdlibFunc{
 			"uuid4": {GoFunc: "__gopy_uuid4", GoImport: "crypto/rand", Helper: helperUuid4, RetKind: "str", HelperImports: []string{"fmt"}},
+			"uuid1": {GoFunc: "__gopy_uuid1", GoImport: "crypto/rand", Helper: helperUuid1, RetKind: "str", HelperImports: []string{"fmt", "time"}},
+			"uuid3": {GoFunc: "__gopy_uuid3", Helper: helperUuid3, HelperImports: []string{"crypto/md5", "fmt"}, RetKind: "str"},
+			"uuid5": {GoFunc: "__gopy_uuid5", Helper: helperUuid5, HelperImports: []string{"crypto/sha1", "fmt"}, RetKind: "str"},
 		},
 	},
 	"textwrap": {
 		Funcs: map[string]stdlibFunc{
-			"dedent": {GoFunc: "__gopy_textwrap_dedent", Helper: helperTextwrapDedent, RetKind: "str", HelperImports: []string{"strings"}},
-			"indent": {GoFunc: "__gopy_textwrap_indent", Helper: helperTextwrapIndent, RetKind: "str", HelperImports: []string{"strings"}},
-			"fill":   {GoFunc: "__gopy_textwrap_fill", Helper: helperTextwrapFill, RetKind: "str", HelperImports: []string{"strings"}},
+			"dedent":  {GoFunc: "__gopy_textwrap_dedent", Helper: helperTextwrapDedent, RetKind: "str", HelperImports: []string{"strings"}},
+			"indent":  {GoFunc: "__gopy_textwrap_indent", Helper: helperTextwrapIndent, RetKind: "str", HelperImports: []string{"strings"}},
+			"fill":    {GoFunc: "__gopy_textwrap_fill", Helper: helperTextwrapFill, RetKind: "str", HelperImports: []string{"strings"}},
+			"wrap":    {GoFunc: "__gopy_textwrap_wrap", Helper: helperTextwrapWrap, HelperImports: []string{"strings"}},
+			"shorten": {GoFunc: "__gopy_textwrap_shorten", Helper: helperTextwrapShorten, HelperImports: []string{"strings"}, RetKind: "str"},
 		},
 	},
 	"re": {
+		Attrs: map[string]stdlibAttr{
+			"IGNORECASE": {GoExpr: "int64(2)"},
+			"MULTILINE":  {GoExpr: "int64(8)"},
+			"DOTALL":     {GoExpr: "int64(16)"},
+			"VERBOSE":    {GoExpr: "int64(64)"},
+			"ASCII":      {GoExpr: "int64(256)"},
+			"UNICODE":    {GoExpr: "int64(32)"},
+			"I":          {GoExpr: "int64(2)"},
+			"M":          {GoExpr: "int64(8)"},
+			"S":          {GoExpr: "int64(16)"},
+			"X":          {GoExpr: "int64(64)"},
+		},
 		Funcs: map[string]stdlibFunc{
 			"findall":   {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall},
 			"search":    {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
@@ -1707,8 +1775,14 @@ func (h *__Hasher) Hexdigest() string {
 	case "sha256":
 		sum := sha256.Sum256(h.data)
 		return hex.EncodeToString(sum[:])
+	case "sha224":
+		sum := sha256.Sum224(h.data)
+		return hex.EncodeToString(sum[:])
 	case "sha512":
 		sum := sha512.Sum512(h.data)
+		return hex.EncodeToString(sum[:])
+	case "sha384":
+		sum := sha512.Sum384(h.data)
 		return hex.EncodeToString(sum[:])
 	case "sha1":
 		sum := sha1.Sum(h.data)
@@ -3603,6 +3677,12 @@ const helperDisTracedMem = `func __gopy_dis_traced_mem(args ...any) []any { retu
 const helperStatIsreg = `func __gopy_stat_isreg(mode int64) bool { return mode&0o170000 == 0o100000 }`
 const helperStatIsdir = `func __gopy_stat_isdir(mode int64) bool { return mode&0o170000 == 0o040000 }`
 const helperStatIslnk = `func __gopy_stat_islnk(mode int64) bool { return mode&0o170000 == 0o120000 }`
+const helperStatIschr = `func __gopy_stat_ischr(mode int64) bool { return mode&0o170000 == 0o020000 }`
+const helperStatIsblk = `func __gopy_stat_isblk(mode int64) bool { return mode&0o170000 == 0o060000 }`
+const helperStatIsfifo = `func __gopy_stat_isfifo(mode int64) bool { return mode&0o170000 == 0o010000 }`
+const helperStatIssock = `func __gopy_stat_issock(mode int64) bool { return mode&0o170000 == 0o140000 }`
+const helperStatImode = `func __gopy_stat_imode(mode int64) int64 { return mode & 0o7777 }`
+const helperStatIfmt = `func __gopy_stat_ifmt(mode int64) int64 { return mode & 0o170000 }`
 
 // helperFnmatch — backed by filepath.Match (close to fnmatch's *, ?,
 // [chars] subset). fnmatchcase = fnmatch (Go is case-sensitive).
@@ -5658,3 +5738,132 @@ func splitDotted(s string) []string {
 	}
 	return parts
 }
+
+const helperMathModf = `func __gopy_math_modf(f float64) []float64 {
+	i, frac := math.Modf(f)
+	return []float64{frac, i}
+}`
+
+const helperMathFrexp = `func __gopy_math_frexp(f float64) []any {
+	frac, exp := math.Frexp(f)
+	return []any{frac, int64(exp)}
+}`
+
+const helperMathFsum = `func __gopy_math_fsum(xs []float64) float64 {
+	sum := 0.0
+	c := 0.0
+	for _, x := range xs {
+		y := x - c
+		t := sum + y
+		c = (t - sum) - y
+		sum = t
+	}
+	return sum
+}`
+
+const helperMathUlp = `func __gopy_math_ulp(x float64) float64 {
+	if math.IsNaN(x) || math.IsInf(x, 0) { return x }
+	if x == 0 { return math.Nextafter(0, 1) }
+	ax := math.Abs(x)
+	return math.Nextafter(ax, math.Inf(1)) - ax
+}`
+
+const helperUuid1 = `func __gopy_uuid1() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil { panic(err) }
+	now := uint64(time.Now().UnixNano()/100) + 0x01b21dd213814000
+	b[0] = byte(now); b[1] = byte(now >> 8); b[2] = byte(now >> 16); b[3] = byte(now >> 24)
+	b[4] = byte(now >> 32); b[5] = byte(now >> 40)
+	b[6] = byte((now >> 48) & 0x0f) | 0x10
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}`
+
+const helperUuid3 = `func __gopy_uuid3(ns, name string) string {
+	nsBytes := __gopy_uuid_ns_bytes(ns)
+	h := md5.New()
+	h.Write(nsBytes)
+	h.Write([]byte(name))
+	b := h.Sum(nil)[:16]
+	b[6] = (b[6] & 0x0f) | 0x30
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func __gopy_uuid_ns_bytes(s string) []byte {
+	out := []byte{}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '-' { continue }
+		var v byte
+		switch {
+		case c >= '0' && c <= '9': v = c - '0'
+		case c >= 'a' && c <= 'f': v = c - 'a' + 10
+		case c >= 'A' && c <= 'F': v = c - 'A' + 10
+		}
+		out = append(out, v)
+	}
+	res := make([]byte, len(out)/2)
+	for i := 0; i < len(res); i++ {
+		res[i] = (out[2*i] << 4) | out[2*i+1]
+	}
+	return res
+}`
+
+const helperUuid5 = `func __gopy_uuid5(ns, name string) string {
+	nsBytes := __gopy_uuid_ns_bytes(ns)
+	h := sha1.New()
+	h.Write(nsBytes)
+	h.Write([]byte(name))
+	b := h.Sum(nil)[:16]
+	b[6] = (b[6] & 0x0f) | 0x50
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}`
+
+const helperHashlibSha224 = `func __gopy_hashlib_sha224(data string) *__Hasher {
+	return &__Hasher{data: []byte(data), algo: "sha224"}
+}`
+
+const helperHashlibSha384 = `func __gopy_hashlib_sha384(data string) *__Hasher {
+	return &__Hasher{data: []byte(data), algo: "sha384"}
+}`
+
+const helperTextwrapWrap = `func __gopy_textwrap_wrap(s string, width int64) []string {
+	if width <= 0 { width = 70 }
+	words := strings.Fields(s)
+	if len(words) == 0 { return []string{} }
+	lines := []string{}
+	cur := words[0]
+	for _, w := range words[1:] {
+		if int64(len(cur)+1+len(w)) <= width {
+			cur += " " + w
+		} else {
+			lines = append(lines, cur)
+			cur = w
+		}
+	}
+	lines = append(lines, cur)
+	return lines
+}`
+
+const helperTextwrapShorten = `func __gopy_textwrap_shorten(s string, width int64) string {
+	words := strings.Fields(s)
+	out := ""
+	placeholder := " [...]"
+	for i, w := range words {
+		next := w
+		if i > 0 { next = out + " " + w }
+		if int64(len(next)) <= width {
+			out = next
+		} else {
+			for int64(len(out)+len(placeholder)) > width && out != "" {
+				idx := strings.LastIndex(out, " ")
+				if idx < 0 { out = ""; break }
+				out = out[:idx]
+			}
+			return out + placeholder
+		}
+	}
+	return out
+}`
