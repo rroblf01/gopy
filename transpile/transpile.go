@@ -1549,6 +1549,8 @@ const helperPyPrint = `func __gopy_print(sep string, end string, args ...any) {
 		case nil:
 			fmt.Print("None")
 			_ = v
+		case []any, []string, []int64, []int, []float64, []bool, map[string]any, map[string]string, map[string]int64:
+			fmt.Print(__gopy_repr(a))
 		case float64:
 			s := strconv.FormatFloat(v, 'g', -1, 64)
 			// Python always renders whole-valued floats with a trailing
@@ -1595,7 +1597,14 @@ const helperPyPrint = `func __gopy_print(sep string, end string, args ...any) {
 				fmt.Print("(" + fmtFloat(re) + sign + fmtFloat(im) + "j)")
 			}
 		default:
-			fmt.Print(a)
+			rv := reflect.ValueOf(a)
+			if rv.IsValid() && (rv.Kind() == reflect.Slice || rv.Kind() == reflect.Map || rv.Kind() == reflect.Array) {
+				fmt.Print(__gopy_repr(a))
+			} else if s, ok := a.(fmt.Stringer); ok {
+				fmt.Print(s.String())
+			} else {
+				fmt.Print(a)
+			}
 		}
 	}
 	fmt.Print(end)
@@ -3534,6 +3543,7 @@ func (g *gen) fstring(f *ir.FStr) error {
 				g.addImport("strings")
 				g.addImport("strconv")
 				g.addImport("fmt")
+				g.addImport("reflect")
 				g.writef("__gopy_repr(")
 				if err := g.boxedExpr(a.expr); err != nil {
 					return err
@@ -3782,7 +3792,10 @@ func (g *gen) call(c *ir.Call) error {
 			// `sep=` / `end=` kwargs override the defaults.
 			g.addImport("fmt")
 			g.addImport("strconv")
+			g.addImport("strings")
+			g.addImport("reflect")
 			g.helpers["__gopy_print"] = helperPyPrint
+			g.helpers["__gopy_repr"] = helperGopyRepr
 			var sepExpr, endExpr ir.Expr
 			for _, kw := range c.Keywords {
 				switch kw.Name {
@@ -5964,18 +5977,23 @@ func (g *gen) builtinSorted(c *ir.Call) error {
 		return fmt.Errorf("sorted() takes one positional argument")
 	}
 	var keyLambda *ir.Lambda
+	var keyBareName string
 	reverse := false
 	for _, kw := range c.Keywords {
 		switch kw.Name {
 		case "key":
-			lam, ok := kw.Value.(*ir.Lambda)
-			if !ok {
-				return fmt.Errorf("sorted(key=...): only inline lambda supported")
+			if lam, ok := kw.Value.(*ir.Lambda); ok {
+				if len(lam.Params) != 1 {
+					return fmt.Errorf("sorted(key=...): lambda must take one argument")
+				}
+				keyLambda = lam
+				break
 			}
-			if len(lam.Params) != 1 {
-				return fmt.Errorf("sorted(key=...): lambda must take one argument")
+			if n, ok := kw.Value.(*ir.Name); ok {
+				keyBareName = n.N
+				break
 			}
-			keyLambda = lam
+			return fmt.Errorf("sorted(key=...): only inline lambda or bare name supported")
 		case "reverse":
 			b, ok := kw.Value.(*ir.BoolLit)
 			if !ok {
@@ -6009,7 +6027,19 @@ func (g *gen) builtinSorted(c *ir.Call) error {
 	if reverse {
 		op = ">"
 	}
-	if keyLambda == nil {
+	if keyBareName != "" {
+		// Bare callable key. Emit __ki := name(__out[i]), __kj := name(__out[j]).
+		keyExpr := func(idx string) string {
+			switch keyBareName {
+			case "abs":
+				return fmt.Sprintf("func() int64 { __v := __out[%s]; if __v < 0 { return -__v }; return __v }()", idx)
+			case "len":
+				return fmt.Sprintf("int64(len(__out[%s]))", idx)
+			}
+			return fmt.Sprintf("%s(__out[%s])", keyBareName, idx)
+		}
+		g.writef("sort.Slice(__out, func(__i, __j int) bool { return %s %s %s })\n", keyExpr("__i"), op, keyExpr("__j"))
+	} else if keyLambda == nil {
 		g.writef("sort.Slice(__out, func(i, j int) bool { return __out[i] %s __out[j] })\n", op)
 	} else {
 		// Re-lower the lambda body with the element type so arithmetic
@@ -6282,7 +6312,11 @@ func (g *gen) builtinRepr(c *ir.Call) error {
 		return fmt.Errorf("repr() takes one positional argument")
 	}
 	g.addImport("fmt")
-	g.writef("fmt.Sprintf(%q, ", "%#v")
+	g.addImport("strconv")
+	g.addImport("strings")
+	g.addImport("reflect")
+	g.helpers["__gopy_repr"] = helperGopyRepr
+	g.writef("__gopy_repr(")
 	if err := g.expr(c.Args[0]); err != nil {
 		return err
 	}
@@ -6911,6 +6945,15 @@ func (g *gen) builtinEnumerate(c *ir.Call) error {
 	if len(c.Args) < 1 || len(c.Args) > 2 {
 		return fmt.Errorf("enumerate() takes 1 or 2 arguments")
 	}
+	var startExpr ir.Expr
+	if len(c.Args) == 2 {
+		startExpr = c.Args[1]
+	}
+	for _, kw := range c.Keywords {
+		if kw.Name == "start" {
+			startExpr = kw.Value
+		}
+	}
 	g.writef("func() [][]any {\n")
 	g.indent++
 	g.writeIndent()
@@ -6921,10 +6964,10 @@ func (g *gen) builtinEnumerate(c *ir.Call) error {
 	g.writef("\n")
 	g.writeIndent()
 	g.writef("__start := int64(0)\n")
-	if len(c.Args) == 2 {
+	if startExpr != nil {
 		g.writeIndent()
 		g.writef("__start = ")
-		if err := g.expr(c.Args[1]); err != nil {
+		if err := g.expr(startExpr); err != nil {
 			return err
 		}
 		g.writef("\n")
@@ -11225,6 +11268,9 @@ func (g *gen) emitInOp(x *ir.CmpOp) error {
 }
 
 const helperGopyRepr = `func __gopy_repr(v any) string {
+	if r, ok := v.(interface{ Repr() string }); ok {
+		return r.Repr()
+	}
 	switch x := v.(type) {
 	case string:
 		// Python prefers single quotes for str repr unless the value
@@ -11242,8 +11288,65 @@ const helperGopyRepr = `func __gopy_repr(v any) string {
 	case bool:
 		if x { return "True" }
 		return "False"
+	case float64:
+		s := strconv.FormatFloat(x, 'g', -1, 64)
+		has := false
+		for j := 0; j < len(s); j++ { if s[j] == '.' || s[j] == 'e' || s[j] == 'E' { has = true; break } }
+		if !has { s += ".0" }
+		return s
+	case []any:
+		parts := make([]string, len(x))
+		for i, e := range x { parts[i] = __gopy_repr(e) }
+		return "[" + strings.Join(parts, ", ") + "]"
+	case []string:
+		parts := make([]string, len(x))
+		for i, e := range x { parts[i] = __gopy_repr(e) }
+		return "[" + strings.Join(parts, ", ") + "]"
+	case []int64:
+		parts := make([]string, len(x))
+		for i, e := range x { parts[i] = strconv.FormatInt(e, 10) }
+		return "[" + strings.Join(parts, ", ") + "]"
+	case []int:
+		parts := make([]string, len(x))
+		for i, e := range x { parts[i] = strconv.Itoa(e) }
+		return "[" + strings.Join(parts, ", ") + "]"
+	case []float64:
+		parts := make([]string, len(x))
+		for i, e := range x { parts[i] = __gopy_repr(e) }
+		return "[" + strings.Join(parts, ", ") + "]"
+	case []bool:
+		parts := make([]string, len(x))
+		for i, e := range x { parts[i] = __gopy_repr(e) }
+		return "[" + strings.Join(parts, ", ") + "]"
+	case map[string]any:
+		parts := make([]string, 0, len(x))
+		for k, val := range x { parts = append(parts, __gopy_repr(k)+": "+__gopy_repr(val)) }
+		return "{" + strings.Join(parts, ", ") + "}"
+	case map[string]string:
+		parts := make([]string, 0, len(x))
+		for k, val := range x { parts = append(parts, __gopy_repr(k)+": "+__gopy_repr(val)) }
+		return "{" + strings.Join(parts, ", ") + "}"
+	case map[string]int64:
+		parts := make([]string, 0, len(x))
+		for k, val := range x { parts = append(parts, __gopy_repr(k)+": "+strconv.FormatInt(val, 10)) }
+		return "{" + strings.Join(parts, ", ") + "}"
 	}
-	return fmt.Sprintf("%#v", v)
+	rv := reflect.ValueOf(v)
+	if rv.IsValid() {
+		switch rv.Kind() {
+		case reflect.Slice, reflect.Array:
+			n := rv.Len()
+			parts := make([]string, n)
+			for i := 0; i < n; i++ { parts[i] = __gopy_repr(rv.Index(i).Interface()) }
+			return "[" + strings.Join(parts, ", ") + "]"
+		case reflect.Map:
+			keys := rv.MapKeys()
+			parts := make([]string, len(keys))
+			for i, k := range keys { parts[i] = __gopy_repr(k.Interface()) + ": " + __gopy_repr(rv.MapIndex(k).Interface()) }
+			return "{" + strings.Join(parts, ", ") + "}"
+		}
+	}
+	return fmt.Sprintf("%v", v)
 }`
 
 const helperContainsAny = `func __gopy_contains_any(haystack, needle any) bool {

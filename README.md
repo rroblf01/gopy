@@ -580,6 +580,10 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] Container dunder methods: `__getitem__` (drives `obj[k]`), `__setitem__` (drives `obj[k] = v`), `__contains__` (drives `x in obj` / `x not in obj`)
 - [x] Builtin dispatch to dunders: `bool(obj)` → `__bool__`, `len(obj)` → `__len__`, `abs(obj)` → `__abs__`, `str(obj)` → `__str__`, `int(obj)` → `__int__`, `float(obj)` → `__float__`, `reversed(obj)` → `__reversed__`, `hash(obj)` → `__hash__`, `round(obj[, n])` → `__round__`, `math.ceil(obj)` / `math.floor(obj)` / `math.trunc(obj)` → `__ceil__` / `__floor__` / `__trunc__`, `obj(args)` → `__call__`, and `for v in obj:` → `__iter__` when the method returns a typed list (also recognized: `__next__`)
 - [x] f-string `__format__` dispatch: `f"{obj:spec}"` calls `obj.__format__("spec")` when the class defines it (empty spec also routes through the dunder, matching CPython)
+- [x] Python-style `print()` / `repr()` formatting of containers: lists print as `[1, 2, 3]` (comma-separated, brackets), dicts as `{'k': v, ...}`, strings inside containers use single-quote repr matching CPython, floats keep trailing `.0`, nested containers recurse. Falls back to `reflect` for arbitrary `[][]T` / `map[K]V` shapes
+- [x] `repr(obj)` / f-string `!r` dispatch to a user class's `__repr__` via a `Repr() string` interface check, so custom representations match CPython
+- [x] `sorted(xs, key=name)` accepts a bare callable (`abs`, `len`, or any user function) in addition to inline lambdas
+- [x] `enumerate(xs, start=N)` accepts the `start` keyword (was previously only positional)
 
 ### Hard / open questions
 
