@@ -951,6 +951,99 @@ var stdlibModules = map[string]stdlibModule{
 			},
 		},
 	},
+	"shlex": {
+		Funcs: map[string]stdlibFunc{
+			"split": {GoFunc: "__gopy_shlex_split", Helper: helperShlexSplit, HelperImports: []string{"strings"}},
+			"quote": {GoFunc: "__gopy_shlex_quote", Helper: helperShlexQuote, HelperImports: []string{"strings"}, RetKind: "str"},
+			"join":  {GoFunc: "__gopy_shlex_join", Helper: helperShlexJoin, ExtraHelpers: map[string]string{"__gopy_shlex_quote": helperShlexQuote}, HelperImports: []string{"strings"}, RetKind: "str"},
+		},
+	},
+	"difflib": {
+		Funcs: map[string]stdlibFunc{
+			"get_close_matches": {GoFunc: "__gopy_difflib_close", Helper: helperDifflibClose, HelperImports: []string{"sort", "strings"}},
+			"unified_diff":      {GoFunc: "__gopy_difflib_unified", Helper: helperDifflibUnified, HelperImports: []string{"fmt"}},
+			"ndiff":             {GoFunc: "__gopy_difflib_ndiff", Helper: helperDifflibNdiff},
+		},
+	},
+	"filecmp": {
+		Funcs: map[string]stdlibFunc{
+			"cmp": {GoFunc: "__gopy_filecmp_cmp", Helper: helperFilecmpCmp, HelperImports: []string{"bytes", "os"}, RetKind: "bool"},
+		},
+	},
+	"codecs": {
+		Funcs: map[string]stdlibFunc{
+			"encode": {GoFunc: "__gopy_codecs_encode", Helper: helperCodecsEncode, HelperImports: []string{"encoding/hex", "encoding/base64"}, RetKind: "str"},
+			"decode": {GoFunc: "__gopy_codecs_decode", Helper: helperCodecsDecode, HelperImports: []string{"encoding/hex", "encoding/base64"}, RetKind: "str"},
+		},
+	},
+	"ntpath": {
+		Funcs: map[string]stdlibFunc{
+			"join":     {GoFunc: "__gopy_path_join", GoImport: "path/filepath", Helper: helperPathJoin, RetKind: "str"},
+			"basename": {GoFunc: "filepath.Base", GoImport: "path/filepath", RetKind: "str"},
+			"dirname":  {GoFunc: "filepath.Dir", GoImport: "path/filepath", RetKind: "str"},
+			"split":    {GoFunc: "__gopy_path_split", GoImport: "path/filepath", Helper: helperPathSplit},
+			"splitext": {GoFunc: "__gopy_path_splitext", GoImport: "path/filepath", Helper: helperPathSplitext},
+		},
+	},
+	"multiprocessing": {
+		Funcs: map[string]stdlibFunc{
+			"cpu_count": {GoFunc: "runtime.NumCPU", GoImport: "runtime", RetKind: "int"},
+		},
+	},
+	"token": {
+		Attrs: map[string]stdlibAttr{
+			"NAME":     {GoExpr: "int64(1)"},
+			"NUMBER":   {GoExpr: "int64(2)"},
+			"STRING":   {GoExpr: "int64(3)"},
+			"NEWLINE":  {GoExpr: "int64(4)"},
+			"INDENT":   {GoExpr: "int64(5)"},
+			"DEDENT":   {GoExpr: "int64(6)"},
+			"OP":       {GoExpr: "int64(55)"},
+			"COMMENT":  {GoExpr: "int64(60)"},
+			"NL":       {GoExpr: "int64(61)"},
+			"ENCODING": {GoExpr: "int64(62)"},
+			"ENDMARKER": {GoExpr: "int64(0)"},
+		},
+	},
+	"resource": {
+		Attrs: map[string]stdlibAttr{
+			"RLIMIT_CPU":    {GoExpr: "int64(0)"},
+			"RLIMIT_FSIZE":  {GoExpr: "int64(1)"},
+			"RLIMIT_DATA":   {GoExpr: "int64(2)"},
+			"RLIMIT_STACK":  {GoExpr: "int64(3)"},
+			"RLIMIT_CORE":   {GoExpr: "int64(4)"},
+			"RLIMIT_NOFILE": {GoExpr: "int64(7)"},
+			"RLIMIT_AS":     {GoExpr: "int64(9)"},
+			"RLIM_INFINITY": {GoExpr: "int64(-1)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"getrlimit": {GoFunc: "__gopy_resource_getrlimit", Helper: helperResourceGetrlimit},
+			"setrlimit": {GoFunc: "__gopy_resource_setrlimit", Helper: helperResourceSetrlimit},
+		},
+	},
+	"syslog": {
+		Attrs: map[string]stdlibAttr{
+			"LOG_EMERG":   {GoExpr: "int64(0)"},
+			"LOG_ALERT":   {GoExpr: "int64(1)"},
+			"LOG_CRIT":    {GoExpr: "int64(2)"},
+			"LOG_ERR":     {GoExpr: "int64(3)"},
+			"LOG_WARNING": {GoExpr: "int64(4)"},
+			"LOG_NOTICE":  {GoExpr: "int64(5)"},
+			"LOG_INFO":    {GoExpr: "int64(6)"},
+			"LOG_DEBUG":   {GoExpr: "int64(7)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"openlog":  {GoFunc: "__gopy_syslog_openlog", Helper: helperSyslogOpenlog},
+			"syslog":   {GoFunc: "__gopy_syslog_syslog", Helper: helperSyslogSyslog},
+			"closelog": {GoFunc: "__gopy_syslog_closelog", Helper: helperSyslogCloselog},
+		},
+	},
+	"quopri": {
+		Funcs: map[string]stdlibFunc{
+			"encodestring": {GoFunc: "__gopy_quopri_encode", Helper: helperQuopriEncode, HelperImports: []string{"fmt", "strings"}, RetKind: "str"},
+			"decodestring": {GoFunc: "__gopy_quopri_decode", Helper: helperQuopriDecode, HelperImports: []string{"strings", "strconv"}, RetKind: "str"},
+		},
+	},
 }
 
 type stdlibModule struct {
@@ -5323,6 +5416,187 @@ const helperTimeNew = `func __gopy_time_new(args ...int64) *__Time {
 	if len(args) > 1 { t.M = args[1] }
 	if len(args) > 2 { t.S = args[2] }
 	return t
+}`
+
+const helperShlexSplit = `func __gopy_shlex_split(s string) []string {
+	out := []string{}
+	cur := strings.Builder{}
+	quote := byte(0)
+	inTok := false
+	flush := func() { if inTok { out = append(out, cur.String()); cur.Reset(); inTok = false } }
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == quote { quote = 0; continue }
+			cur.WriteByte(c); inTok = true; continue
+		}
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			flush()
+		case '\'', '"':
+			quote = c; inTok = true
+		case '\\':
+			if i+1 < len(s) { i++; cur.WriteByte(s[i]); inTok = true }
+		default:
+			cur.WriteByte(c); inTok = true
+		}
+	}
+	flush()
+	return out
+}`
+
+const helperShlexQuote = `func __gopy_shlex_quote(s string) string {
+	if s == "" { return "''" }
+	safe := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '@' || c == '%' || c == '+' || c == '=' || c == ':' || c == ',' || c == '.' || c == '/' || c == '-' || c == '_') {
+			safe = false; break
+		}
+	}
+	if safe { return s }
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}`
+
+const helperShlexJoin = `func __gopy_shlex_join(parts []string) string {
+	out := make([]string, len(parts))
+	for i, p := range parts { out[i] = __gopy_shlex_quote(p) }
+	return strings.Join(out, " ")
+}`
+
+const helperDifflibClose = `func __gopy_difflib_close(word string, possibilities []string, args ...any) []string {
+	n := 3
+	cutoff := 0.6
+	if len(args) > 0 {
+		switch v := args[0].(type) {
+		case int: n = v
+		case int64: n = int(v)
+		}
+	}
+	if len(args) > 1 {
+		switch v := args[1].(type) {
+		case float64: cutoff = v
+		case float32: cutoff = float64(v)
+		}
+	}
+	type scored struct{ s string; r float64 }
+	scores := []scored{}
+	for _, p := range possibilities {
+		r := __gopy_difflib_ratio(word, p)
+		if r >= cutoff { scores = append(scores, scored{p, r}) }
+	}
+	sort.Slice(scores, func(i, j int) bool { return scores[i].r > scores[j].r })
+	if len(scores) > n { scores = scores[:n] }
+	out := make([]string, len(scores))
+	for i, s := range scores { out[i] = s.s }
+	return out
+}
+
+func __gopy_difflib_ratio(a, b string) float64 {
+	la, lb := len(a), len(b)
+	if la == 0 && lb == 0 { return 1.0 }
+	matches := 0
+	used := make([]bool, lb)
+	for i := 0; i < la; i++ {
+		for j := 0; j < lb; j++ {
+			if !used[j] && a[i] == b[j] { used[j] = true; matches++; break }
+		}
+	}
+	_ = strings.Compare
+	return 2.0 * float64(matches) / float64(la+lb)
+}`
+
+const helperDifflibUnified = `func __gopy_difflib_unified(a, b []string, args ...any) []string {
+	fromfile, tofile := "", ""
+	if len(args) > 0 { if s, ok := args[0].(string); ok { fromfile = s } }
+	if len(args) > 1 { if s, ok := args[1].(string); ok { tofile = s } }
+	out := []string{}
+	out = append(out, fmt.Sprintf("--- %s", fromfile))
+	out = append(out, fmt.Sprintf("+++ %s", tofile))
+	out = append(out, fmt.Sprintf("@@ -1,%d +1,%d @@", len(a), len(b)))
+	for _, line := range a { out = append(out, "-"+line) }
+	for _, line := range b { out = append(out, "+"+line) }
+	return out
+}`
+
+const helperDifflibNdiff = `func __gopy_difflib_ndiff(a, b []string) []string {
+	out := []string{}
+	for _, line := range a { out = append(out, "- "+line) }
+	for _, line := range b { out = append(out, "+ "+line) }
+	return out
+}`
+
+const helperFilecmpCmp = `func __gopy_filecmp_cmp(a, b string, shallow ...bool) bool {
+	ai, err1 := os.Stat(a)
+	bi, err2 := os.Stat(b)
+	if err1 != nil || err2 != nil { return false }
+	if ai.Size() != bi.Size() { return false }
+	if len(shallow) > 0 && shallow[0] && ai.ModTime().Equal(bi.ModTime()) { return true }
+	da, err := os.ReadFile(a); if err != nil { return false }
+	db, err := os.ReadFile(b); if err != nil { return false }
+	return bytes.Equal(da, db)
+}`
+
+const helperCodecsEncode = `func __gopy_codecs_encode(obj string, args ...string) string {
+	enc := "utf-8"
+	if len(args) > 0 { enc = args[0] }
+	switch enc {
+	case "hex", "hex_codec":
+		return hex.EncodeToString([]byte(obj))
+	case "base64", "base64_codec":
+		return base64.StdEncoding.EncodeToString([]byte(obj))
+	default:
+		return obj
+	}
+}`
+
+const helperCodecsDecode = `func __gopy_codecs_decode(obj string, args ...string) string {
+	enc := "utf-8"
+	if len(args) > 0 { enc = args[0] }
+	switch enc {
+	case "hex", "hex_codec":
+		b, _ := hex.DecodeString(obj); return string(b)
+	case "base64", "base64_codec":
+		b, _ := base64.StdEncoding.DecodeString(obj); return string(b)
+	default:
+		return obj
+	}
+}`
+
+const helperResourceGetrlimit = `func __gopy_resource_getrlimit(_ int64) []int64 { return []int64{-1, -1} }`
+
+const helperResourceSetrlimit = `func __gopy_resource_setrlimit(_ int64, _ []int64) {}`
+
+const helperSyslogOpenlog = `func __gopy_syslog_openlog(_ ...any) {}`
+
+const helperSyslogSyslog = `func __gopy_syslog_syslog(_ ...any) {}`
+
+const helperSyslogCloselog = `func __gopy_syslog_closelog() {}`
+
+const helperQuopriEncode = `func __gopy_quopri_encode(s string) string {
+	out := strings.Builder{}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '=' || c < 32 || c > 126 {
+			out.WriteString(fmt.Sprintf("=%02X", c))
+		} else {
+			out.WriteByte(c)
+		}
+	}
+	return out.String()
+}`
+
+const helperQuopriDecode = `func __gopy_quopri_decode(s string) string {
+	out := strings.Builder{}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '=' && i+2 < len(s) {
+			v, err := strconv.ParseInt(s[i+1:i+3], 16, 32)
+			if err == nil { out.WriteByte(byte(v)); i += 2; continue }
+		}
+		out.WriteByte(c)
+	}
+	return out.String()
 }`
 
 // isStdlibModule reports whether name refers to a stdlib module we recognize.
