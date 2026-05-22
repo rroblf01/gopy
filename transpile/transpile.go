@@ -2285,6 +2285,15 @@ func (g *gen) try(t *ir.Try) error {
 	if err := g.stmts(t.Body); err != nil {
 		return err
 	}
+	// `try: ... else: ...` — else runs only when body completes without
+	// raising. Append inline; any exception thrown by the body is
+	// intercepted by the recover() block above, which short-circuits
+	// the function literal before reaching this point.
+	if len(t.OrElse) > 0 {
+		if err := g.stmts(t.OrElse); err != nil {
+			return err
+		}
+	}
 	g.indent--
 	g.writeIndent()
 	g.writef("}()\n")

@@ -240,9 +240,10 @@ type AssignAttr struct {
 // Try is `try: ... except E [as v]: ... finally: ...`.
 // Codegen lowers this to an IIFE with `defer recover()`.
 type Try struct {
-	Body    []Stmt
+	Body     []Stmt
 	Handlers []ExceptHandler
-	Finally []Stmt
+	Finally  []Stmt
+	OrElse   []Stmt // `try: ... else: ...` runs only if no handler fired
 }
 
 // ExceptHandler is one `except ClassName [as varname]:` clause.

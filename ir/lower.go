@@ -1330,6 +1330,15 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 				return nil, fmt.Errorf("list[...]: %w", err)
 			}
 			return &Type{Kind: TyList, Elem: elem}, nil
+		case "set", "frozenset", "MutableSet":
+			// `set[T]` / `frozenset[T]` — gopy collapses to a Go slice
+			// since there's no native set type. Membership / iteration
+			// behave like a list; dedup is the caller's responsibility.
+			elem, err := lowerAnnotation(n.Child("slice"))
+			if err != nil {
+				return nil, fmt.Errorf("set[...]: %w", err)
+			}
+			return &Type{Kind: TyList, Elem: elem}, nil
 		case "dict":
 			sl := n.Child("slice")
 			if sl.Type() != "Tuple" {
@@ -1800,10 +1809,15 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(n.Children("orelse")) > 0 {
-			return nil, fmt.Errorf("line %d: try-else not supported (F3)", n.Lineno())
+		var orelse []Stmt
+		if oe := n.Children("orelse"); len(oe) > 0 {
+			ob, err := lowerBody(oe, sc)
+			if err != nil {
+				return nil, err
+			}
+			orelse = ob
 		}
-		return &Try{Body: body, Handlers: handlers, Finally: finally}, nil
+		return &Try{Body: body, Handlers: handlers, Finally: finally, OrElse: orelse}, nil
 	case "Raise":
 		excNode := n.Child("exc")
 		causeNode := n.Child("cause")
@@ -2280,6 +2294,11 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		// `(expr for var in iter [if cond])` — same shape as ListComp,
 		// just immutable in Python. We materialize eagerly to a slice
 		// since we don't have a lazy generator-of-expressions runtime.
+		return lowerListComp(n, sc)
+	case "SetComp":
+		// `{expr for var in iter [if cond]}` — same shape as ListComp.
+		// Lower to a ListComp; the receiver's `set[T]` annotation drives
+		// later set-style codegen (membership via `in`, etc.).
 		return lowerListComp(n, sc)
 	case "DictComp":
 		return lowerDictComp(n, sc)
