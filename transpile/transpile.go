@@ -882,6 +882,22 @@ func (g *gen) stmt(s ir.Stmt) error {
 					g.writef("}\n")
 					return nil
 				}
+				// Concrete user-class element: emit with declared `[]*Class`
+				// shape so the call-site list-typed value matches the
+				// annotation. Each constructor call already returns *Class.
+				if _, ok := g.classes[x.Ty.Elem.Name]; ok && x.Ty.Elem.Kind == ir.TyNamed {
+					g.writef("%s{", g.goType(x.Ty))
+					for i, e := range ll.Elems {
+						if i > 0 {
+							g.writef(", ")
+						}
+						if err := g.expr(e); err != nil {
+							return err
+						}
+					}
+					g.writef("}\n")
+					return nil
+				}
 			}
 		}
 		if x.Ty != nil && x.Ty.Kind == ir.TyDict {
@@ -2568,6 +2584,20 @@ func (g *gen) forEach(x *ir.ForEach) error {
 			return err
 		}
 		g.writef(" {\n")
+		// Silence unused-variable errors when the body references only
+		// one of (k, v). Go's blank identifier `_` doesn't need (or
+		// accept) a `_ = _` assignment, so only emit silencers for the
+		// real names.
+		g.indent++
+		if x.Var != "_" {
+			g.writeIndent()
+			g.writef("_ = %s\n", x.Var)
+		}
+		if x.Var2 != "_" {
+			g.writeIndent()
+			g.writef("_ = %s\n", x.Var2)
+		}
+		g.indent--
 		return g.forEachBody(x)
 	case "enum":
 		g.writeIndent()
@@ -9912,10 +9942,10 @@ func (g *gen) builtinCounter(c *ir.Call) error {
 	return nil
 }
 
-// builtinChain concatenates two lists of the same element type.
+// builtinChain concatenates N lists of the same element type.
 func (g *gen) builtinChain(c *ir.Call) error {
-	if len(c.Args) != 2 || len(c.Keywords) != 0 {
-		return fmt.Errorf("chain() takes two list arguments (F+: only 2-way chain)")
+	if len(c.Args) < 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("chain() takes at least one list argument")
 	}
 	elem, err := listElemTypeOf(c.Args[0])
 	if err != nil {
@@ -9925,23 +9955,15 @@ func (g *gen) builtinChain(c *ir.Call) error {
 	g.writef("func() []%s {\n", elemGo)
 	g.indent++
 	g.writeIndent()
-	g.writef("__a := ")
-	if err := g.expr(c.Args[0]); err != nil {
-		return err
+	g.writef("__out := []%s{}\n", elemGo)
+	for _, a := range c.Args {
+		g.writeIndent()
+		g.writef("__out = append(__out, ")
+		if err := g.expr(a); err != nil {
+			return err
+		}
+		g.writef("...)\n")
 	}
-	g.writef("\n")
-	g.writeIndent()
-	g.writef("__b := ")
-	if err := g.expr(c.Args[1]); err != nil {
-		return err
-	}
-	g.writef("\n")
-	g.writeIndent()
-	g.writef("__out := make([]%s, 0, len(__a)+len(__b))\n", elemGo)
-	g.writeIndent()
-	g.writef("__out = append(__out, __a...)\n")
-	g.writeIndent()
-	g.writef("__out = append(__out, __b...)\n")
 	g.writeIndent()
 	g.writef("return __out\n")
 	g.indent--
@@ -11456,6 +11478,18 @@ func __gopy_fmt_spec(spec string, v any) string {
 		align = spec[i]
 		i++
 	}
+	alt := false
+	plus := false
+	if i < n && (spec[i] == '+' || spec[i] == '-' || spec[i] == ' ') {
+		if spec[i] == '+' {
+			plus = true
+		}
+		i++
+	}
+	if i < n && spec[i] == '#' {
+		alt = true
+		i++
+	}
 	if i < n && spec[i] == '0' {
 		zero = true
 		i++
@@ -11517,6 +11551,12 @@ func __gopy_fmt_spec(spec string, v any) string {
 	sb.WriteByte('%')
 	if align == '<' && !customFill {
 		sb.WriteByte('-')
+	}
+	if alt {
+		sb.WriteByte('#')
+	}
+	if plus {
+		sb.WriteByte('+')
 	}
 	if zero {
 		sb.WriteByte('0')
