@@ -16,17 +16,61 @@ package transpile
 var stdlibModules = map[string]stdlibModule{
 	"sys": {
 		Attrs: map[string]stdlibAttr{
-			"argv":         {GoExpr: "os.Args", GoImport: "os"},
-			"platform":     {GoExpr: "runtime.GOOS", GoImport: "runtime"},
-			"version":      {GoExpr: `"3.12.0 (gopy)"`},
-			"version_info": {GoExpr: "__gopy_sys_version_info", Helper: helperSysVersionInfo, HelperName: "__gopy_sys_version_info"},
-			"maxsize":      {GoExpr: "int64(9223372036854775807)"},
-			"byteorder":    {GoExpr: `"little"`},
+			"argv":            {GoExpr: "os.Args", GoImport: "os"},
+			"platform":        {GoExpr: "runtime.GOOS", GoImport: "runtime"},
+			"version":         {GoExpr: `"3.12.0 (gopy)"`},
+			"version_info":    {GoExpr: "__gopy_sys_version_info", Helper: helperSysVersionInfo, HelperName: "__gopy_sys_version_info"},
+			"maxsize":         {GoExpr: "int64(9223372036854775807)"},
+			"maxunicode":      {GoExpr: "int64(1114111)"},
+			"byteorder":       {GoExpr: `"little"`},
+			"executable":      {GoExpr: "__gopy_sys_executable()", Helper: helperSysExecutable, HelperName: "__gopy_sys_executable", HelperImports: []string{"os"}},
+			"prefix":          {GoExpr: `"/usr"`},
+			"exec_prefix":     {GoExpr: `"/usr"`},
+			"base_prefix":     {GoExpr: `"/usr"`},
+			"base_exec_prefix": {GoExpr: `"/usr"`},
+			"path":            {GoExpr: `[]string{}`},
+			"modules":         {GoExpr: `map[string]any{}`},
+			"path_hooks":      {GoExpr: `[]any{}`},
+			"path_importer_cache": {GoExpr: `map[string]any{}`},
+			"meta_path":       {GoExpr: `[]any{}`},
+			"builtin_module_names": {GoExpr: `[]string{"builtins", "sys", "_thread"}`},
+			"hexversion":      {GoExpr: "int64(50923760)"},
+			"api_version":     {GoExpr: "int64(1013)"},
+			"copyright":       {GoExpr: `"gopy transpiler"`},
+			"float_repr_style": {GoExpr: `"short"`},
+			"int_info":        {GoExpr: `map[string]int64{"bits_per_digit": 30, "sizeof_digit": 4}`},
+			"flags":           {GoExpr: `map[string]int64{"debug": 0, "inspect": 0, "interactive": 0, "optimize": 0, "verbose": 0}`},
+			"dont_write_bytecode": {GoExpr: "false"},
+			"warnoptions":     {GoExpr: `[]string{}`},
+			"ps1":             {GoExpr: `">>> "`},
+			"ps2":             {GoExpr: `"... "`},
 		},
 		Funcs: map[string]stdlibFunc{
-			"exit":       {GoFunc: "os.Exit", GoImport: "os", IntArg0: true},
-			"getsizeof":  {GoFunc: "__gopy_sys_getsizeof", Helper: helperSysGetsizeof, HelperImports: []string{"unsafe", "reflect"}, RetKind: "int"},
-			"intern":     {GoFunc: "__gopy_sys_intern", Helper: helperSysIntern, RetKind: "str"},
+			"exit":               {GoFunc: "os.Exit", GoImport: "os", IntArg0: true},
+			"getsizeof":          {GoFunc: "__gopy_sys_getsizeof", Helper: helperSysGetsizeof, HelperImports: []string{"unsafe", "reflect"}, RetKind: "int"},
+			"intern":             {GoFunc: "__gopy_sys_intern", Helper: helperSysIntern, RetKind: "str"},
+			"exc_info":           {GoFunc: "__gopy_sys_exc_info", Helper: helperSysExcInfo},
+			"setrecursionlimit":  {GoFunc: "__gopy_sys_setrecursion_unused"},
+			"getrecursionlimit":  {GoFunc: "__gopy_sys_getrecursion", Helper: helperSysGetRecursion, RetKind: "int"},
+			"getrefcount":        {GoFunc: "__gopy_sys_getrefcount", Helper: helperSysGetRefcount, RetKind: "int"},
+			"getdefaultencoding": {GoFunc: "__gopy_sys_getenc", Helper: helperSysGetEnc, RetKind: "str"},
+			"getfilesystemencoding": {GoFunc: "__gopy_sys_getfsenc", Helper: helperSysGetFsenc, RetKind: "str"},
+			"set_int_max_str_digits": {GoFunc: "__gopy_sys_setintmax_unused"},
+			"get_int_max_str_digits": {GoFunc: "__gopy_sys_getintmax", Helper: helperSysGetIntMaxDigits, RetKind: "int"},
+			"settrace":           {GoFunc: "__gopy_sys_settrace_unused"},
+			"setprofile":         {GoFunc: "__gopy_sys_setprofile_unused"},
+			"gettrace":           {GoFunc: "__gopy_sys_gettrace_unused"},
+			"getprofile":         {GoFunc: "__gopy_sys_getprofile_unused"},
+			"audit":              {GoFunc: "__gopy_sys_audit_unused"},
+			"breakpointhook":     {GoFunc: "__gopy_sys_breakpoint_unused"},
+			"displayhook":        {GoFunc: "__gopy_sys_displayhook_unused"},
+			"excepthook":         {GoFunc: "__gopy_sys_excepthook_unused"},
+			"unraisablehook":     {GoFunc: "__gopy_sys_unraisable_unused"},
+			"getswitchinterval":  {GoFunc: "__gopy_sys_getswitch", Helper: helperSysGetSwitch, RetKind: "float"},
+			"setswitchinterval":  {GoFunc: "__gopy_sys_setswitch_unused"},
+			"_getframe":          {GoFunc: "__gopy_sys_getframe_unused"},
+			"getallocatedblocks": {GoFunc: "__gopy_sys_alloc", Helper: helperSysGetAllocated, RetKind: "int"},
+			"is_finalizing":      {GoFunc: "__gopy_sys_isfin", Helper: helperSysIsFinalizing, RetKind: "bool"},
 		},
 	},
 	"os": {
@@ -116,6 +160,16 @@ var stdlibModules = map[string]stdlibModule{
 			"localtime":        {GoFunc: "__gopy_time_localtime", GoImport: "time", Helper: helperTimeLocaltime},
 			"gmtime":           {GoFunc: "__gopy_time_gmtime", GoImport: "time", Helper: helperTimeGmtime},
 			"mktime":           {GoFunc: "__gopy_time_mktime", GoImport: "time", Helper: helperTimeMktime, RetKind: "float"},
+			"asctime":          {GoFunc: "__gopy_time_asctime", GoImport: "time", Helper: helperTimeAsctime, RetKind: "str"},
+			"ctime":            {GoFunc: "__gopy_time_ctime", GoImport: "time", Helper: helperTimeCtime, RetKind: "str"},
+			"tzname":           {GoFunc: "__gopy_time_tzname", GoImport: "time", Helper: helperTimeTzname},
+			"tzset":            {GoFunc: "__gopy_time_tzset_unused"},
+			"clock_gettime":    {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
+			"clock_gettime_ns": {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
+			"clock_settime":    {GoFunc: "__gopy_time_clock_settime_unused"},
+			"clock_settime_ns": {GoFunc: "__gopy_time_clock_settime_unused"},
+			"clock_getres":     {GoFunc: "__gopy_time_clockres", Helper: helperTimeClockres, RetKind: "float"},
+			"get_clock_info":   {GoFunc: "__gopy_time_clockinfo_unused"},
 		},
 	},
 	"json": {
@@ -2067,6 +2121,593 @@ var stdlibModules = map[string]stdlibModule{
 		},
 		Funcs: map[string]stdlibFunc{
 			"mmap": {GoFunc: "__gopy_mmap_unused"},
+		},
+	},
+	"ast": {
+		Attrs: map[string]stdlibAttr{
+			"PyCF_ONLY_AST":           {GoExpr: "int64(1024)"},
+			"PyCF_ALLOW_TOP_LEVEL_AWAIT": {GoExpr: "int64(8192)"},
+			"PyCF_TYPE_COMMENTS":      {GoExpr: "int64(4096)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"parse":          {GoFunc: "__gopy_ast_parse_unused"},
+			"dump":           {GoFunc: "__gopy_ast_dump_unused"},
+			"walk":           {GoFunc: "__gopy_ast_walk_unused"},
+			"unparse":        {GoFunc: "__gopy_ast_unparse_unused"},
+			"literal_eval":   {GoFunc: "__gopy_ast_literal_eval_unused"},
+			"iter_fields":    {GoFunc: "__gopy_ast_iter_fields_unused"},
+			"iter_child_nodes": {GoFunc: "__gopy_ast_iter_child_unused"},
+			"fix_missing_locations": {GoFunc: "__gopy_ast_fix_unused"},
+			"increment_lineno": {GoFunc: "__gopy_ast_inc_lineno_unused"},
+			"copy_location":  {GoFunc: "__gopy_ast_copy_loc_unused"},
+			"get_docstring":  {GoFunc: "__gopy_ast_docstring_unused"},
+			"NodeVisitor":    {GoFunc: "__gopy_ast_node_unused"},
+			"NodeTransformer": {GoFunc: "__gopy_ast_node_unused"},
+			"AST":            {GoFunc: "__gopy_ast_node_unused"},
+			"Module":         {GoFunc: "__gopy_ast_node_unused"},
+			"Expression":     {GoFunc: "__gopy_ast_node_unused"},
+			"FunctionDef":    {GoFunc: "__gopy_ast_node_unused"},
+			"AsyncFunctionDef": {GoFunc: "__gopy_ast_node_unused"},
+			"ClassDef":       {GoFunc: "__gopy_ast_node_unused"},
+			"Return":         {GoFunc: "__gopy_ast_node_unused"},
+			"Assign":         {GoFunc: "__gopy_ast_node_unused"},
+			"AugAssign":      {GoFunc: "__gopy_ast_node_unused"},
+			"AnnAssign":      {GoFunc: "__gopy_ast_node_unused"},
+			"If":             {GoFunc: "__gopy_ast_node_unused"},
+			"For":            {GoFunc: "__gopy_ast_node_unused"},
+			"While":          {GoFunc: "__gopy_ast_node_unused"},
+			"With":           {GoFunc: "__gopy_ast_node_unused"},
+			"Try":            {GoFunc: "__gopy_ast_node_unused"},
+			"Match":          {GoFunc: "__gopy_ast_node_unused"},
+			"Import":         {GoFunc: "__gopy_ast_node_unused"},
+			"ImportFrom":     {GoFunc: "__gopy_ast_node_unused"},
+			"Constant":       {GoFunc: "__gopy_ast_node_unused"},
+			"Name":           {GoFunc: "__gopy_ast_node_unused"},
+			"Attribute":      {GoFunc: "__gopy_ast_node_unused"},
+			"Call":           {GoFunc: "__gopy_ast_node_unused"},
+			"BinOp":          {GoFunc: "__gopy_ast_node_unused"},
+			"UnaryOp":        {GoFunc: "__gopy_ast_node_unused"},
+			"Compare":        {GoFunc: "__gopy_ast_node_unused"},
+			"Add":            {GoFunc: "__gopy_ast_node_unused"},
+			"Sub":            {GoFunc: "__gopy_ast_node_unused"},
+			"Mult":           {GoFunc: "__gopy_ast_node_unused"},
+			"Div":            {GoFunc: "__gopy_ast_node_unused"},
+			"Mod":            {GoFunc: "__gopy_ast_node_unused"},
+			"Lambda":         {GoFunc: "__gopy_ast_node_unused"},
+			"List":           {GoFunc: "__gopy_ast_node_unused"},
+			"Tuple":          {GoFunc: "__gopy_ast_node_unused"},
+			"Dict":           {GoFunc: "__gopy_ast_node_unused"},
+			"Set":            {GoFunc: "__gopy_ast_node_unused"},
+			"Subscript":      {GoFunc: "__gopy_ast_node_unused"},
+			"Slice":          {GoFunc: "__gopy_ast_node_unused"},
+			"Starred":        {GoFunc: "__gopy_ast_node_unused"},
+			"Load":           {GoFunc: "__gopy_ast_node_unused"},
+			"Store":          {GoFunc: "__gopy_ast_node_unused"},
+			"Del":            {GoFunc: "__gopy_ast_node_unused"},
+		},
+	},
+	"bdb": {
+		Funcs: map[string]stdlibFunc{
+			"Bdb":          {GoFunc: "__gopy_bdb_unused"},
+			"Breakpoint":   {GoFunc: "__gopy_bdb_unused"},
+			"BdbQuit":      {GoFunc: "__gopy_bdb_unused"},
+		},
+	},
+	"bz2": {
+		Funcs: map[string]stdlibFunc{
+			"compress":   {GoFunc: "__gopy_bz2_compress_unused"},
+			"decompress": {GoFunc: "__gopy_bz2_decompress", Helper: helperBz2Decompress, HelperImports: []string{"compress/bzip2", "bytes", "io"}, RetKind: "str"},
+			"open":       {GoFunc: "__gopy_bz2_open_unused"},
+			"BZ2File":    {GoFunc: "__gopy_bz2_file_unused"},
+			"BZ2Compressor": {GoFunc: "__gopy_bz2_comp_unused"},
+			"BZ2Decompressor": {GoFunc: "__gopy_bz2_decomp_unused"},
+		},
+	},
+	"cmd": {
+		Funcs: map[string]stdlibFunc{
+			"Cmd": {GoFunc: "__gopy_cmd_unused"},
+		},
+	},
+	"code": {
+		Funcs: map[string]stdlibFunc{
+			"InteractiveInterpreter": {GoFunc: "__gopy_code_unused"},
+			"InteractiveConsole":     {GoFunc: "__gopy_code_unused"},
+			"interact":               {GoFunc: "__gopy_code_unused"},
+			"compile_command":        {GoFunc: "__gopy_code_unused"},
+		},
+	},
+	"codeop": {
+		Funcs: map[string]stdlibFunc{
+			"compile_command":   {GoFunc: "__gopy_codeop_unused"},
+			"Compile":           {GoFunc: "__gopy_codeop_unused"},
+			"CommandCompiler":   {GoFunc: "__gopy_codeop_unused"},
+		},
+	},
+	"compileall": {
+		Funcs: map[string]stdlibFunc{
+			"compile_dir":  {GoFunc: "__gopy_compileall_unused"},
+			"compile_file": {GoFunc: "__gopy_compileall_unused"},
+			"compile_path": {GoFunc: "__gopy_compileall_unused"},
+		},
+	},
+	"py_compile": {
+		Funcs: map[string]stdlibFunc{
+			"compile":      {GoFunc: "__gopy_pycompile_unused"},
+			"PyCompileError": {GoFunc: "__gopy_pycompile_unused"},
+		},
+	},
+	"copyreg": {
+		Funcs: map[string]stdlibFunc{
+			"pickle":            {GoFunc: "__gopy_copyreg_unused"},
+			"constructor":       {GoFunc: "__gopy_copyreg_unused"},
+			"add_extension":     {GoFunc: "__gopy_copyreg_unused"},
+			"remove_extension":  {GoFunc: "__gopy_copyreg_unused"},
+			"clear_extension_cache": {GoFunc: "__gopy_copyreg_unused"},
+			"__newobj__":        {GoFunc: "__gopy_copyreg_unused"},
+			"__newobj_ex__":     {GoFunc: "__gopy_copyreg_unused"},
+		},
+	},
+	"pickletools": {
+		Funcs: map[string]stdlibFunc{
+			"dis":      {GoFunc: "__gopy_pickletools_unused"},
+			"genops":   {GoFunc: "__gopy_pickletools_unused"},
+			"optimize": {GoFunc: "__gopy_pickletools_unused"},
+		},
+	},
+	"marshal": {
+		Attrs: map[string]stdlibAttr{
+			"version": {GoExpr: "int64(5)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"dump":  {GoFunc: "__gopy_marshal_unused"},
+			"dumps": {GoFunc: "__gopy_marshal_unused"},
+			"load":  {GoFunc: "__gopy_marshal_unused"},
+			"loads": {GoFunc: "__gopy_marshal_unused"},
+		},
+	},
+	"dbm": {
+		Funcs: map[string]stdlibFunc{
+			"open":  {GoFunc: "__gopy_dbm_open_unused"},
+			"whichdb": {GoFunc: "__gopy_dbm_whichdb_unused"},
+			"error": {GoFunc: "__gopy_dbm_err_unused"},
+		},
+		Subs: map[string]stdlibModule{
+			"gnu":  {Funcs: map[string]stdlibFunc{"open": {GoFunc: "__gopy_dbm_unused"}, "error": {GoFunc: "__gopy_dbm_unused"}}},
+			"ndbm": {Funcs: map[string]stdlibFunc{"open": {GoFunc: "__gopy_dbm_unused"}, "error": {GoFunc: "__gopy_dbm_unused"}}},
+			"dumb": {Funcs: map[string]stdlibFunc{"open": {GoFunc: "__gopy_dbm_unused"}, "error": {GoFunc: "__gopy_dbm_unused"}}},
+			"sqlite3": {Funcs: map[string]stdlibFunc{"open": {GoFunc: "__gopy_dbm_unused"}}},
+		},
+	},
+	"doctest": {
+		Attrs: map[string]stdlibAttr{
+			"DONT_ACCEPT_TRUE_FOR_1":      {GoExpr: "int64(1)"},
+			"DONT_ACCEPT_BLANKLINE":       {GoExpr: "int64(2)"},
+			"NORMALIZE_WHITESPACE":        {GoExpr: "int64(4)"},
+			"ELLIPSIS":                    {GoExpr: "int64(8)"},
+			"SKIP":                        {GoExpr: "int64(16)"},
+			"IGNORE_EXCEPTION_DETAIL":     {GoExpr: "int64(32)"},
+			"COMPARISON_FLAGS":            {GoExpr: "int64(63)"},
+			"REPORT_UDIFF":                {GoExpr: "int64(64)"},
+			"REPORT_CDIFF":                {GoExpr: "int64(128)"},
+			"REPORT_NDIFF":                {GoExpr: "int64(256)"},
+			"REPORT_ONLY_FIRST_FAILURE":   {GoExpr: "int64(512)"},
+			"REPORTING_FLAGS":             {GoExpr: "int64(960)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"testmod":             {GoFunc: "__gopy_doctest_unused"},
+			"testfile":            {GoFunc: "__gopy_doctest_unused"},
+			"run_docstring_examples": {GoFunc: "__gopy_doctest_unused"},
+			"DocTestSuite":        {GoFunc: "__gopy_doctest_unused"},
+			"DocFileSuite":        {GoFunc: "__gopy_doctest_unused"},
+			"DocTestParser":       {GoFunc: "__gopy_doctest_unused"},
+			"DocTestRunner":       {GoFunc: "__gopy_doctest_unused"},
+			"DocTestFinder":       {GoFunc: "__gopy_doctest_unused"},
+			"DocTest":             {GoFunc: "__gopy_doctest_unused"},
+			"Example":             {GoFunc: "__gopy_doctest_unused"},
+			"OutputChecker":       {GoFunc: "__gopy_doctest_unused"},
+			"DebugRunner":         {GoFunc: "__gopy_doctest_unused"},
+			"set_unittest_reportflags": {GoFunc: "__gopy_doctest_unused"},
+		},
+	},
+	"faulthandler": {
+		Funcs: map[string]stdlibFunc{
+			"enable":         {GoFunc: "__gopy_faulthandler_unused"},
+			"disable":        {GoFunc: "__gopy_faulthandler_unused"},
+			"is_enabled":     {GoFunc: "__gopy_faulthandler_isenabled", Helper: helperFaultHandlerIsEnabled, RetKind: "bool"},
+			"register":       {GoFunc: "__gopy_faulthandler_unused"},
+			"unregister":     {GoFunc: "__gopy_faulthandler_unused"},
+			"dump_traceback": {GoFunc: "__gopy_faulthandler_unused"},
+			"dump_traceback_later": {GoFunc: "__gopy_faulthandler_unused"},
+			"cancel_dump_traceback_later": {GoFunc: "__gopy_faulthandler_unused"},
+		},
+	},
+	"fcntl": {
+		Attrs: map[string]stdlibAttr{
+			"F_DUPFD":   {GoExpr: "int64(0)"},
+			"F_GETFD":   {GoExpr: "int64(1)"},
+			"F_SETFD":   {GoExpr: "int64(2)"},
+			"F_GETFL":   {GoExpr: "int64(3)"},
+			"F_SETFL":   {GoExpr: "int64(4)"},
+			"F_GETLK":   {GoExpr: "int64(5)"},
+			"F_SETLK":   {GoExpr: "int64(6)"},
+			"F_SETLKW":  {GoExpr: "int64(7)"},
+			"FD_CLOEXEC": {GoExpr: "int64(1)"},
+			"LOCK_SH":   {GoExpr: "int64(1)"},
+			"LOCK_EX":   {GoExpr: "int64(2)"},
+			"LOCK_NB":   {GoExpr: "int64(4)"},
+			"LOCK_UN":   {GoExpr: "int64(8)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"fcntl":  {GoFunc: "__gopy_fcntl_unused"},
+			"ioctl":  {GoFunc: "__gopy_fcntl_unused"},
+			"flock":  {GoFunc: "__gopy_fcntl_unused"},
+			"lockf":  {GoFunc: "__gopy_fcntl_unused"},
+		},
+	},
+	"fileinput": {
+		Funcs: map[string]stdlibFunc{
+			"input":      {GoFunc: "__gopy_fileinput_unused"},
+			"FileInput":  {GoFunc: "__gopy_fileinput_unused"},
+			"filename":   {GoFunc: "__gopy_fileinput_unused"},
+			"lineno":     {GoFunc: "__gopy_fileinput_unused"},
+			"isfirstline": {GoFunc: "__gopy_fileinput_unused"},
+			"isstdin":    {GoFunc: "__gopy_fileinput_unused"},
+			"close":      {GoFunc: "__gopy_fileinput_unused"},
+			"nextfile":   {GoFunc: "__gopy_fileinput_unused"},
+			"hook_compressed": {GoFunc: "__gopy_fileinput_unused"},
+			"hook_encoded":    {GoFunc: "__gopy_fileinput_unused"},
+		},
+	},
+	"importlib": {
+		Funcs: map[string]stdlibFunc{
+			"import_module":   {GoFunc: "__gopy_importlib_unused"},
+			"reload":          {GoFunc: "__gopy_importlib_unused"},
+			"invalidate_caches": {GoFunc: "__gopy_importlib_unused"},
+			"find_loader":     {GoFunc: "__gopy_importlib_unused"},
+		},
+		Subs: map[string]stdlibModule{
+			"util": {
+				Funcs: map[string]stdlibFunc{
+					"find_spec":       {GoFunc: "__gopy_importlib_unused"},
+					"spec_from_file_location": {GoFunc: "__gopy_importlib_unused"},
+					"module_from_spec": {GoFunc: "__gopy_importlib_unused"},
+					"resolve_name":    {GoFunc: "__gopy_importlib_unused"},
+					"LazyLoader":      {GoFunc: "__gopy_importlib_unused"},
+				},
+			},
+			"abc": {
+				Funcs: map[string]stdlibFunc{
+					"Loader":       {GoFunc: "__gopy_importlib_unused"},
+					"MetaPathFinder": {GoFunc: "__gopy_importlib_unused"},
+					"PathEntryFinder": {GoFunc: "__gopy_importlib_unused"},
+					"FileLoader":   {GoFunc: "__gopy_importlib_unused"},
+					"SourceLoader": {GoFunc: "__gopy_importlib_unused"},
+				},
+			},
+			"machinery": {
+				Funcs: map[string]stdlibFunc{
+					"ModuleSpec":      {GoFunc: "__gopy_importlib_unused"},
+					"SourceFileLoader": {GoFunc: "__gopy_importlib_unused"},
+					"SourcelessFileLoader": {GoFunc: "__gopy_importlib_unused"},
+					"ExtensionFileLoader": {GoFunc: "__gopy_importlib_unused"},
+					"FileFinder":      {GoFunc: "__gopy_importlib_unused"},
+					"PathFinder":      {GoFunc: "__gopy_importlib_unused"},
+				},
+			},
+			"resources": {
+				Funcs: map[string]stdlibFunc{
+					"files":         {GoFunc: "__gopy_importlib_unused"},
+					"as_file":       {GoFunc: "__gopy_importlib_unused"},
+					"open_binary":   {GoFunc: "__gopy_importlib_unused"},
+					"open_text":     {GoFunc: "__gopy_importlib_unused"},
+					"read_binary":   {GoFunc: "__gopy_importlib_unused"},
+					"read_text":     {GoFunc: "__gopy_importlib_unused"},
+					"path":          {GoFunc: "__gopy_importlib_unused"},
+					"contents":      {GoFunc: "__gopy_importlib_unused"},
+					"is_resource":   {GoFunc: "__gopy_importlib_unused"},
+				},
+			},
+			"metadata": {
+				Funcs: map[string]stdlibFunc{
+					"version":      {GoFunc: "__gopy_importlib_unused"},
+					"distribution": {GoFunc: "__gopy_importlib_unused"},
+					"distributions": {GoFunc: "__gopy_importlib_unused"},
+					"metadata":     {GoFunc: "__gopy_importlib_unused"},
+					"entry_points": {GoFunc: "__gopy_importlib_unused"},
+					"files":        {GoFunc: "__gopy_importlib_unused"},
+					"requires":     {GoFunc: "__gopy_importlib_unused"},
+					"packages_distributions": {GoFunc: "__gopy_importlib_unused"},
+					"PackageNotFoundError": {GoFunc: "__gopy_importlib_unused"},
+				},
+			},
+		},
+	},
+	"pkgutil": {
+		Funcs: map[string]stdlibFunc{
+			"iter_modules":     {GoFunc: "__gopy_pkgutil_unused"},
+			"walk_packages":    {GoFunc: "__gopy_pkgutil_unused"},
+			"get_data":         {GoFunc: "__gopy_pkgutil_unused"},
+			"get_loader":       {GoFunc: "__gopy_pkgutil_unused"},
+			"resolve_name":     {GoFunc: "__gopy_pkgutil_unused"},
+			"extend_path":      {GoFunc: "__gopy_pkgutil_unused"},
+			"ImpImporter":      {GoFunc: "__gopy_pkgutil_unused"},
+			"ImpLoader":        {GoFunc: "__gopy_pkgutil_unused"},
+			"ModuleInfo":       {GoFunc: "__gopy_pkgutil_unused"},
+		},
+	},
+	"zipimport": {
+		Funcs: map[string]stdlibFunc{
+			"zipimporter":     {GoFunc: "__gopy_zipimport_unused"},
+			"ZipImportError":  {GoFunc: "__gopy_zipimport_unused"},
+		},
+	},
+	"lzma": {
+		Attrs: map[string]stdlibAttr{
+			"FORMAT_XZ":      {GoExpr: "int64(1)"},
+			"FORMAT_ALONE":   {GoExpr: "int64(2)"},
+			"FORMAT_RAW":     {GoExpr: "int64(3)"},
+			"FORMAT_AUTO":    {GoExpr: "int64(0)"},
+			"CHECK_NONE":     {GoExpr: "int64(0)"},
+			"CHECK_CRC32":    {GoExpr: "int64(1)"},
+			"CHECK_CRC64":    {GoExpr: "int64(4)"},
+			"CHECK_SHA256":   {GoExpr: "int64(10)"},
+			"PRESET_DEFAULT": {GoExpr: "int64(6)"},
+			"PRESET_EXTREME": {GoExpr: "int64(2147483648)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"compress":   {GoFunc: "__gopy_lzma_unused"},
+			"decompress": {GoFunc: "__gopy_lzma_unused"},
+			"open":       {GoFunc: "__gopy_lzma_unused"},
+			"LZMAFile":   {GoFunc: "__gopy_lzma_unused"},
+			"LZMACompressor": {GoFunc: "__gopy_lzma_unused"},
+			"LZMADecompressor": {GoFunc: "__gopy_lzma_unused"},
+			"LZMAError":  {GoFunc: "__gopy_lzma_unused"},
+		},
+	},
+	"tarfile": {
+		Attrs: map[string]stdlibAttr{
+			"REGTYPE":  {GoExpr: `"0"`},
+			"AREGTYPE": {GoExpr: `"\x00"`},
+			"LNKTYPE":  {GoExpr: `"1"`},
+			"SYMTYPE":  {GoExpr: `"2"`},
+			"DIRTYPE":  {GoExpr: `"5"`},
+			"FIFOTYPE": {GoExpr: `"6"`},
+			"CHRTYPE":  {GoExpr: `"3"`},
+			"BLKTYPE":  {GoExpr: `"4"`},
+			"CONTTYPE": {GoExpr: `"7"`},
+			"DEFAULT_FORMAT": {GoExpr: "int64(2)"},
+			"USTAR_FORMAT":   {GoExpr: "int64(0)"},
+			"GNU_FORMAT":     {GoExpr: "int64(1)"},
+			"PAX_FORMAT":     {GoExpr: "int64(2)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"open":      {GoFunc: "__gopy_tarfile_unused"},
+			"TarFile":   {GoFunc: "__gopy_tarfile_unused"},
+			"TarInfo":   {GoFunc: "__gopy_tarfile_unused"},
+			"is_tarfile": {GoFunc: "__gopy_tarfile_unused"},
+			"TarError":  {GoFunc: "__gopy_tarfile_unused"},
+			"ReadError": {GoFunc: "__gopy_tarfile_unused"},
+			"CompressionError": {GoFunc: "__gopy_tarfile_unused"},
+			"StreamError": {GoFunc: "__gopy_tarfile_unused"},
+			"ExtractError": {GoFunc: "__gopy_tarfile_unused"},
+			"HeaderError": {GoFunc: "__gopy_tarfile_unused"},
+		},
+	},
+	"zipfile": {
+		Attrs: map[string]stdlibAttr{
+			"ZIP_STORED":   {GoExpr: "int64(0)"},
+			"ZIP_DEFLATED": {GoExpr: "int64(8)"},
+			"ZIP_BZIP2":    {GoExpr: "int64(12)"},
+			"ZIP_LZMA":     {GoExpr: "int64(14)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"ZipFile":      {GoFunc: "__gopy_zipfile_unused"},
+			"ZipInfo":      {GoFunc: "__gopy_zipfile_unused"},
+			"is_zipfile":   {GoFunc: "__gopy_zipfile_unused"},
+			"Path":         {GoFunc: "__gopy_zipfile_unused"},
+			"PyZipFile":    {GoFunc: "__gopy_zipfile_unused"},
+			"BadZipFile":   {GoFunc: "__gopy_zipfile_unused"},
+			"BadZipfile":   {GoFunc: "__gopy_zipfile_unused"},
+			"LargeZipFile": {GoFunc: "__gopy_zipfile_unused"},
+		},
+	},
+	"wave": {
+		Funcs: map[string]stdlibFunc{
+			"open":      {GoFunc: "__gopy_wave_unused"},
+			"Wave_read":  {GoFunc: "__gopy_wave_unused"},
+			"Wave_write": {GoFunc: "__gopy_wave_unused"},
+			"Error":      {GoFunc: "__gopy_wave_unused"},
+		},
+	},
+	"mailbox": {
+		Funcs: map[string]stdlibFunc{
+			"Mailbox":  {GoFunc: "__gopy_mailbox_unused"},
+			"Maildir":  {GoFunc: "__gopy_mailbox_unused"},
+			"mbox":     {GoFunc: "__gopy_mailbox_unused"},
+			"MH":       {GoFunc: "__gopy_mailbox_unused"},
+			"Babyl":    {GoFunc: "__gopy_mailbox_unused"},
+			"MMDF":     {GoFunc: "__gopy_mailbox_unused"},
+			"Message":  {GoFunc: "__gopy_mailbox_unused"},
+			"MaildirMessage": {GoFunc: "__gopy_mailbox_unused"},
+			"mboxMessage":    {GoFunc: "__gopy_mailbox_unused"},
+			"MHMessage":      {GoFunc: "__gopy_mailbox_unused"},
+			"BabylMessage":   {GoFunc: "__gopy_mailbox_unused"},
+			"MMDFMessage":    {GoFunc: "__gopy_mailbox_unused"},
+			"Error":          {GoFunc: "__gopy_mailbox_unused"},
+			"NoSuchMailboxError": {GoFunc: "__gopy_mailbox_unused"},
+			"NotEmptyError":      {GoFunc: "__gopy_mailbox_unused"},
+			"ExternalClashError": {GoFunc: "__gopy_mailbox_unused"},
+			"FormatError":        {GoFunc: "__gopy_mailbox_unused"},
+		},
+	},
+	"optparse": {
+		Funcs: map[string]stdlibFunc{
+			"OptionParser":   {GoFunc: "__gopy_optparse_unused"},
+			"Option":         {GoFunc: "__gopy_optparse_unused"},
+			"OptionGroup":    {GoFunc: "__gopy_optparse_unused"},
+			"OptionContainer": {GoFunc: "__gopy_optparse_unused"},
+			"Values":         {GoFunc: "__gopy_optparse_unused"},
+			"OptionError":    {GoFunc: "__gopy_optparse_unused"},
+			"OptionValueError": {GoFunc: "__gopy_optparse_unused"},
+			"OptionConflictError": {GoFunc: "__gopy_optparse_unused"},
+			"BadOptionError": {GoFunc: "__gopy_optparse_unused"},
+			"AmbiguousOptionError": {GoFunc: "__gopy_optparse_unused"},
+			"HelpFormatter":  {GoFunc: "__gopy_optparse_unused"},
+			"IndentedHelpFormatter": {GoFunc: "__gopy_optparse_unused"},
+			"TitledHelpFormatter":   {GoFunc: "__gopy_optparse_unused"},
+		},
+	},
+	"pstats": {
+		Funcs: map[string]stdlibFunc{
+			"Stats":          {GoFunc: "__gopy_pstats_unused"},
+			"SortKey":        {GoFunc: "__gopy_pstats_unused"},
+			"StatsProfile":   {GoFunc: "__gopy_pstats_unused"},
+			"FunctionProfile": {GoFunc: "__gopy_pstats_unused"},
+		},
+	},
+	"reprlib": {
+		Funcs: map[string]stdlibFunc{
+			"Repr":        {GoFunc: "__gopy_reprlib_unused"},
+			"repr":        {GoFunc: "__gopy_reprlib_repr_unused"},
+			"recursive_repr": {GoFunc: "__gopy_reprlib_recursive_unused"},
+		},
+	},
+	"sched": {
+		Funcs: map[string]stdlibFunc{
+			"scheduler": {GoFunc: "__gopy_sched_unused"},
+		},
+	},
+	"select": {
+		Attrs: map[string]stdlibAttr{
+			"PIPE_BUF": {GoExpr: "int64(4096)"},
+		},
+		Funcs: map[string]stdlibFunc{
+			"select":  {GoFunc: "__gopy_select_unused"},
+			"poll":    {GoFunc: "__gopy_select_unused"},
+			"epoll":   {GoFunc: "__gopy_select_unused"},
+			"kqueue":  {GoFunc: "__gopy_select_unused"},
+			"kevent":  {GoFunc: "__gopy_select_unused"},
+			"devpoll": {GoFunc: "__gopy_select_unused"},
+			"error":   {GoFunc: "__gopy_select_unused"},
+		},
+	},
+	"shelve": {
+		Funcs: map[string]stdlibFunc{
+			"open":     {GoFunc: "__gopy_shelve_unused"},
+			"Shelf":    {GoFunc: "__gopy_shelve_unused"},
+			"BsdDbShelf": {GoFunc: "__gopy_shelve_unused"},
+			"DbfilenameShelf": {GoFunc: "__gopy_shelve_unused"},
+		},
+	},
+	"sqlite3": {
+		Attrs: map[string]stdlibAttr{
+			"version":         {GoExpr: `"3.0.0"`},
+			"sqlite_version":  {GoExpr: `"3.42.0"`},
+			"version_info":    {GoExpr: `[]int64{3, 0, 0}`},
+			"sqlite_version_info": {GoExpr: `[]int64{3, 42, 0}`},
+			"PARSE_DECLTYPES": {GoExpr: "int64(1)"},
+			"PARSE_COLNAMES":  {GoExpr: "int64(2)"},
+			"SQLITE_OK":       {GoExpr: "int64(0)"},
+			"SQLITE_DENY":     {GoExpr: "int64(1)"},
+			"SQLITE_IGNORE":   {GoExpr: "int64(2)"},
+			"threadsafety":    {GoExpr: "int64(3)"},
+			"paramstyle":      {GoExpr: `"qmark"`},
+		},
+		Funcs: map[string]stdlibFunc{
+			"connect":     {GoFunc: "__gopy_sqlite3_unused"},
+			"Connection":  {GoFunc: "__gopy_sqlite3_unused"},
+			"Cursor":      {GoFunc: "__gopy_sqlite3_unused"},
+			"Row":         {GoFunc: "__gopy_sqlite3_unused"},
+			"Binary":      {GoFunc: "__gopy_sqlite3_unused"},
+			"Date":        {GoFunc: "__gopy_sqlite3_unused"},
+			"Time":        {GoFunc: "__gopy_sqlite3_unused"},
+			"Timestamp":   {GoFunc: "__gopy_sqlite3_unused"},
+			"DateFromTicks": {GoFunc: "__gopy_sqlite3_unused"},
+			"TimeFromTicks": {GoFunc: "__gopy_sqlite3_unused"},
+			"TimestampFromTicks": {GoFunc: "__gopy_sqlite3_unused"},
+			"register_adapter":  {GoFunc: "__gopy_sqlite3_unused"},
+			"register_converter": {GoFunc: "__gopy_sqlite3_unused"},
+			"complete_statement": {GoFunc: "__gopy_sqlite3_unused"},
+			"enable_callback_tracebacks": {GoFunc: "__gopy_sqlite3_unused"},
+			"Warning":     {GoFunc: "__gopy_sqlite3_unused"},
+			"Error":       {GoFunc: "__gopy_sqlite3_unused"},
+			"InterfaceError": {GoFunc: "__gopy_sqlite3_unused"},
+			"DatabaseError":  {GoFunc: "__gopy_sqlite3_unused"},
+			"DataError":      {GoFunc: "__gopy_sqlite3_unused"},
+			"OperationalError": {GoFunc: "__gopy_sqlite3_unused"},
+			"IntegrityError":   {GoFunc: "__gopy_sqlite3_unused"},
+			"InternalError":    {GoFunc: "__gopy_sqlite3_unused"},
+			"ProgrammingError": {GoFunc: "__gopy_sqlite3_unused"},
+			"NotSupportedError": {GoFunc: "__gopy_sqlite3_unused"},
+		},
+	},
+	"stringprep": {
+		Funcs: map[string]stdlibFunc{
+			"in_table_a1":  {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_b1":  {GoFunc: "__gopy_stringprep_unused"},
+			"map_table_b2": {GoFunc: "__gopy_stringprep_unused"},
+			"map_table_b3": {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c11": {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c12": {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c11_c12": {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c21": {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c22": {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c21_c22": {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c3":  {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c4":  {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c5":  {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c6":  {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c7":  {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c8":  {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_c9":  {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_d1":  {GoFunc: "__gopy_stringprep_unused"},
+			"in_table_d2":  {GoFunc: "__gopy_stringprep_unused"},
+		},
+	},
+	"tokenize": {
+		Funcs: map[string]stdlibFunc{
+			"tokenize":   {GoFunc: "__gopy_tokenize_unused"},
+			"untokenize": {GoFunc: "__gopy_tokenize_unused"},
+			"detect_encoding": {GoFunc: "__gopy_tokenize_unused"},
+			"open":       {GoFunc: "__gopy_tokenize_unused"},
+			"generate_tokens": {GoFunc: "__gopy_tokenize_unused"},
+			"TokenInfo":  {GoFunc: "__gopy_tokenize_unused"},
+			"TokenizerError": {GoFunc: "__gopy_tokenize_unused"},
+			"TokenError": {GoFunc: "__gopy_tokenize_unused"},
+		},
+	},
+	"tomllib": {
+		Funcs: map[string]stdlibFunc{
+			"load":          {GoFunc: "__gopy_tomllib_unused"},
+			"loads":         {GoFunc: "__gopy_tomllib_unused"},
+			"TOMLDecodeError": {GoFunc: "__gopy_tomllib_unused"},
+		},
+	},
+	"zipapp": {
+		Funcs: map[string]stdlibFunc{
+			"create_archive": {GoFunc: "__gopy_zipapp_unused"},
+			"get_interpreter": {GoFunc: "__gopy_zipapp_unused"},
+			"ZipAppError":    {GoFunc: "__gopy_zipapp_unused"},
+		},
+	},
+	"zoneinfo": {
+		Funcs: map[string]stdlibFunc{
+			"ZoneInfo":     {GoFunc: "__gopy_zoneinfo_zone", Helper: helperZoneinfoZone, HelperImports: []string{"time"}, RetKind: "str"},
+			"available_timezones": {GoFunc: "__gopy_zoneinfo_unused"},
+			"reset_tzpath": {GoFunc: "__gopy_zoneinfo_unused"},
+			"TZPATH":       {GoFunc: "__gopy_zoneinfo_unused"},
+			"InvalidTZPathWarning": {GoFunc: "__gopy_zoneinfo_unused"},
+			"ZoneInfoNotFoundError": {GoFunc: "__gopy_zoneinfo_unused"},
+		},
+	},
+	"webbrowser": {
+		Funcs: map[string]stdlibFunc{
+			"open":        {GoFunc: "__gopy_webbrowser_open", Helper: helperWebbrowserOpen, HelperImports: []string{"os/exec", "runtime"}, RetKind: "bool"},
+			"open_new":    {GoFunc: "__gopy_webbrowser_open", Helper: helperWebbrowserOpen, HelperImports: []string{"os/exec", "runtime"}, RetKind: "bool"},
+			"open_new_tab": {GoFunc: "__gopy_webbrowser_open", Helper: helperWebbrowserOpen, HelperImports: []string{"os/exec", "runtime"}, RetKind: "bool"},
+			"get":         {GoFunc: "__gopy_webbrowser_unused"},
+			"register":    {GoFunc: "__gopy_webbrowser_unused"},
+			"Error":       {GoFunc: "__gopy_webbrowser_unused"},
 		},
 	},
 }
@@ -7328,6 +7969,70 @@ const helperEmailMakeMsgid = `func __gopy_email_make_msgid(args ...string) strin
 	host, _ := os.Hostname()
 	if host == "" { host = "localhost" }
 	return fmt.Sprintf("<%d.%d@%s>", time.Now().UnixNano(), os.Getpid(), host)
+}`
+
+const helperTimeAsctime = `func __gopy_time_asctime(args ...any) string {
+	return time.Now().Format("Mon Jan _2 15:04:05 2006")
+}`
+
+const helperTimeCtime = `func __gopy_time_ctime(args ...float64) string {
+	t := time.Now()
+	if len(args) > 0 {
+		secs := args[0]
+		t = time.Unix(int64(secs), 0)
+	}
+	return t.Format("Mon Jan _2 15:04:05 2006")
+}`
+
+const helperTimeTzname = `func __gopy_time_tzname() []string {
+	std, dst := time.Now().Zone(), time.Now().Zone()
+	_ = dst
+	return []string{std, ""}
+}`
+
+const helperTimeClockres = `func __gopy_time_clockres(args ...int64) float64 { return 1e-9 }`
+
+const helperSysExecutable = `func __gopy_sys_executable() string {
+	if exe, err := os.Executable(); err == nil { return exe }
+	return os.Args[0]
+}`
+
+const helperSysExcInfo = `func __gopy_sys_exc_info() []any { return []any{nil, nil, nil} }`
+const helperSysGetRecursion = `func __gopy_sys_getrecursion() int64 { return int64(1000) }`
+const helperSysGetRefcount = `func __gopy_sys_getrefcount(_ any) int64 { return int64(1) }`
+const helperSysGetEnc = `func __gopy_sys_getenc() string { return "utf-8" }`
+const helperSysGetFsenc = `func __gopy_sys_getfsenc() string { return "utf-8" }`
+const helperSysGetIntMaxDigits = `func __gopy_sys_getintmax() int64 { return int64(4300) }`
+const helperSysGetSwitch = `func __gopy_sys_getswitch() float64 { return 0.005 }`
+const helperSysGetAllocated = `func __gopy_sys_alloc() int64 { return int64(0) }`
+const helperSysIsFinalizing = `func __gopy_sys_isfin() bool { return false }`
+
+const helperBz2Decompress = `func __gopy_bz2_decompress(data string) string {
+	r := bzip2.NewReader(bytes.NewReader([]byte(data)))
+	out, err := io.ReadAll(r)
+	if err != nil { return "" }
+	return string(out)
+}`
+
+const helperFaultHandlerIsEnabled = `func __gopy_faulthandler_isenabled() bool { return false }`
+
+const helperZoneinfoZone = `func __gopy_zoneinfo_zone(name string) string {
+	if _, err := time.LoadLocation(name); err != nil {
+		panic(NewException("ZoneInfoNotFoundError: " + name))
+	}
+	return name
+}`
+
+const helperWebbrowserOpen = `func __gopy_webbrowser_open(url string, args ...any) bool {
+	var cmd string
+	switch runtime.GOOS {
+	case "darwin": cmd = "open"
+	case "windows": cmd = "rundll32"
+	default: cmd = "xdg-open"
+	}
+	c := exec.Command(cmd, url)
+	if err := c.Start(); err != nil { return false }
+	return true
 }`
 
 const helperThreadingActiveCount = `func __gopy_threading_active_count() int64 { return int64(1) }`
