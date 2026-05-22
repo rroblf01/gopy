@@ -597,6 +597,14 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] `int(s, base)` parses string `s` with the given radix via `strconv.ParseInt`
 - [x] `int(literal_float)` truncates through an IIFE so Go's untyped-constant rule doesn't reject the conversion
 - [x] Binary `**` (power): floats route through `math.Pow`; int exponent uses an inline loop so the result stays `int64` like CPython
+- [x] Tuple unpack from a list-typed variable: `a, b = pair` (where `pair: list[int]`) destructures via an index temp `__multi_N`
+- [x] Star unpack in list literals: `[*xs, 99]` / `[0, *ys]` lower to an IIFE that appends through `[]T{}` so the element type matches each spread source
+- [x] `@staticmethod` on classes: emits a free `<Class>_<method>` Go function with no receiver. Call site `Class.method(...)` dispatches identically to `@classmethod`
+- [x] `except UserClass as e:` type-asserts `e` to `*UserClass` (instead of leaving it as `any`), so field access on the bound name typechecks
+- [x] Enum `.value` accessor: `Color.RED.value` lowers to `int64(ColorRED)`; a variable typed as the enum also supports `.value`
+- [x] `str.partition` / `str.rpartition` / `str.split` / `str.rsplit` / `str.splitlines` are now recognized as slice-returning by the multi-assign code, so `head, sep, tail = s.partition("@")` destructures via the index temp
+- [x] List / dict comprehensions iterating `range(...)` emit a C-style `for i := lo; i < hi; i += step` loop instead of `for _ := range range(...)` (which was invalid Go)
+- [x] f-string float formatting matches CPython's `repr(float)`: whole-valued floats keep the trailing `.0`, so `f"{3.0}"` prints `3.0` rather than Go's default `3`
 
 ### Hard / open questions
 

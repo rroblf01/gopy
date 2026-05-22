@@ -633,6 +633,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		//                   so it doesn't need a `*Class` receiver
 		isProperty := false
 		isClassMethod := false
+		isStaticMethod := false
 		isAbstract := false
 		propSetterFor := ""
 		for _, d := range m.Children("decorator_list") {
@@ -647,7 +648,10 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				case "abstractmethod":
 					isAbstract = true
 					continue
-				case "staticmethod", "final", "override", "overload",
+				case "staticmethod":
+					isStaticMethod = true
+					continue
+				case "final", "override", "overload",
 					"deprecated", "cached_property", "no_type_check":
 					continue
 				}
@@ -750,11 +754,17 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			methName = rename
 		}
 		args := m.Child("args").Children("args")
-		if len(args) == 0 {
+		if !isStaticMethod && len(args) == 0 {
 			return nil, fmt.Errorf("class %s.%s: method must have at least self parameter", name, methName)
 		}
-		// Drop self; we add it back as Receiver.
-		params := args[1:]
+		// Drop self; we add it back as Receiver. @staticmethod methods
+		// have no implicit self, so keep all args.
+		var params []parser.Node
+		if isStaticMethod {
+			params = args
+		} else {
+			params = args[1:]
+		}
 
 		if methName == "__init__" {
 			class.HasInit = true
@@ -820,13 +830,14 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			continue
 		}
 
-		// Regular method (or @classmethod). For @classmethod we emit a
-		// free function `<Class>_<method>` so it doesn't take a *Class
-		// receiver; calls like `Class.method(args)` are rewritten at
-		// codegen time. References to `cls` inside the body are rewritten
-		// to the class name, matching Python's semantics for `cls(...)`.
+		// Regular method (or @classmethod / @staticmethod). For
+		// @classmethod / @staticmethod we emit a free function
+		// `<Class>_<method>` so it doesn't take a *Class receiver; calls
+		// like `Class.method(args)` are rewritten at codegen time.
+		// References to `cls` inside the body are rewritten to the class
+		// name, matching Python's semantics for `cls(...)`.
 		fn := &Func{Name: methName}
-		if !isClassMethod {
+		if !isClassMethod && !isStaticMethod {
 			fn.Receiver = &Param{Name: "self", Ty: &Type{Kind: TyNamed, Name: name}}
 		} else {
 			fn.Name = name + "_" + methName
@@ -883,7 +894,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			// declared name with the class's named type so lookups don't
 			// trip the undeclared-identifier path.
 			sc.declare("cls", &Type{Kind: TyNamed, Name: name})
-		} else {
+		} else if !isStaticMethod {
 			sc.declare("self", fn.Receiver.Ty)
 		}
 		for _, p := range fn.Params {
@@ -908,7 +919,11 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		}
 		fn.Body = body
 		decls = append(decls, fn)
-		if isClassMethod {
+		if isClassMethod || isStaticMethod {
+			// Both flavors emit as free functions; reuse the ClassMethods
+			// set as the call-site dispatch hook. @staticmethod skips the
+			// self/cls bind; the call site form `Class.name(...)` rewrites
+			// to `Class_name(...)` identically.
 			if class.ClassMethods == nil {
 				class.ClassMethods = map[string]bool{}
 			}

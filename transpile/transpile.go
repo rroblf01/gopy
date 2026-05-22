@@ -1159,6 +1159,45 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("continue\n")
 		return nil
 	case *ir.MultiAssign:
+		// Single RHS that's a slice-typed value (Name pointing to a list
+		// or a tuple-lowered slice): destructure by index.
+		//   __multi := pair
+		//   x, y := __multi[0], __multi[1]
+		if len(x.Values) == 1 {
+			rTy := g.effectiveType(x.Values[0])
+			if rTy != nil && rTy.Kind == ir.TyList && !g.callReturnsSlice(x.Values[0]) {
+				if _, isCall := x.Values[0].(*ir.Call); !isCall {
+					g.tmpCounter++
+					tmp := fmt.Sprintf("__multi_%d", g.tmpCounter)
+					g.writeIndent()
+					g.writef("%s := ", tmp)
+					if err := g.expr(x.Values[0]); err != nil {
+						return err
+					}
+					g.writef("\n")
+					g.writeIndent()
+					for i, t := range x.Targets {
+						if i > 0 {
+							g.writef(", ")
+						}
+						g.writef("%s", t)
+					}
+					if x.Decl {
+						g.writef(" := ")
+					} else {
+						g.writef(" = ")
+					}
+					for i := range x.Targets {
+						if i > 0 {
+							g.writef(", ")
+						}
+						g.writef("%s[%d]", tmp, i)
+					}
+					g.writef("\n")
+					return nil
+				}
+			}
+		}
 		// Stdlib helpers returning a slice: rewrite as
 		//   __multi := f(); a, b := __multi[0], __multi[1]
 		// so `a, b = stdlib.func()` works when the underlying helper
@@ -1709,6 +1748,7 @@ func (g *gen) delStmt(d *ir.Del) error {
 // it. CPython disables asserts under `python -O`; gopy keeps them on
 // since there's no equivalent compile-mode switch.
 func (g *gen) assertStmt(a *ir.Assert) error {
+	g.needsException = true
 	g.writeIndent()
 	g.writef("if !(")
 	if err := g.emitTruthy(a.Cond); err != nil {
@@ -2308,9 +2348,21 @@ func (g *gen) try(t *ir.Try) error {
 			g.indent++
 			if h.VarName != "" {
 				g.writeIndent()
-				g.writef("%s := r\n", h.VarName)
+				// Single-class user-defined handler: type-assert so field
+				// access on the bound name typechecks. Otherwise keep `r`
+				// as `any` and let downstream code coerce as needed.
+				if len(names) == 1 && isUserClass(names[0]) {
+					g.writef("%s, _ := r.(*%s)\n", h.VarName, names[0])
+				} else {
+					g.writef("%s := r\n", h.VarName)
+				}
 				g.writeIndent()
 				g.writef("_ = %s\n", h.VarName)
+				// Track localVarTypes so subsequent attribute access uses
+				// the bound class type for field lookup.
+				if len(names) == 1 && isUserClass(names[0]) {
+					g.localVarTypes[h.VarName] = &ir.Type{Kind: ir.TyNamed, Name: names[0]}
+				}
 			}
 			if err := g.stmts(h.Body); err != nil {
 				return err
@@ -3102,6 +3154,35 @@ func (g *gen) expr(e ir.Expr) error {
 				return fmt.Errorf("enum %s has no member %q", cls.Name, x.Name)
 			}
 		}
+		// `enum_var.value`: enums lower to typed int64 aliases, so `.value`
+		// is an int64 cast. Supports both `Color.RED.value` (chained
+		// Attribute) and `c.value` (variable typed as the enum).
+		if x.Name == "value" {
+			// Variable typed as enum.
+			if recvTy := g.effectiveType(x.Recv); recvTy != nil && recvTy.Kind == ir.TyNamed {
+				if cls, ok := g.classes[recvTy.Name]; ok && cls.IsEnum {
+					g.writef("int64(")
+					if err := g.expr(x.Recv); err != nil {
+						return err
+					}
+					g.writef(")")
+					return nil
+				}
+			}
+			// Chained `EnumClass.Member.value`.
+			if inner, ok := x.Recv.(*ir.Attribute); ok {
+				if cn, ok := inner.Recv.(*ir.Name); ok {
+					if cls, ok := g.classes[cn.N]; ok && cls.IsEnum {
+						for _, em := range cls.EnumMembers {
+							if em.Name == inner.Name {
+								g.writef("int64(%s%s)", cls.Name, em.Name)
+								return nil
+							}
+						}
+					}
+				}
+			}
+		}
 		// Stdlib module attribute: sys.argv, etc.
 		if n, ok := x.Recv.(*ir.Name); ok {
 			if mod, ok := stdlibModules[n.N]; ok {
@@ -3289,6 +3370,58 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		return g.sliceWithHelper(x)
 	case *ir.ListLit:
+		// Star-unpack support: `[*a, *b, x]` becomes
+		//   append(append([]T{}, a...), b...) with `x` joined directly.
+		// Walk the elements; on any Starred, switch to a multi-append IIFE.
+		hasStar := false
+		for _, e := range x.Elems {
+			if _, ok := e.(*ir.Starred); ok {
+				hasStar = true
+				break
+			}
+		}
+		if hasStar {
+			// Pick the element type from the first Starred operand (its
+			// value is a slice; its Elem is what we want). Otherwise fall
+			// back to the IR's declared ElemTy. This handles `[*a, *b]`
+			// where the IR collapses to `list[list[T]]` because the
+			// starred children look list-shaped.
+			elemTy := x.ElemTy
+			for _, e := range x.Elems {
+				if st, ok := e.(*ir.Starred); ok {
+					if t := g.effectiveType(st.Value); t != nil && t.Kind == ir.TyList && t.Elem != nil {
+						elemTy = t.Elem
+						break
+					}
+				}
+			}
+			g.writef("func() []%s {\n", g.goType(elemTy))
+			g.indent++
+			g.writeIndent()
+			g.writef("__out := []%s{}\n", g.goType(elemTy))
+			for _, e := range x.Elems {
+				g.writeIndent()
+				if st, ok := e.(*ir.Starred); ok {
+					g.writef("__out = append(__out, ")
+					if err := g.expr(st.Value); err != nil {
+						return err
+					}
+					g.writef("...)\n")
+				} else {
+					g.writef("__out = append(__out, ")
+					if err := g.expr(e); err != nil {
+						return err
+					}
+					g.writef(")\n")
+				}
+			}
+			g.writeIndent()
+			g.writef("return __out\n")
+			g.indent--
+			g.writeIndent()
+			g.writef("}()")
+			return nil
+		}
 		g.writef("[]%s{", g.goType(x.ElemTy))
 		for i, e := range x.Elems {
 			if i > 0 {
@@ -3407,6 +3540,59 @@ func (g *gen) listComp(c *ir.ListComp) error {
 	g.writeIndent()
 	g.writef("__out := []%s{}\n", elem)
 	openLoop := func(varName string, cond ir.Expr, iter ir.Expr) error {
+		if call, ok := iter.(*ir.Call); ok {
+			if n, ok := call.Func.(*ir.Name); ok && n.N == "range" && len(call.Args) >= 1 && len(call.Args) <= 3 {
+				g.writeIndent()
+				switch len(call.Args) {
+				case 1:
+					g.writef("for %s := int64(0); %s < ", varName, varName)
+					if err := g.expr(call.Args[0]); err != nil {
+						return err
+					}
+					g.writef("; %s++ {\n", varName)
+				case 2:
+					g.writef("for %s := ", varName)
+					if err := g.expr(call.Args[0]); err != nil {
+						return err
+					}
+					g.writef("; %s < ", varName)
+					if err := g.expr(call.Args[1]); err != nil {
+						return err
+					}
+					g.writef("; %s++ {\n", varName)
+				case 3:
+					g.writef("for %s := ", varName)
+					if err := g.expr(call.Args[0]); err != nil {
+						return err
+					}
+					g.writef("; %s < ", varName)
+					if err := g.expr(call.Args[1]); err != nil {
+						return err
+					}
+					g.writef("; %s += ", varName)
+					if err := g.expr(call.Args[2]); err != nil {
+						return err
+					}
+					g.writef(" {\n")
+				}
+				g.indent++
+				if cond != nil {
+					g.writeIndent()
+					g.writef("if !(")
+					if err := g.expr(cond); err != nil {
+						return err
+					}
+					g.writef(") {\n")
+					g.indent++
+					g.writeIndent()
+					g.writef("continue\n")
+					g.indent--
+					g.writeIndent()
+					g.writef("}\n")
+				}
+				return nil
+			}
+		}
 		g.writeIndent()
 		iterTy := iter.TypeOf()
 		if iterTy != nil && iterTy.Kind == ir.TyDict {
@@ -3480,6 +3666,59 @@ func (g *gen) dictComp(c *ir.DictComp) error {
 	g.writeIndent()
 	g.writef("__out := map[%s]%s{}\n", kt, vt)
 	openLoop := func(varName string, cond ir.Expr, iter ir.Expr) error {
+		if call, ok := iter.(*ir.Call); ok {
+			if n, ok := call.Func.(*ir.Name); ok && n.N == "range" && len(call.Args) >= 1 && len(call.Args) <= 3 {
+				g.writeIndent()
+				switch len(call.Args) {
+				case 1:
+					g.writef("for %s := int64(0); %s < ", varName, varName)
+					if err := g.expr(call.Args[0]); err != nil {
+						return err
+					}
+					g.writef("; %s++ {\n", varName)
+				case 2:
+					g.writef("for %s := ", varName)
+					if err := g.expr(call.Args[0]); err != nil {
+						return err
+					}
+					g.writef("; %s < ", varName)
+					if err := g.expr(call.Args[1]); err != nil {
+						return err
+					}
+					g.writef("; %s++ {\n", varName)
+				case 3:
+					g.writef("for %s := ", varName)
+					if err := g.expr(call.Args[0]); err != nil {
+						return err
+					}
+					g.writef("; %s < ", varName)
+					if err := g.expr(call.Args[1]); err != nil {
+						return err
+					}
+					g.writef("; %s += ", varName)
+					if err := g.expr(call.Args[2]); err != nil {
+						return err
+					}
+					g.writef(" {\n")
+				}
+				g.indent++
+				if cond != nil {
+					g.writeIndent()
+					g.writef("if !(")
+					if err := g.expr(cond); err != nil {
+						return err
+					}
+					g.writef(") {\n")
+					g.indent++
+					g.writeIndent()
+					g.writef("continue\n")
+					g.indent--
+					g.writeIndent()
+					g.writef("}\n")
+				}
+				return nil
+			}
+		}
 		g.writeIndent()
 		iterTy := iter.TypeOf()
 		if iterTy != nil && iterTy.Kind == ir.TyDict {
@@ -3565,9 +3804,18 @@ func (g *gen) fstring(f *ir.FStr) error {
 					}
 				}
 			}
-			if p.Spec != "" || p.Conv != 0 || hasUserFormat {
-				// Spec / conv / user dispatch all yield a fully-formatted
-				// string. Placeholder becomes %s.
+			// Float values need Python's trailing-`.0` formatting; route
+			// through __gopy_repr for the no-spec / no-conv case so the
+			// output keeps decimal point + zero on whole-valued floats.
+			isFloat := false
+			if p.Spec == "" && p.Conv == 0 && !hasUserFormat {
+				if t := g.effectiveType(p.Expr); t != nil && t.Kind == ir.TyFloat {
+					isFloat = true
+				}
+			}
+			if p.Spec != "" || p.Conv != 0 || hasUserFormat || isFloat {
+				// Spec / conv / user dispatch / float dispatch all yield a
+				// fully-formatted string. Placeholder becomes %s.
 				fmtBuf.WriteString("%s")
 			} else {
 				fmtBuf.WriteString("%v")
@@ -3633,8 +3881,23 @@ func (g *gen) fstring(f *ir.FStr) error {
 			}
 			g.writef(")")
 		} else {
-			if err := g.expr(a.expr); err != nil {
-				return err
+			// Float-typed args with no spec route through __gopy_repr so
+			// whole-valued floats keep the `.0` suffix CPython prints.
+			if t := g.effectiveType(a.expr); t != nil && t.Kind == ir.TyFloat {
+				g.helpers["__gopy_repr"] = helperGopyRepr
+				g.addImport("strings")
+				g.addImport("strconv")
+				g.addImport("fmt")
+				g.addImport("reflect")
+				g.writef("__gopy_repr(")
+				if err := g.boxedExpr(a.expr); err != nil {
+					return err
+				}
+				g.writef(")")
+			} else {
+				if err := g.expr(a.expr); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -11766,6 +12029,15 @@ func (g *gen) callReturnsSlice(e ir.Expr) bool {
 		path = strings.Join(segs[:len(segs)-1], ".")
 		method = segs[len(segs)-1]
 	case *ir.MethodCall:
+		// String methods that return []string (partition / rpartition /
+		// split / rsplit / splitlines) qualify even though they aren't in
+		// the stdlib registry — they're rewritten inline at codegen.
+		if rt := x.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyStr {
+			switch x.Method {
+			case "partition", "rpartition", "split", "rsplit", "splitlines":
+				return true
+			}
+		}
 		p, ok := stdlibPathOf(x.Recv, g.aliases)
 		if !ok {
 			return false
