@@ -178,18 +178,20 @@ type If struct {
 	Else []Stmt
 }
 type While struct {
-	Cond Expr
-	Body []Stmt
+	Cond   Expr
+	Body   []Stmt
+	OrElse []Stmt // `while X: ... else: ...` runs only if loop exits normally
 }
 
 // ForRange is a numeric loop produced from `for i in range(...)`.
 // Start/Stop/Step are typed int expressions.
 type ForRange struct {
-	Var   string
-	Start Expr
-	Stop  Expr
-	Step  Expr // nil means +1
-	Body  []Stmt
+	Var    string
+	Start  Expr
+	Stop   Expr
+	Step   Expr // nil means +1
+	Body   []Stmt
+	OrElse []Stmt // `for i in range(...): ... else: ...` runs only if loop exits normally
 }
 
 // ForEach iterates a list/dict/string. ElemTy is the inferred element type.
@@ -208,6 +210,7 @@ type ForEach struct {
 	ElemTy *Type
 	Kind   string
 	Body   []Stmt
+	OrElse []Stmt // `for x in xs: ... else: ...` runs only if loop exits normally
 }
 
 // MultiAssign is `a, b = x, y` where both sides have matching arity.
@@ -252,7 +255,8 @@ type ExceptHandler struct {
 
 // Raise is `raise X(args...)` or bare `raise` (re-raise).
 type Raise struct {
-	Exc Expr // nil for bare re-raise
+	Exc   Expr // nil for bare re-raise
+	Cause Expr // `raise X from Y` — Y carried for chaining, nil otherwise
 }
 
 // Yield emits one value from a generator function. Codegen lowers it

@@ -198,14 +198,27 @@ func (g *gen) resolveAlias(name string) string {
 // of-file emit) lets late discovery during codegen still pull the type
 // in, and matches the existing helper-import dedup semantics.
 const exceptionBaseSource = `type Exception struct {
-	Msg string
+	Msg   string
+	Cause any
 }
 
 func NewException(msg string) *Exception { return &Exception{Msg: msg} }
 
 func (e *Exception) Error() string { return e.Msg }
 
-func (e *Exception) String() string { return e.Msg }`
+func (e *Exception) String() string { return e.Msg }
+
+// __gopy_exc_chain attaches a cause value to an exception (raise X from Y).
+// Returns the same exception so panic(__gopy_exc_chain(X, Y)) reads
+// naturally at the call site. Accepts any concrete exception type that
+// embeds the Exception fields, so user-defined subclasses chain too.
+func __gopy_exc_chain(exc any, cause any) any {
+	if e, ok := exc.(*Exception); ok {
+		e.Cause = cause
+		return e
+	}
+	return exc
+}`
 
 // detectExceptionUsage walks the IR looking for any place where the bare
 // builtin `Exception` is referenced (as a class base, an except clause, or
@@ -364,6 +377,12 @@ type gen struct {
 	imports        map[string]bool
 	indent         int
 	tmpCounter     int
+	// breakFlags is a stack of `__broke_N` flag names. Loop emitters
+	// with `else:` clauses push a flag name before emitting the body
+	// and pop it afterwards. While the stack is non-empty, `break`
+	// codegen sets the topmost flag before exiting so the post-loop
+	// `if !__broke_N` check skips the else clause.
+	breakFlags []string
 	classes        map[string]*ir.Class            // class name → decl (for super() lookup)
 	funcs          map[string]*ir.Func             // free function name → decl (for kwarg/default resolution)
 	methods        map[string]map[string]*ir.Func  // class name → method name → method decl
@@ -1010,6 +1029,14 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("\n")
 		return nil
 	case *ir.While:
+		var flag string
+		if len(x.OrElse) > 0 {
+			g.tmpCounter++
+			flag = fmt.Sprintf("__broke_%d", g.tmpCounter)
+			g.writeIndent()
+			g.writef("%s := false\n", flag)
+			g.breakFlags = append(g.breakFlags, flag)
+		}
 		g.writeIndent()
 		g.writef("for ")
 		if err := g.boolExpr(x.Cond); err != nil {
@@ -1023,10 +1050,43 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.indent--
 		g.writeIndent()
 		g.writef("}\n")
+		if flag != "" {
+			g.breakFlags = g.breakFlags[:len(g.breakFlags)-1]
+			g.writeIndent()
+			g.writef("if !%s {\n", flag)
+			g.indent++
+			if err := g.stmts(x.OrElse); err != nil {
+				return err
+			}
+			g.indent--
+			g.writeIndent()
+			g.writef("}\n")
+		}
 		return nil
 	case *ir.ForRange:
 		return g.forRange(x)
 	case *ir.ForEach:
+		if len(x.OrElse) > 0 {
+			g.tmpCounter++
+			flag := fmt.Sprintf("__broke_%d", g.tmpCounter)
+			g.writeIndent()
+			g.writef("%s := false\n", flag)
+			g.breakFlags = append(g.breakFlags, flag)
+			if err := g.forEach(x); err != nil {
+				return err
+			}
+			g.breakFlags = g.breakFlags[:len(g.breakFlags)-1]
+			g.writeIndent()
+			g.writef("if !%s {\n", flag)
+			g.indent++
+			if err := g.stmts(x.OrElse); err != nil {
+				return err
+			}
+			g.indent--
+			g.writeIndent()
+			g.writef("}\n")
+			return nil
+		}
 		return g.forEach(x)
 	case *ir.Try:
 		return g.try(x)
@@ -1045,6 +1105,11 @@ func (g *gen) stmt(s ir.Stmt) error {
 	case *ir.LocalFunc:
 		return g.localFunc(x)
 	case *ir.Break:
+		if len(g.breakFlags) > 0 {
+			flag := g.breakFlags[len(g.breakFlags)-1]
+			g.writeIndent()
+			g.writef("%s = true\n", flag)
+		}
 		g.writeIndent()
 		g.writef("break\n")
 		return nil
@@ -1991,34 +2056,51 @@ func (g *gen) matchStmt(m *ir.Match) error {
 			g.writef("{\n")
 			hadUnconditionalDefault = true
 		} else {
-			g.writef("if ")
-			needAnd := false
-			if len(mc.Patterns) > 0 {
-				g.writef("(")
-				for j, p := range mc.Patterns {
-					if j > 0 {
-						g.writef(" || ")
-					}
-					g.writef("__subj == ")
-					if err := g.expr(p); err != nil {
-						return err
-					}
-				}
-				g.writef(")")
-				needAnd = true
-			}
-			if mc.Guard != nil {
-				if needAnd {
-					g.writef(" && (")
-				} else {
-					g.writef("(")
-				}
+			// `case x if cond:` — bind x to subject inside an `if cond` so
+			// the guard can reference x. Use a func-literal scope to keep
+			// the binding local to the arm.
+			if mc.Capture != "" && len(mc.Patterns) == 0 && mc.Guard != nil {
+				g.writef("if func() bool { %s := __subj; _ = %s; return ", mc.Capture, mc.Capture)
 				if err := g.boolExpr(mc.Guard); err != nil {
 					return err
 				}
-				g.writef(")")
+				g.writef(" }() {\n")
+				g.indent++
+				g.writeIndent()
+				g.writef("%s := __subj\n", mc.Capture)
+				g.writeIndent()
+				g.writef("_ = %s\n", mc.Capture)
+				g.indent--
+			} else {
+				g.writef("if ")
+				needAnd := false
+				if len(mc.Patterns) > 0 {
+					g.writef("(")
+					for j, p := range mc.Patterns {
+						if j > 0 {
+							g.writef(" || ")
+						}
+						g.writef("__subj == ")
+						if err := g.expr(p); err != nil {
+							return err
+						}
+					}
+					g.writef(")")
+					needAnd = true
+				}
+				if mc.Guard != nil {
+					if needAnd {
+						g.writef(" && (")
+					} else {
+						g.writef("(")
+					}
+					if err := g.boolExpr(mc.Guard); err != nil {
+						return err
+					}
+					g.writef(")")
+				}
+				g.writef(" {\n")
 			}
-			g.writef(" {\n")
 		}
 		g.indent++
 		if err := g.stmts(mc.Body); err != nil {
@@ -2128,15 +2210,94 @@ func (g *gen) raise(r *ir.Raise) error {
 		g.writef("panic(r)\n")
 		return nil
 	}
+	if r.Cause != nil {
+		g.needsException = true
+		g.writef("panic(__gopy_exc_chain(")
+		if err := g.emitExceptionExpr(r.Exc); err != nil {
+			return err
+		}
+		g.writef(", ")
+		if err := g.expr(r.Cause); err != nil {
+			return err
+		}
+		g.writef("))\n")
+		return nil
+	}
 	g.writef("panic(")
-	if err := g.expr(r.Exc); err != nil {
+	if err := g.emitExceptionExpr(r.Exc); err != nil {
 		return err
 	}
 	g.writef(")\n")
 	return nil
 }
 
+// emitExceptionExpr renders the value being raised, rewriting bare
+// `Exception(msg)` / `ValueError(msg)` / `TypeError(msg)` constructor
+// calls into `NewException(msg)` since gopy doesn't materialize every
+// builtin exception subclass as a Go type yet.
+func (g *gen) emitExceptionExpr(e ir.Expr) error {
+	if c, ok := e.(*ir.Call); ok {
+		if n, ok := c.Func.(*ir.Name); ok {
+			if _, userClass := g.classes[n.N]; !userClass {
+				switch n.N {
+				case "Exception", "ValueError", "TypeError", "RuntimeError",
+					"NotImplementedError", "KeyError", "IndexError",
+					"AttributeError", "ArithmeticError", "ZeroDivisionError",
+					"OverflowError", "AssertionError", "ImportError",
+					"ModuleNotFoundError", "LookupError", "NameError",
+					"UnboundLocalError", "OSError", "FileNotFoundError",
+					"PermissionError", "FileExistsError", "IsADirectoryError",
+					"NotADirectoryError", "InterruptedError", "BlockingIOError",
+					"ChildProcessError", "BrokenPipeError", "ConnectionError",
+					"ConnectionResetError", "ConnectionAbortedError",
+					"ConnectionRefusedError", "TimeoutError", "EOFError",
+					"StopIteration", "StopAsyncIteration", "GeneratorExit",
+					"SystemExit", "KeyboardInterrupt", "MemoryError",
+					"RecursionError", "ReferenceError", "SyntaxError",
+					"IndentationError", "TabError", "SystemError",
+					"FloatingPointError", "BufferError", "UnicodeError",
+					"UnicodeDecodeError", "UnicodeEncodeError",
+					"UnicodeTranslateError", "Warning", "DeprecationWarning",
+					"UserWarning", "FutureWarning", "RuntimeWarning",
+					"PendingDeprecationWarning", "ImportWarning",
+					"UnicodeWarning", "BytesWarning", "ResourceWarning":
+					g.needsException = true
+					g.writef("NewException(")
+					if len(c.Args) == 0 {
+						g.writef(`"%s"`, n.N)
+					} else if n.N == "Exception" {
+						g.addImport("fmt")
+						g.writef(`fmt.Sprint(`)
+						if err := g.expr(c.Args[0]); err != nil {
+							return err
+						}
+						g.writef(`)`)
+					} else {
+						g.writef(`"%s: "+fmt.Sprint(`, n.N)
+						g.addImport("fmt")
+						if err := g.expr(c.Args[0]); err != nil {
+							return err
+						}
+						g.writef(`)`)
+					}
+					g.writef(")")
+					return nil
+				}
+			}
+		}
+	}
+	return g.expr(e)
+}
+
 func (g *gen) forRange(x *ir.ForRange) error {
+	var flag string
+	if len(x.OrElse) > 0 {
+		g.tmpCounter++
+		flag = fmt.Sprintf("__broke_%d", g.tmpCounter)
+		g.writeIndent()
+		g.writef("%s := false\n", flag)
+		g.breakFlags = append(g.breakFlags, flag)
+	}
 	g.writeIndent()
 	// Force int64 on the counter so the loop tolerates mixed-typed bounds
 	// (e.g. untyped IntLit 1 alongside an int64 parameter).
@@ -2166,6 +2327,18 @@ func (g *gen) forRange(x *ir.ForRange) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}\n")
+	if flag != "" {
+		g.breakFlags = g.breakFlags[:len(g.breakFlags)-1]
+		g.writeIndent()
+		g.writef("if !%s {\n", flag)
+		g.indent++
+		if err := g.stmts(x.OrElse); err != nil {
+			return err
+		}
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
 	return nil
 }
 

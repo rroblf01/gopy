@@ -590,6 +590,22 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			}
 			continue
 		}
+		// `pass`, bare docstring, ellipsis literals and other no-op
+		// statements are accepted but not lowered — they let
+		// `class MyError(Exception): pass` and abstract stubs compile
+		// without F2 erroring.
+		if m.Type() == "Pass" {
+			continue
+		}
+		if m.Type() == "Expr" {
+			val := m.Child("value")
+			if val != nil {
+				switch val.Type() {
+				case "Constant", "Str", "Ellipsis":
+					continue
+				}
+			}
+		}
 		if m.Type() != "FunctionDef" && m.Type() != "AsyncFunctionDef" {
 			return nil, fmt.Errorf("line %d: class %s: only methods supported (F2)", m.Lineno(), name)
 		}
@@ -1696,15 +1712,20 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(n.Children("orelse")) > 0 {
-			return nil, fmt.Errorf("line %d: while-else not supported", n.Lineno())
+		var orelse []Stmt
+		if oe := n.Children("orelse"); len(oe) > 0 {
+			ob, err := lowerBody(oe, sc)
+			if err != nil {
+				return nil, err
+			}
+			orelse = ob
 		}
 		// Same walrus hoist as `if`. Note: the assigned name is
 		// re-bound every iteration because the hoisted Assign sits
 		// before the loop header in the IR — we replicate it back
 		// into the body's tail to maintain Python semantics.
 		pre, condExpr := hoistNamedExprs(cond)
-		whileStmt := &While{Cond: condExpr, Body: body}
+		whileStmt := &While{Cond: condExpr, Body: body, OrElse: orelse}
 		if len(pre) == 0 {
 			return whileStmt, nil
 		}
@@ -1758,14 +1779,23 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		return &Try{Body: body, Handlers: handlers, Finally: finally}, nil
 	case "Raise":
 		excNode := n.Child("exc")
+		causeNode := n.Child("cause")
+		var cause Expr
+		if causeNode != nil {
+			c, err := lowerExpr(causeNode, sc)
+			if err != nil {
+				return nil, err
+			}
+			cause = c
+		}
 		if excNode == nil {
-			return &Raise{Exc: nil}, nil
+			return &Raise{Exc: nil, Cause: cause}, nil
 		}
 		exc, err := lowerExpr(excNode, sc)
 		if err != nil {
 			return nil, err
 		}
-		return &Raise{Exc: exc}, nil
+		return &Raise{Exc: exc, Cause: cause}, nil
 	case "Pass":
 		return nil, nil
 	case "Global":
@@ -2788,7 +2818,17 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 				capture = pat.Str("name")
 				pat = inner
 			} else if name := pat.Str("name"); name != "" {
-				// `case name:` — bind name to the subject, no other check.
+				// `case name:` / `case name if cond:` — bind name to the
+				// subject. Guard parsed below if present, so we still need
+				// to honor it here.
+				var guard Expr
+				if g := caseNode.Child("guard"); g != nil {
+					ge, err := lowerExpr(g, sc)
+					if err != nil {
+						return nil, err
+					}
+					guard = ge
+				}
 				body, err := lowerBody(caseNode.Children("body"), sc)
 				if err != nil {
 					return nil, err
@@ -2796,6 +2836,7 @@ func lowerMatch(n parser.Node, sc *scope) (Stmt, error) {
 				m.Cases = append(m.Cases, MatchCase{
 					Body:    body,
 					Capture: name,
+					Guard:   guard,
 				})
 				continue
 			}
@@ -3080,8 +3121,13 @@ func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 //   for x in <iterable>: ...   → ForEach (range over slice/map)
 func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 	tgt := n.Child("target")
-	if len(n.Children("orelse")) > 0 {
-		return nil, fmt.Errorf("line %d: for-else not supported", n.Lineno())
+	var orelse []Stmt
+	if oe := n.Children("orelse"); len(oe) > 0 {
+		ob, err := lowerBody(oe, sc)
+		if err != nil {
+			return nil, err
+		}
+		orelse = ob
 	}
 	iter := n.Child("iter")
 	// Two-name target: `for k, v in pairs`. Three patterns supported:
@@ -3094,7 +3140,19 @@ func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 			return nil, fmt.Errorf("line %d: only two Name targets supported in for-loop unpacking", n.Lineno())
 		}
 		v1, v2 := elts[0].Str("id"), elts[1].Str("id")
-		return lowerForTuple(n, sc, v1, v2, iter)
+		s, err := lowerForTuple(n, sc, v1, v2, iter)
+		if err != nil {
+			return nil, err
+		}
+		if len(orelse) > 0 {
+			switch fe := s.(type) {
+			case *ForEach:
+				fe.OrElse = orelse
+			case *ForRange:
+				fe.OrElse = orelse
+			}
+		}
+		return s, nil
 	}
 	if tgt.Type() != "Name" {
 		return nil, fmt.Errorf("line %d: only single Name loop variable supported", n.Lineno())
@@ -3143,7 +3201,7 @@ func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 					step = sp
 				}
 			}
-			return &ForRange{Var: varName, Start: start, Stop: stop, Step: step, Body: body}, nil
+			return &ForRange{Var: varName, Start: start, Stop: stop, Step: step, Body: body, OrElse: orelse}, nil
 		}
 	}
 
@@ -3175,7 +3233,7 @@ func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ForEach{Var: varName, Iter: iterE, ElemTy: elemTy, Body: body}, nil
+	return &ForEach{Var: varName, Iter: iterE, ElemTy: elemTy, Body: body, OrElse: orelse}, nil
 }
 
 // lowerForTuple lowers a two-name `for a, b in iter` form by recognizing
