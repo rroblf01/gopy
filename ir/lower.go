@@ -113,6 +113,17 @@ func lowerTopLevel(n parser.Node) ([]Decl, error) {
 			return nil, fmt.Errorf("line %d: module-level assignment must be `name = expr`", n.Lineno())
 		}
 		name := targets[0].Str("id")
+		// `T = TypeVar("T")` — register the name as a module-level type
+		// variable. Subsequent function annotations referencing T will
+		// pick it up as a Go generic type parameter; no Decl is emitted.
+		if val := n.Child("value"); val != nil && val.Type() == "Call" {
+			if fn := val.Child("func"); fn != nil && fn.Type() == "Name" {
+				if id := fn.Str("id"); id == "TypeVar" || id == "ParamSpec" || id == "TypeVarTuple" {
+					moduleTypeVars[name] = true
+					return nil, nil
+				}
+			}
+		}
 		// `Point = namedtuple("Point", ["x", "y"])` → synthesize a Class
 		// with one struct field per name (all typed `any` since the
 		// per-field types aren't known at declaration time). Constructors
@@ -327,7 +338,14 @@ func moduleScopeLookup(name string) (*Type, bool) {
 
 func moduleScopeReset() {
 	moduleScopeVars = map[string]*Type{}
+	moduleTypeVars = map[string]bool{}
 }
+
+// moduleTypeVars tracks TypeVar declarations at module level so subsequent
+// function signatures can pick them up as Go generic type parameters.
+var moduleTypeVars = map[string]bool{}
+
+func isModuleTypeVar(name string) bool { return moduleTypeVars[name] }
 
 // lowerClass emits a Class decl plus one Func per method (with Receiver set).
 // __init__ becomes the constructor body; its self-attribute assignments are
@@ -1056,6 +1074,37 @@ func lowerFunc(n parser.Node) (*Func, error) {
 	if kw := args.Child("kwarg"); kw != nil {
 		f.Kwarg = &Param{Name: kw.Str("arg"), Ty: &Type{Kind: TyDict, Key: &Type{Kind: TyStr}, Val: &Type{Kind: TyAny}}}
 	}
+	// Keyword-only parameters: `def f(a, *, b=1, c=2)`. Treat them as
+	// regular Params with defaults. The call site already routes kwargs
+	// by name. Defaults come from args.kw_defaults aligned 1:1 with
+	// kwonlyargs (None entries mean no default — still required).
+	kwonlyNodes := args.Children("kwonlyargs")
+	kwDefaults := args.Children("kw_defaults")
+	if len(kwonlyNodes) > 0 {
+		dsc := newScope()
+		for _, p := range f.Params {
+			dsc.declare(p.Name, p.Ty)
+		}
+		for i, a := range kwonlyNodes {
+			ty, err := lowerAnnotation(a.Child("annotation"))
+			if err != nil {
+				return nil, fmt.Errorf("kwonly param %q: %w", a.Str("arg"), err)
+			}
+			p := Param{Name: a.Str("arg"), Ty: ty}
+			if i < len(kwDefaults) && kwDefaults[i] != nil {
+				// `None` placeholder in kw_defaults means no default.
+				dn := kwDefaults[i]
+				if !(dn.Type() == "Constant" && dn["value"] == nil) {
+					d, err := lowerExpr(dn, dsc)
+					if err != nil {
+						return nil, fmt.Errorf("default for kwonly param %q: %w", p.Name, err)
+					}
+					p.Default = d
+				}
+			}
+			f.Params = append(f.Params, p)
+		}
+	}
 	// Python aligns `args.defaults` to the END of the positional params:
 	// for `def f(a, b, c=1, d=2)`, defaults == [1, 2] aligns to c, d.
 	defaults := args.Children("defaults")
@@ -1102,7 +1151,52 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		f.IsGenerator = true
 		f.YieldType = ty
 	}
+	// Module-level TypeVars referenced in this function's annotations
+	// promote to Go generic type parameters. Walk param / return / vararg
+	// types and collect any TyNamed name matching a registered TypeVar.
+	collectTypeVarParams(f)
 	return f, nil
+}
+
+func collectTypeVarParams(f *Func) {
+	seen := map[string]bool{}
+	for _, n := range f.TypeParams {
+		seen[n] = true
+	}
+	add := func(t *Type) {
+		walkTypeVars(t, func(name string) {
+			if isModuleTypeVar(name) && !seen[name] {
+				seen[name] = true
+				f.TypeParams = append(f.TypeParams, name)
+			}
+		})
+	}
+	for _, p := range f.Params {
+		add(p.Ty)
+	}
+	if f.Vararg != nil {
+		add(f.Vararg.Ty)
+	}
+	add(f.Ret)
+}
+
+func walkTypeVars(t *Type, visit func(string)) {
+	if t == nil {
+		return
+	}
+	if t.Kind == TyNamed {
+		visit(t.Name)
+	}
+	walkTypeVars(t.Elem, visit)
+	walkTypeVars(t.Key, visit)
+	walkTypeVars(t.Val, visit)
+	for _, x := range t.Tuple {
+		walkTypeVars(x, visit)
+	}
+	for _, p := range t.FuncParams {
+		walkTypeVars(p, visit)
+	}
+	walkTypeVars(t.FuncRet, visit)
 }
 
 // findYieldType walks a function body recursively, returning the inferred

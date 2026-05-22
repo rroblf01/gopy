@@ -2770,6 +2770,37 @@ func (g *gen) expr(e ir.Expr) error {
 				}
 			}
 		}
+		// `a ** b` — Go has no power operator. Route through math.Pow
+		// for floats; emit an inline loop for integers so the result
+		// stays int64 like CPython's `int ** int`.
+		if x.Op == "**" {
+			lTy, rTy := x.L.TypeOf(), x.R.TypeOf()
+			isFloat := (lTy != nil && lTy.Kind == ir.TyFloat) || (rTy != nil && rTy.Kind == ir.TyFloat)
+			if isFloat {
+				g.addImport("math")
+				g.writef("math.Pow(float64(")
+				if err := g.expr(x.L); err != nil {
+					return err
+				}
+				g.writef("), float64(")
+				if err := g.expr(x.R); err != nil {
+					return err
+				}
+				g.writef("))")
+				return nil
+			}
+			// Int ** int — small loop. Negative exponents fall back to float.
+			g.writef("func() int64 { __base, __exp := int64(")
+			if err := g.expr(x.L); err != nil {
+				return err
+			}
+			g.writef("), int64(")
+			if err := g.expr(x.R); err != nil {
+				return err
+			}
+			g.writef("); __r := int64(1); for __i := int64(0); __i < __exp; __i++ { __r *= __base }; return __r }()")
+			return nil
+		}
 		// `s % args` printf-style string formatting. Python's % format
 		// codes mostly overlap with Go's fmt; we pass the string through
 		// unchanged and rely on Go fmt to do the substitution.
@@ -3918,8 +3949,23 @@ func (g *gen) call(c *ir.Call) error {
 			g.writef(")")
 			return nil
 		case "int":
-			if len(c.Args) != 1 {
-				return fmt.Errorf("int() takes exactly 1 argument")
+			if len(c.Args) < 1 || len(c.Args) > 2 {
+				return fmt.Errorf("int() takes 1 or 2 arguments")
+			}
+			// `int(s, base)` — only valid when s is a string; parse with
+			// strconv.ParseInt and the supplied base.
+			if len(c.Args) == 2 {
+				g.addImport("strconv")
+				g.writef("func() int64 { __n, _ := strconv.ParseInt(")
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(", int(")
+				if err := g.expr(c.Args[1]); err != nil {
+					return err
+				}
+				g.writef("), 64); return __n }()")
+				return nil
 			}
 			// `int(obj)` → `obj.Int()` when user class has `__int__`.
 			if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
@@ -3938,6 +3984,17 @@ func (g *gen) call(c *ir.Call) error {
 			// type-switches over the common numeric/string forms.
 			if t := c.Args[0].TypeOf(); t != nil &&
 				(t.Kind == ir.TyInt || t.Kind == ir.TyFloat || t.Kind == ir.TyBool) {
+				if t.Kind == ir.TyFloat {
+					// Untyped float constant literals can't be cast straight
+					// to int64; hoist through an IIFE-bound variable so Go
+					// truncates the runtime value.
+					g.writef("func() int64 { __f := float64(")
+					if err := g.expr(c.Args[0]); err != nil {
+						return err
+					}
+					g.writef("); return int64(__f) }()")
+					return nil
+				}
 				g.writef("int64(")
 				if err := g.expr(c.Args[0]); err != nil {
 					return err
@@ -5039,14 +5096,16 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return nil
 		}
 	}
-	// dict.get(k, default) — emit a small inline ternary so missing keys
-	// return the default rather than the zero value silently.
+	// dict.get(k[, default]) — emit a small inline ternary so missing keys
+	// return the default (or the value type's zero) rather than the
+	// silent zero of the map lookup.
 	if m.Method == "get" {
 		if rt := m.Recv.TypeOf(); rt != nil && rt.Kind == ir.TyDict {
-			if len(m.Args) != 2 {
-				return fmt.Errorf("dict.get() requires (key, default) — F6 doesn't support single-arg form")
+			if len(m.Args) < 1 || len(m.Args) > 2 {
+				return fmt.Errorf("dict.get() takes 1 or 2 arguments")
 			}
-			g.writef("func() %s {\n", g.goType(rt.Val))
+			retGo := g.goType(rt.Val)
+			g.writef("func() %s {\n", retGo)
 			g.indent++
 			g.writeIndent()
 			g.writef("if __v, __ok := ")
@@ -5066,8 +5125,25 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			g.writef("}\n")
 			g.writeIndent()
 			g.writef("return ")
-			if err := g.expr(m.Args[1]); err != nil {
-				return err
+			if len(m.Args) == 2 {
+				if err := g.expr(m.Args[1]); err != nil {
+					return err
+				}
+			} else {
+				// 1-arg form returns the Go zero for the value type, which
+				// matches Python's None for any non-numeric value type. For
+				// int / float / string types, we emit the literal zero/empty
+				// directly so the function type stays homogeneous.
+				switch retGo {
+				case "int64", "int", "float64":
+					g.writef("0")
+				case "string":
+					g.writef("\"\"")
+				case "bool":
+					g.writef("false")
+				default:
+					g.writef("nil")
+				}
 			}
 			g.writef("\n")
 			g.indent--
@@ -10431,6 +10507,57 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef("))")
 		return true, nil
+	case "rfind":
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.rfind() takes one argument")
+		}
+		g.addImport("strings")
+		g.writef("int64(strings.LastIndex(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef("))")
+		return true, nil
+	case "index":
+		// Python raises ValueError on miss; we route through a helper
+		// that does the same to keep stdout parity.
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.index() takes one argument")
+		}
+		g.addImport("strings")
+		g.helpers["__gopy_str_index"] = helperStrIndex
+		g.needsException = true
+		g.writef("__gopy_str_index(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
+	case "rindex":
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.rindex() takes one argument")
+		}
+		g.addImport("strings")
+		g.helpers["__gopy_str_rindex"] = helperStrRindex
+		g.needsException = true
+		g.writef("__gopy_str_rindex(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef(")")
+		return true, nil
 	case "encode", "decode":
 		// In Python these toggle between str and bytes. The gopy shim
 		// treats both ends as `string`, so the call is a no-op — just
@@ -11306,6 +11433,22 @@ func (g *gen) emitInOp(x *ir.CmpOp) error {
 	}
 	return nil
 }
+
+const helperStrIndex = `func __gopy_str_index(s, sub string) int64 {
+	i := strings.Index(s, sub)
+	if i < 0 {
+		panic(NewException("ValueError: substring not found"))
+	}
+	return int64(i)
+}`
+
+const helperStrRindex = `func __gopy_str_rindex(s, sub string) int64 {
+	i := strings.LastIndex(s, sub)
+	if i < 0 {
+		panic(NewException("ValueError: substring not found"))
+	}
+	return int64(i)
+}`
 
 const helperGopyRepr = `func __gopy_repr(v any) string {
 	if r, ok := v.(interface{ Repr() string }); ok {

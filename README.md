@@ -590,6 +590,13 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] Module-level `xs: list[T] = []` / `d: dict[K,V] = {}` emit the declared element type for the empty literal instead of `[]any{}`, so later assignments typecheck
 - [x] Negative literal index on a list-typed receiver: `xs[-1]` / `self.field[-1]` rewrites to `xs[len(xs)-1]` at codegen time (Go forbids negative constant indices)
 - [x] User-class field type resolution: `self.field` access propagates the field's declared type so downstream slicing / method calls typecheck without needing a local binding
+- [x] `T = TypeVar("T")` at module scope: subsequent function signatures referencing `T` (params, return, list/dict/tuple/Optional element) lower to Go generic functions (`func f[T any](...) T`). PEP 695 `def f[T](...)` syntax was already supported; this lets classic-style code work too. `ParamSpec` / `TypeVarTuple` declarations are accepted but ignored
+- [x] Keyword-only parameters: `def f(*, port=80, scheme="http")` (and the mixed form `def f(a, *, b=1)`) accepted. Defaults are evaluated at call site like regular kwargs; the keyword-only enforcement isn't strict (positional passes through), matching Python's tolerance in practice
+- [x] `str.rfind(sub)` / `str.index(sub)` / `str.rindex(sub)` — `index` and `rindex` raise `ValueError` on miss, matching CPython
+- [x] `dict.get(key)` single-argument form returns the value-type's zero (or `nil` for `any`) when the key is missing, matching Python's None semantics
+- [x] `int(s, base)` parses string `s` with the given radix via `strconv.ParseInt`
+- [x] `int(literal_float)` truncates through an IIFE so Go's untyped-constant rule doesn't reject the conversion
+- [x] Binary `**` (power): floats route through `math.Pow`; int exponent uses an inline loop so the result stays `int64` like CPython
 
 ### Hard / open questions
 
