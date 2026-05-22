@@ -616,6 +616,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		isProperty := false
 		isClassMethod := false
 		isAbstract := false
+		propSetterFor := ""
 		for _, d := range m.Children("decorator_list") {
 			if d.Type() == "Name" {
 				switch d.Str("id") {
@@ -639,6 +640,22 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				if attr == "abstractmethod" || attr == "abstractclassmethod" || attr == "abstractstaticmethod" || attr == "abstractproperty" {
 					isAbstract = true
 					continue
+				}
+				// @<name>.setter — mark this method as the property
+				// setter for <name>. The method body becomes Set<Name>.
+				if attr == "setter" {
+					recv := d.Child("value")
+					if recv != nil && recv.Type() == "Name" {
+						propSetterFor = recv.Str("id")
+						continue
+					}
+				}
+				// @<name>.deleter — accepted but ignored (no Go equivalent).
+				if attr == "deleter" {
+					recv := d.Child("value")
+					if recv != nil && recv.Type() == "Name" {
+						continue
+					}
 				}
 				recv := d.Child("value")
 				if recv != nil && recv.Type() == "Name" {
@@ -699,6 +716,21 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			return nil, fmt.Errorf("line %d: class %s: cannot combine @property and @classmethod", m.Lineno(), name)
 		}
 		methName := m.Str("name")
+		// `@<name>.setter` def has the same name as the property. Rename
+		// the Go method so it doesn't collide with the getter, and
+		// register it on the class's PropertySetters map.
+		if propSetterFor != "" {
+			titled := propSetterFor
+			if len(titled) > 0 {
+				titled = string(titled[0]-32) + titled[1:]
+			}
+			rename := "Set" + titled
+			if class.PropertySetters == nil {
+				class.PropertySetters = map[string]string{}
+			}
+			class.PropertySetters[propSetterFor] = rename
+			methName = rename
+		}
 		args := m.Child("args").Children("args")
 		if len(args) == 0 {
 			return nil, fmt.Errorf("class %s.%s: method must have at least self parameter", name, methName)

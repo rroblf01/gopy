@@ -114,6 +114,9 @@ type Class struct {
 	// Properties is the set of methods marked with @property: at call sites,
 	// `instance.prop` should emit `instance.prop()` rather than a field load.
 	Properties map[string]bool
+	// PropertySetters maps property name → setter method Go name (e.g.
+	// "Setn"). `obj.<name> = v` codegen emits `obj.Setn(v)` for these.
+	PropertySetters map[string]string
 	// MethodNames lists every regular method defined directly on this
 	// class (excluding __init__). The transpiler uses this to catch
 	// diamond-inheritance conflicts when a subclass with multiple bases

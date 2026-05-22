@@ -919,6 +919,30 @@ func (g *gen) stmt(s ir.Stmt) error {
 		return nil
 	case *ir.AssignAttr:
 		g.writeIndent()
+		// @<name>.setter dispatch: when the target's class registers
+		// a property setter for x.Name, emit `target.SetX(value)`
+		// instead of a direct field write. Skip when emitting inside
+		// __init__ (self.<prop> = v there is the canonical bootstrap
+		// path and the setter would recurse / call into an
+		// uninitialized self).
+		if t := g.effectiveType(x.Target); t != nil && t.Kind == ir.TyNamed {
+			if cls, ok := g.classes[t.Name]; ok {
+				if setter, hasSetter := cls.PropertySetters[x.Name]; hasSetter {
+					insideOwnInit := g.currentClass != nil && g.currentClass.Name == t.Name && g.currentFn != nil && g.currentFn.Name == "__init__"
+					if !insideOwnInit {
+						if err := g.expr(x.Target); err != nil {
+							return err
+						}
+						g.writef(".%s(", setter)
+						if err := g.expr(x.Value); err != nil {
+							return err
+						}
+						g.writef(")\n")
+						return nil
+					}
+				}
+			}
+		}
 		if err := g.expr(x.Target); err != nil {
 			return err
 		}
@@ -2336,6 +2360,22 @@ func (g *gen) raise(r *ir.Raise) error {
 // calls into `NewException(msg)` since gopy doesn't materialize every
 // builtin exception subclass as a Go type yet.
 func (g *gen) emitExceptionExpr(e ir.Expr) error {
+	// `raise ValueError` (Name with no args) — same rewrite as the
+	// call form below but without a message.
+	if n, ok := e.(*ir.Name); ok {
+		if _, userClass := g.classes[n.N]; !userClass && isBuiltinExceptionName(n.N) {
+			g.needsException = true
+			if n.N == "Exception" || n.N == "BaseException" {
+				g.writef(`NewException("")`)
+			} else {
+				// Use the same `ClassName:` prefix shape as the call
+				// form so `except <ClassName>:` matches via
+				// strings.HasPrefix in the recover() block.
+				g.writef(`NewException(%q)`, n.N+":")
+			}
+			return nil
+		}
+	}
 	if c, ok := e.(*ir.Call); ok {
 		if n, ok := c.Func.(*ir.Name); ok {
 			if _, userClass := g.classes[n.N]; !userClass {
