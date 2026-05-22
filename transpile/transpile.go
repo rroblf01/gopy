@@ -640,7 +640,11 @@ func (g *gen) fn(fn *ir.Func) error {
 		if len(fn.Params) > 0 {
 			g.writef(", ")
 		}
-		g.writef("%s []any", fn.Vararg.Name)
+		elemGo := "any"
+		if fn.Vararg.Ty != nil && fn.Vararg.Ty.Elem != nil && fn.Vararg.Ty.Elem.Kind != ir.TyUnknown && fn.Vararg.Ty.Elem.Kind != ir.TyAny {
+			elemGo = g.goType(fn.Vararg.Ty.Elem)
+		}
+		g.writef("%s []%s", fn.Vararg.Name, elemGo)
 	}
 	if fn.Kwarg != nil {
 		if len(fn.Params) > 0 || fn.Vararg != nil {
@@ -1853,7 +1857,11 @@ func (g *gen) localFunc(lf *ir.LocalFunc) error {
 		if len(fn.Params) > 0 {
 			g.writef(", ")
 		}
-		g.writef("%s []any", fn.Vararg.Name)
+		elemGo := "any"
+		if fn.Vararg.Ty != nil && fn.Vararg.Ty.Elem != nil && fn.Vararg.Ty.Elem.Kind != ir.TyUnknown && fn.Vararg.Ty.Elem.Kind != ir.TyAny {
+			elemGo = g.goType(fn.Vararg.Ty.Elem)
+		}
+		g.writef("%s []%s", fn.Vararg.Name, elemGo)
 	}
 	if fn.Kwarg != nil {
 		if len(fn.Params) > 0 || fn.Vararg != nil {
@@ -2124,6 +2132,38 @@ func (g *gen) matchStmt(m *ir.Match) error {
 // try emits a try/except/finally as an IIFE so the deferred recover()
 // is lexically scoped to just the try block. Note: returning from inside
 // the try body is NOT supported in F3 — it would only return from the IIFE.
+// isBuiltinExceptionName reports whether name is one of the Python
+// builtin exception subclasses that gopy collapses into the runtime
+// `*Exception` type (since each subclass isn't materialized as its own
+// Go type yet). except clauses naming any of these match `*Exception`.
+func isBuiltinExceptionName(name string) bool {
+	switch name {
+	case "Exception", "BaseException", "ValueError", "TypeError",
+		"RuntimeError", "NotImplementedError", "KeyError", "IndexError",
+		"AttributeError", "ArithmeticError", "ZeroDivisionError",
+		"OverflowError", "AssertionError", "ImportError",
+		"ModuleNotFoundError", "LookupError", "NameError",
+		"UnboundLocalError", "OSError", "IOError", "FileNotFoundError",
+		"PermissionError", "FileExistsError", "IsADirectoryError",
+		"NotADirectoryError", "InterruptedError", "BlockingIOError",
+		"ChildProcessError", "BrokenPipeError", "ConnectionError",
+		"ConnectionResetError", "ConnectionAbortedError",
+		"ConnectionRefusedError", "TimeoutError", "EOFError",
+		"StopIteration", "StopAsyncIteration", "GeneratorExit",
+		"SystemExit", "KeyboardInterrupt", "MemoryError",
+		"RecursionError", "ReferenceError", "SyntaxError",
+		"IndentationError", "TabError", "SystemError",
+		"FloatingPointError", "BufferError", "UnicodeError",
+		"UnicodeDecodeError", "UnicodeEncodeError",
+		"UnicodeTranslateError", "Warning", "DeprecationWarning",
+		"UserWarning", "FutureWarning", "RuntimeWarning",
+		"PendingDeprecationWarning", "ImportWarning",
+		"UnicodeWarning", "BytesWarning", "ResourceWarning":
+		return true
+	}
+	return false
+}
+
 func (g *gen) try(t *ir.Try) error {
 	g.writeIndent()
 	g.writef("func() {\n")
@@ -2163,15 +2203,66 @@ func (g *gen) try(t *ir.Try) error {
 				g.writef("return\n")
 				continue
 			}
-			// Typed except — type-assert against *ClassName.
-			g.writeIndent()
-			if h.VarName != "" {
-				g.writef("if %s, ok := r.(*%s); ok {\n", h.VarName, h.ClassName)
-			} else {
-				g.writef("if _, ok := r.(*%s); ok {\n", h.ClassName)
+			// Typed except — type-assert against each candidate.
+			// Builtin exception names collapse to *Exception; user
+			// classes use *<Name>. Tuple-typed clauses (`except (A, B)`)
+			// emit a chained disjunction.
+			names := h.ClassNames
+			if len(names) == 0 {
+				names = []string{h.ClassName}
 			}
+			// Builtin exception subclasses collapse to *Exception in
+			// gopy. Differentiate by checking the message prefix that
+			// emitExceptionExpr writes (`"ClassName: ..."`). Plain
+			// `except Exception:` keeps catch-all semantics. User
+			// classes shadow builtins, so check the class registry first.
+			isUserClass := func(name string) bool {
+				_, ok := g.classes[name]
+				return ok
+			}
+			needsStrings := false
+			for _, name := range names {
+				if !isUserClass(name) && isBuiltinExceptionName(name) && name != "Exception" && name != "BaseException" {
+					needsStrings = true
+					break
+				}
+			}
+			if needsStrings {
+				g.addImport("strings")
+			}
+			g.writeIndent()
+			g.writef("if ")
+			seen := map[string]bool{}
+			first := true
+			for _, name := range names {
+				key := name
+				if !isUserClass(name) && isBuiltinExceptionName(name) {
+					key = "Exception:" + name
+				}
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				if !first {
+					g.writef(" || ")
+				}
+				first = false
+				if isUserClass(name) {
+					// User class — direct type assert against *Name.
+					g.writef("func() bool { _, ok := r.(*%s); return ok }()", name)
+				} else if name == "Exception" || name == "BaseException" {
+					g.writef("func() bool { _, ok := r.(*Exception); return ok }()")
+				} else if isBuiltinExceptionName(name) {
+					g.writef("func() bool { if e, ok := r.(*Exception); ok { return strings.HasPrefix(e.Msg, %q) }; return false }()", name+":")
+				} else {
+					g.writef("func() bool { _, ok := r.(*%s); return ok }()", name)
+				}
+			}
+			g.writef(" {\n")
 			g.indent++
 			if h.VarName != "" {
+				g.writeIndent()
+				g.writef("%s := r\n", h.VarName)
 				g.writeIndent()
 				g.writef("_ = %s\n", h.VarName)
 			}
@@ -3386,7 +3477,15 @@ func (g *gen) fstring(f *ir.FStr) error {
 			g.writef("__gopy_fmt_spec(%s, ", strconv.Quote(a.spec))
 			switch a.conv {
 			case 'r':
-				g.writef("fmt.Sprintf(\"%%#v\", ")
+				// Python repr() prefers single quotes for str unless the
+				// string already contains a single quote. Go's %q always
+				// uses double quotes. Route through a helper so str /
+				// non-str shapes both match CPython.
+				g.helpers["__gopy_repr"] = helperGopyRepr
+				g.addImport("strings")
+				g.addImport("strconv")
+				g.addImport("fmt")
+				g.writef("__gopy_repr(")
 				if err := g.boxedExpr(a.expr); err != nil {
 					return err
 				}
@@ -4083,27 +4182,44 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 			g.writef(", ")
 		}
 		extras := c.Args[min(len(c.Args), len(fn.Params)):]
+		// Choose the call-site slice element type to match the
+		// function's declared Vararg signature. Typed varargs let
+		// `*nums: int` pass `[]int64{...}`; untyped fall back to []any.
+		elemGo := "any"
+		typedElem := false
+		if fn.Vararg.Ty != nil && fn.Vararg.Ty.Elem != nil && fn.Vararg.Ty.Elem.Kind != ir.TyUnknown && fn.Vararg.Ty.Elem.Kind != ir.TyAny {
+			elemGo = g.goType(fn.Vararg.Ty.Elem)
+			typedElem = true
+		}
 		// Splat: `f(*xs)` for a Vararg-accepting function. Convert the
-		// typed input slice to `[]any` (the Vararg's actual Go type) so
-		// the assignment typechecks regardless of the inner element
-		// type.
+		// typed input slice to the Vararg's actual Go element type.
 		if len(extras) == 1 {
 			if st, ok := extras[0].(*ir.Starred); ok {
-				g.writef("func() []any { __r := []any{}; for _, __v := range ")
+				g.writef("func() []%s { __r := []%s{}; for _, __v := range ", elemGo, elemGo)
 				if err := g.expr(st.Value); err != nil {
 					return err
 				}
-				g.writef(" { __r = append(__r, __v) }; return __r }()")
+				if typedElem {
+					g.writef(" { __r = append(__r, __v) }; return __r }()")
+				} else {
+					g.writef(" { __r = append(__r, __v) }; return __r }()")
+				}
 				goto kwargsBlock
 			}
 		}
-		g.writef("[]any{")
+		g.writef("[]%s{", elemGo)
 		for i, a := range extras {
 			if i > 0 {
 				g.writef(", ")
 			}
-			if err := g.boxedExpr(a); err != nil {
-				return err
+			if typedElem {
+				if err := g.expr(a); err != nil {
+					return err
+				}
+			} else {
+				if err := g.boxedExpr(a); err != nil {
+					return err
+				}
 			}
 		}
 		g.writef("}")
@@ -11058,6 +11174,28 @@ func (g *gen) emitInOp(x *ir.CmpOp) error {
 	}
 	return nil
 }
+
+const helperGopyRepr = `func __gopy_repr(v any) string {
+	switch x := v.(type) {
+	case string:
+		// Python prefers single quotes for str repr unless the value
+		// contains a single quote and no double quote.
+		if strings.ContainsRune(x, '\'') && !strings.ContainsRune(x, '"') {
+			return strconv.Quote(x)
+		}
+		q := strconv.Quote(x)
+		// Drop surrounding double quotes, re-emit with single quotes,
+		// keeping any escape sequences inside.
+		inner := q[1 : len(q)-1]
+		return "'" + strings.ReplaceAll(inner, "\\\"", "\"") + "'"
+	case nil:
+		return "None"
+	case bool:
+		if x { return "True" }
+		return "False"
+	}
+	return fmt.Sprintf("%#v", v)
+}`
 
 const helperContainsAny = `func __gopy_contains_any(haystack, needle any) bool {
 	switch h := haystack.(type) {

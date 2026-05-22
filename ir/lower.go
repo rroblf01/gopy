@@ -805,7 +805,13 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			}
 			// Method *args / **kwargs.
 			if va := mArgs.Child("vararg"); va != nil {
-				fn.Vararg = &Param{Name: va.Str("arg"), Ty: &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}}
+				elemTy := &Type{Kind: TyAny}
+				if ann := va.Child("annotation"); ann != nil {
+					if t, err := lowerAnnotation(ann); err == nil {
+						elemTy = t
+					}
+				}
+				fn.Vararg = &Param{Name: va.Str("arg"), Ty: &Type{Kind: TyList, Elem: elemTy}}
 			}
 			if kw := mArgs.Child("kwarg"); kw != nil {
 				fn.Kwarg = &Param{Name: kw.Str("arg"), Ty: &Type{Kind: TyDict, Key: &Type{Kind: TyStr}, Val: &Type{Kind: TyAny}}}
@@ -999,9 +1005,16 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		}
 		f.Params = append(f.Params, Param{Name: a.Str("arg"), Ty: ty})
 	}
-	// *args (single python `arg` node under args.vararg) becomes a []any slice.
+	// *args (single python `arg` node under args.vararg) becomes a []T
+	// slice — T from the annotation when present, []any otherwise.
 	if va := args.Child("vararg"); va != nil {
-		f.Vararg = &Param{Name: va.Str("arg"), Ty: &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}}
+		elemTy := &Type{Kind: TyAny}
+		if ann := va.Child("annotation"); ann != nil {
+			if t, err := lowerAnnotation(ann); err == nil {
+				elemTy = t
+			}
+		}
+		f.Vararg = &Param{Name: va.Str("arg"), Ty: &Type{Kind: TyList, Elem: elemTy}}
 	}
 	// **kwargs (single python `arg` node under args.kwarg) becomes map[string]any.
 	if kw := args.Child("kwarg"); kw != nil {
@@ -1753,10 +1766,24 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			}
 			eh := ExceptHandler{VarName: h.Str("name")}
 			if t := h.Child("type"); t != nil {
-				if t.Type() != "Name" {
+				switch t.Type() {
+				case "Name":
+					eh.ClassName = t.Str("id")
+					eh.ClassNames = []string{t.Str("id")}
+				case "Tuple":
+					// `except (A, B, C) as e:` — collect each class name.
+					for _, e := range t.Children("elts") {
+						if e.Type() != "Name" {
+							return nil, fmt.Errorf("line %d: complex except type not supported (F3)", h.Lineno())
+						}
+						eh.ClassNames = append(eh.ClassNames, e.Str("id"))
+					}
+					if len(eh.ClassNames) > 0 {
+						eh.ClassName = eh.ClassNames[0]
+					}
+				default:
 					return nil, fmt.Errorf("line %d: complex except type not supported (F3)", h.Lineno())
 				}
-				eh.ClassName = t.Str("id")
 			}
 			hSc := &scope{vars: copyVars(sc.vars)}
 			if eh.VarName != "" {

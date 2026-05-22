@@ -246,11 +246,14 @@ type Try struct {
 }
 
 // ExceptHandler is one `except ClassName [as varname]:` clause.
-// ClassName == "" means bare `except:` (catch-all).
+// ClassName == "" means bare `except:` (catch-all). ClassNames carries
+// the names from `except (A, B, C):` tuple-typed clauses; ClassName is
+// the first name for back-compat with single-type emit paths.
 type ExceptHandler struct {
-	ClassName string
-	VarName   string
-	Body      []Stmt
+	ClassName  string
+	ClassNames []string
+	VarName    string
+	Body       []Stmt
 }
 
 // Raise is `raise X(args...)` or bare `raise` (re-raise).
