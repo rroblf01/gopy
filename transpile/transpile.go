@@ -128,6 +128,19 @@ func (g *gen) moduleVar(v *ir.Var) error {
 		g.writef("var %s", v.Name)
 	}
 	if v.Value != nil {
+		// Empty container literal RHS with a declared container type:
+		// emit `T{}` so the element type matches the annotation rather
+		// than the literal's inferred TyAny.
+		if hasTy {
+			if ll, ok := v.Value.(*ir.ListLit); ok && len(ll.Elems) == 0 && v.Ty.Kind == ir.TyList {
+				g.writef(" = %s{}\n", g.goType(v.Ty))
+				return nil
+			}
+			if dl, ok := v.Value.(*ir.DictLit); ok && len(dl.Keys) == 0 && v.Ty.Kind == ir.TyDict {
+				g.writef(" = %s{}\n", g.goType(v.Ty))
+				return nil
+			}
+		}
 		g.writef(" = ")
 		if err := g.expr(v.Value); err != nil {
 			return err
@@ -3182,6 +3195,33 @@ func (g *gen) expr(e ir.Expr) error {
 					return err
 				}
 				g.writef(")")
+				return nil
+			}
+		}
+		// Negative literal index on a list-typed receiver: `xs[-1]` →
+		// `xs[len(xs)-1]`. Go rejects negative constant indices at compile
+		// time, so we rewrite when the IR carries a negative literal.
+		if vTy := g.effectiveType(x.Value); vTy != nil && vTy.Kind == ir.TyList {
+			negV := int64(0)
+			matched := false
+			if lit, ok := x.Index.(*ir.IntLit); ok && lit.V < 0 {
+				negV = lit.V
+				matched = true
+			} else if u, ok := x.Index.(*ir.UnaryOp); ok && u.Op == "-" {
+				if lit, ok := u.X.(*ir.IntLit); ok && lit.V > 0 {
+					negV = -lit.V
+					matched = true
+				}
+			}
+			if matched {
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef("[len(")
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef(")%d]", negV)
 				return nil
 			}
 		}
@@ -6344,7 +6384,7 @@ func sliceBoundSafe(e ir.Expr) bool {
 // nullable int64 pointers so the helper can apply Python's semantics
 // (negative indices, omitted bounds, signed step).
 func (g *gen) sliceWithHelper(x *ir.Slice) error {
-	containerTy := x.Value.TypeOf()
+	containerTy := g.effectiveType(x.Value)
 	if containerTy == nil {
 		return fmt.Errorf("slicing: receiver type unknown; add an annotation")
 	}
@@ -11492,6 +11532,18 @@ func (g *gen) effectiveType(e ir.Expr) *ir.Type {
 			if attrs, ok := taggedAttrs[tag]; ok {
 				if info, ok := attrs[attr.Name]; ok {
 					return info.Ty
+				}
+			}
+		}
+		// User-class field lookup: recv is a *Class, attribute name is
+		// a registered field, look up the field's declared type.
+		recvTy := g.effectiveType(attr.Recv)
+		if recvTy != nil && recvTy.Kind == ir.TyNamed {
+			if cls, ok := g.classes[recvTy.Name]; ok {
+				for _, f := range cls.Fields {
+					if f.Name == attr.Name && f.Ty != nil && f.Ty.Kind != ir.TyUnknown {
+						return f.Ty
+					}
 				}
 			}
 		}

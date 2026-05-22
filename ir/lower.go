@@ -793,7 +793,11 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 					continue
 				}
 				seen[aa.Name] = true
-				class.Fields = append(class.Fields, Param{Name: aa.Name, Ty: aa.Value.TypeOf()})
+				ty := aa.AnnTy
+				if ty == nil {
+					ty = aa.Value.TypeOf()
+				}
+				class.Fields = append(class.Fields, Param{Name: aa.Name, Ty: ty})
 			}
 			continue
 		}
@@ -1176,6 +1180,17 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			return &Type{Kind: TyBool}, nil
 		case "None":
 			return &Type{Kind: TyNone}, nil
+		case "list":
+			// Bare `list` annotation (no element type) — accept and lower
+			// to `list[any]` so it round-trips through Go without naming
+			// a nonexistent type.
+			return &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}, nil
+		case "dict":
+			return &Type{Kind: TyDict, Key: &Type{Kind: TyAny}, Val: &Type{Kind: TyAny}}, nil
+		case "tuple":
+			return &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}, nil
+		case "set", "frozenset":
+			return &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}, nil
 		case "Any", "Callable", "Iterable", "Iterator", "Sequence",
 			"Mapping", "MutableMapping", "MutableSequence", "Collection",
 			"Hashable", "Reversible", "Container", "Sized", "object",
@@ -1228,9 +1243,13 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 		}
 		switch base.Str("id") {
 		case "Optional":
-			// typing.Optional[T] — lowered to `any`. The wrapped type
-			// is recorded as the elem in case a future pass wants to
-			// narrow it, but for now we accept None alongside T values.
+			// typing.Optional[T] — lowered to T when T is a class (Go's
+			// pointer-to-struct can be nil), otherwise to `any` so None
+			// remains assignable.
+			inner, err := lowerAnnotation(n.Child("slice"))
+			if err == nil && inner != nil && inner.Kind == TyNamed {
+				return inner, nil
+			}
 			return &Type{Kind: TyAny}, nil
 		case "Union":
 			// typing.Union[...] — same lowering as the `|` operator
@@ -1731,7 +1750,7 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			if val == nil {
 				return nil, nil
 			}
-			return &AssignAttr{Target: recv, Name: tgt.Str("attr"), Value: val}, nil
+			return &AssignAttr{Target: recv, Name: tgt.Str("attr"), Value: val, AnnTy: ty}, nil
 		default:
 			return nil, fmt.Errorf("line %d: AnnAssign target %q not supported", n.Lineno(), tgt.Type())
 		}

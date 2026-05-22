@@ -238,6 +238,11 @@ type AssignAttr struct {
 	Target Expr
 	Name   string
 	Value  Expr
+	// AnnTy carries the declared annotation, if the statement came from
+	// an `AnnAssign` (`self.x: T = v`). Used by class field discovery to
+	// pick a precise field type when the RHS value alone is too narrow
+	// (e.g. `None` for an `Optional[T]` field).
+	AnnTy *Type
 }
 
 // Try is `try: ... except E [as v]: ... finally: ...`.
