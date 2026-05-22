@@ -249,6 +249,23 @@ var stdlibModules = map[string]stdlibModule{
 					"urlsplit":     {GoFunc: "__gopy_url_urlparse", GoImport: "net/url", Helper: helperURLUrlparse, RetTag: "__URLParseResult", ExtraHelpers: map[string]string{"__URLParseResult": helperURLParseResultType}},
 				},
 			},
+			"error": {
+				Funcs: map[string]stdlibFunc{
+					"URLError":             {GoFunc: "__gopy_urllib_error_unused"},
+					"HTTPError":            {GoFunc: "__gopy_urllib_error_unused"},
+					"ContentTooShortError": {GoFunc: "__gopy_urllib_error_unused"},
+				},
+			},
+			"robotparser": {
+				Funcs: map[string]stdlibFunc{
+					"RobotFileParser": {GoFunc: "__gopy_urllib_robot_unused"},
+				},
+			},
+			"response": {
+				Funcs: map[string]stdlibFunc{
+					"addinfourl": {GoFunc: "__gopy_urllib_resp_unused"},
+				},
+			},
 		},
 	},
 	"string": {
@@ -278,6 +295,43 @@ var stdlibModules = map[string]stdlibModule{
 			"defaultdict": {GoFunc: "__gopy_defaultdict_unused"},
 			"OrderedDict": {GoFunc: "__gopy_ordereddict_unused"},
 			"deque":       {GoFunc: "__gopy_deque_unused", RetTag: "__Deque"},
+			"namedtuple":  {GoFunc: "__gopy_namedtuple_unused"},
+			"ChainMap":    {GoFunc: "__gopy_chainmap_unused"},
+			"UserDict":    {GoFunc: "__gopy_userdict_unused"},
+			"UserList":    {GoFunc: "__gopy_userlist_unused"},
+			"UserString":  {GoFunc: "__gopy_userstring_unused"},
+		},
+		Subs: map[string]stdlibModule{
+			"abc": {
+				Funcs: map[string]stdlibFunc{
+					"Container":   {GoFunc: "__gopy_collections_abc_unused"},
+					"Hashable":    {GoFunc: "__gopy_collections_abc_unused"},
+					"Iterable":    {GoFunc: "__gopy_collections_abc_unused"},
+					"Iterator":    {GoFunc: "__gopy_collections_abc_unused"},
+					"Reversible":  {GoFunc: "__gopy_collections_abc_unused"},
+					"Generator":   {GoFunc: "__gopy_collections_abc_unused"},
+					"Sized":       {GoFunc: "__gopy_collections_abc_unused"},
+					"Callable":    {GoFunc: "__gopy_collections_abc_unused"},
+					"Collection":  {GoFunc: "__gopy_collections_abc_unused"},
+					"Sequence":    {GoFunc: "__gopy_collections_abc_unused"},
+					"MutableSequence": {GoFunc: "__gopy_collections_abc_unused"},
+					"ByteString":  {GoFunc: "__gopy_collections_abc_unused"},
+					"Set":         {GoFunc: "__gopy_collections_abc_unused"},
+					"MutableSet":  {GoFunc: "__gopy_collections_abc_unused"},
+					"Mapping":     {GoFunc: "__gopy_collections_abc_unused"},
+					"MutableMapping": {GoFunc: "__gopy_collections_abc_unused"},
+					"MappingView": {GoFunc: "__gopy_collections_abc_unused"},
+					"ItemsView":   {GoFunc: "__gopy_collections_abc_unused"},
+					"KeysView":    {GoFunc: "__gopy_collections_abc_unused"},
+					"ValuesView":  {GoFunc: "__gopy_collections_abc_unused"},
+					"Awaitable":   {GoFunc: "__gopy_collections_abc_unused"},
+					"AsyncIterable": {GoFunc: "__gopy_collections_abc_unused"},
+					"AsyncIterator": {GoFunc: "__gopy_collections_abc_unused"},
+					"AsyncGenerator": {GoFunc: "__gopy_collections_abc_unused"},
+					"Coroutine":   {GoFunc: "__gopy_collections_abc_unused"},
+					"Buffer":      {GoFunc: "__gopy_collections_abc_unused"},
+				},
+			},
 		},
 	},
 	"shutil": {
@@ -337,11 +391,18 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"mimetypes": {
+		Attrs: map[string]stdlibAttr{
+			"types_map":       {GoExpr: `map[string]string{".html": "text/html", ".htm": "text/html", ".css": "text/css", ".js": "application/javascript", ".json": "application/json", ".xml": "application/xml", ".txt": "text/plain", ".csv": "text/csv", ".pdf": "application/pdf", ".zip": "application/zip", ".gz": "application/gzip", ".tar": "application/x-tar", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".svg": "image/svg+xml", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".wav": "audio/wav", ".py": "text/x-python", ".go": "text/x-go"}`},
+			"common_types":    {GoExpr: `map[string]string{".jpg": "image/jpg"}`},
+			"suffix_map":      {GoExpr: `map[string]string{".tgz": ".tar.gz", ".taz": ".tar.gz", ".tz": ".tar.gz", ".tbz2": ".tar.bz2", ".txz": ".tar.xz"}`},
+			"encodings_map":   {GoExpr: `map[string]string{".gz": "gzip", ".Z": "compress", ".bz2": "bzip2", ".xz": "xz", ".br": "br"}`},
+		},
 		Funcs: map[string]stdlibFunc{
 			"guess_type":      {GoFunc: "__gopy_mimetypes_guess", Helper: helperMimetypesGuess, HelperImports: []string{"mime", "path/filepath"}},
 			"guess_extension": {GoFunc: "__gopy_mimetypes_guess_ext", Helper: helperMimetypesGuessExt, HelperImports: []string{"mime"}, RetKind: "str"},
 			"init":            {GoFunc: "__gopy_mimetypes_init", Helper: helperMimetypesInit},
 			"add_type":        {GoFunc: "__gopy_mimetypes_add", Helper: helperMimetypesAdd},
+			"MimeTypes":       {GoFunc: "__gopy_mimetypes_class_unused"},
 		},
 	},
 	"xml": {
@@ -363,6 +424,32 @@ var stdlibModules = map[string]stdlibModule{
 				Funcs: map[string]stdlibFunc{
 					"HTTPSConnection": {GoFunc: "__gopy_http_client_new", Helper: helperHTTPClientNew, RetTag: "__HTTPClient", ExtraHelpers: map[string]string{"__HTTPClient": helperHTTPClientType}, HelperImports: []string{"net/http", "io", "strings"}},
 					"HTTPConnection":  {GoFunc: "__gopy_http_client_new_plain", Helper: helperHTTPClientNewPlain, RetTag: "__HTTPClient", ExtraHelpers: map[string]string{"__HTTPClient": helperHTTPClientType}, HelperImports: []string{"net/http", "io", "strings"}},
+				},
+			},
+			"server": {
+				Funcs: map[string]stdlibFunc{
+					"HTTPServer":               {GoFunc: "__gopy_http_server_unused"},
+					"ThreadingHTTPServer":      {GoFunc: "__gopy_http_server_unused"},
+					"BaseHTTPRequestHandler":   {GoFunc: "__gopy_http_handler_unused"},
+					"SimpleHTTPRequestHandler": {GoFunc: "__gopy_http_handler_unused"},
+					"CGIHTTPRequestHandler":    {GoFunc: "__gopy_http_handler_unused"},
+				},
+			},
+			"cookies": {
+				Funcs: map[string]stdlibFunc{
+					"SimpleCookie":   {GoFunc: "__gopy_http_cookie_unused"},
+					"Morsel":         {GoFunc: "__gopy_http_cookie_unused"},
+					"BaseCookie":     {GoFunc: "__gopy_http_cookie_unused"},
+					"CookieError":    {GoFunc: "__gopy_http_cookie_unused"},
+				},
+			},
+			"cookiejar": {
+				Funcs: map[string]stdlibFunc{
+					"CookieJar":        {GoFunc: "__gopy_http_cookiejar_unused"},
+					"FileCookieJar":    {GoFunc: "__gopy_http_cookiejar_unused"},
+					"MozillaCookieJar": {GoFunc: "__gopy_http_cookiejar_unused"},
+					"LWPCookieJar":     {GoFunc: "__gopy_http_cookiejar_unused"},
+					"Cookie":           {GoFunc: "__gopy_http_cookiejar_unused"},
 				},
 			},
 		},
@@ -414,9 +501,81 @@ var stdlibModules = map[string]stdlibModule{
 		Subs: map[string]stdlibModule{
 			"utils": {
 				Funcs: map[string]stdlibFunc{
-					"formatdate":   {GoFunc: "__gopy_email_formatdate", Helper: helperEmailFormatdate, HelperImports: []string{"time"}, RetKind: "str"},
-					"parsedate":    {GoFunc: "__gopy_email_parsedate", Helper: helperEmailParsedate, HelperImports: []string{"time"}},
+					"formatdate":      {GoFunc: "__gopy_email_formatdate", Helper: helperEmailFormatdate, HelperImports: []string{"time"}, RetKind: "str"},
+					"parsedate":       {GoFunc: "__gopy_email_parsedate", Helper: helperEmailParsedate, HelperImports: []string{"time"}},
 					"format_datetime": {GoFunc: "__gopy_email_format_datetime", Helper: helperEmailFormatDatetime, HelperImports: []string{"time"}, RetKind: "str"},
+					"parseaddr":       {GoFunc: "__gopy_email_parseaddr", Helper: helperEmailParseaddr, HelperImports: []string{"strings"}},
+					"formataddr":      {GoFunc: "__gopy_email_formataddr", Helper: helperEmailFormataddr, HelperImports: []string{"fmt"}, RetKind: "str"},
+					"make_msgid":      {GoFunc: "__gopy_email_make_msgid", Helper: helperEmailMakeMsgid, HelperImports: []string{"os", "fmt", "time"}, RetKind: "str"},
+				},
+			},
+			"parser": {
+				Funcs: map[string]stdlibFunc{
+					"Parser":       {GoFunc: "__gopy_email_parser_unused"},
+					"BytesParser":  {GoFunc: "__gopy_email_parser_unused"},
+					"FeedParser":   {GoFunc: "__gopy_email_parser_unused"},
+					"HeaderParser": {GoFunc: "__gopy_email_parser_unused"},
+				},
+			},
+			"message": {
+				Funcs: map[string]stdlibFunc{
+					"EmailMessage": {GoFunc: "__gopy_email_message_unused"},
+					"Message":      {GoFunc: "__gopy_email_message_unused"},
+				},
+			},
+			"mime": {
+				Subs: map[string]stdlibModule{
+					"text": {
+						Funcs: map[string]stdlibFunc{
+							"MIMEText": {GoFunc: "__gopy_mime_text_unused"},
+						},
+					},
+					"base": {
+						Funcs: map[string]stdlibFunc{
+							"MIMEBase": {GoFunc: "__gopy_mime_base_unused"},
+						},
+					},
+					"multipart": {
+						Funcs: map[string]stdlibFunc{
+							"MIMEMultipart": {GoFunc: "__gopy_mime_multipart_unused"},
+						},
+					},
+					"image": {
+						Funcs: map[string]stdlibFunc{
+							"MIMEImage": {GoFunc: "__gopy_mime_image_unused"},
+						},
+					},
+					"audio": {
+						Funcs: map[string]stdlibFunc{
+							"MIMEAudio": {GoFunc: "__gopy_mime_audio_unused"},
+						},
+					},
+					"application": {
+						Funcs: map[string]stdlibFunc{
+							"MIMEApplication": {GoFunc: "__gopy_mime_application_unused"},
+						},
+					},
+				},
+			},
+			"policy": {
+				Funcs: map[string]stdlibFunc{
+					"default":     {GoFunc: "__gopy_email_policy_unused"},
+					"strict":      {GoFunc: "__gopy_email_policy_unused"},
+					"compat32":    {GoFunc: "__gopy_email_policy_unused"},
+					"SMTP":        {GoFunc: "__gopy_email_policy_unused"},
+					"HTTP":        {GoFunc: "__gopy_email_policy_unused"},
+					"EmailPolicy": {GoFunc: "__gopy_email_policy_unused"},
+				},
+			},
+			"charset": {
+				Funcs: map[string]stdlibFunc{
+					"Charset": {GoFunc: "__gopy_email_charset_unused"},
+				},
+			},
+			"contentmanager": {
+				Funcs: map[string]stdlibFunc{
+					"ContentManager":   {GoFunc: "__gopy_email_cm_unused"},
+					"raw_data_manager": {GoFunc: "__gopy_email_cm_unused"},
 				},
 			},
 		},
@@ -990,14 +1149,59 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"logging": {
+		Attrs: map[string]stdlibAttr{
+			"DEBUG":    {GoExpr: "int64(10)"},
+			"INFO":     {GoExpr: "int64(20)"},
+			"WARNING":  {GoExpr: "int64(30)"},
+			"WARN":     {GoExpr: "int64(30)"},
+			"ERROR":    {GoExpr: "int64(40)"},
+			"CRITICAL": {GoExpr: "int64(50)"},
+			"FATAL":    {GoExpr: "int64(50)"},
+			"NOTSET":   {GoExpr: "int64(0)"},
+		},
 		Funcs: map[string]stdlibFunc{
-			"debug":       {GoFunc: "__gopy_log_debug", GoImport: "fmt", Helper: helperLogDebug, HelperImports: []string{"os"}},
-			"info":        {GoFunc: "__gopy_log_info", GoImport: "fmt", Helper: helperLogInfo, HelperImports: []string{"os"}},
-			"warning":     {GoFunc: "__gopy_log_warning", GoImport: "fmt", Helper: helperLogWarning, HelperImports: []string{"os"}},
-			"error":       {GoFunc: "__gopy_log_error", GoImport: "fmt", Helper: helperLogError, HelperImports: []string{"os"}},
-			"critical":    {GoFunc: "__gopy_log_critical", GoImport: "fmt", Helper: helperLogCritical, HelperImports: []string{"os"}},
-			"basicConfig": {GoFunc: "__gopy_log_basicConfig", Helper: helperLogBasicConfig},
-			"getLogger":   {GoFunc: "__gopy_log_getlogger", GoImport: "fmt", Helper: helperLogGetLogger, RetTag: "__Logger", ExtraHelpers: map[string]string{"__Logger": helperLoggerType}, HelperImports: []string{"os"}},
+			"debug":         {GoFunc: "__gopy_log_debug", GoImport: "fmt", Helper: helperLogDebug, HelperImports: []string{"os"}},
+			"info":          {GoFunc: "__gopy_log_info", GoImport: "fmt", Helper: helperLogInfo, HelperImports: []string{"os"}},
+			"warning":       {GoFunc: "__gopy_log_warning", GoImport: "fmt", Helper: helperLogWarning, HelperImports: []string{"os"}},
+			"error":         {GoFunc: "__gopy_log_error", GoImport: "fmt", Helper: helperLogError, HelperImports: []string{"os"}},
+			"critical":      {GoFunc: "__gopy_log_critical", GoImport: "fmt", Helper: helperLogCritical, HelperImports: []string{"os"}},
+			"basicConfig":   {GoFunc: "__gopy_log_basicConfig", Helper: helperLogBasicConfig},
+			"getLogger":     {GoFunc: "__gopy_log_getlogger", GoImport: "fmt", Helper: helperLogGetLogger, RetTag: "__Logger", ExtraHelpers: map[string]string{"__Logger": helperLoggerType}, HelperImports: []string{"os"}},
+			"Handler":       {GoFunc: "__gopy_logging_handler_unused"},
+			"StreamHandler": {GoFunc: "__gopy_logging_handler_unused"},
+			"FileHandler":   {GoFunc: "__gopy_logging_handler_unused"},
+			"NullHandler":   {GoFunc: "__gopy_logging_handler_unused"},
+			"Formatter":     {GoFunc: "__gopy_logging_handler_unused"},
+			"Filter":        {GoFunc: "__gopy_logging_handler_unused"},
+			"LogRecord":     {GoFunc: "__gopy_logging_handler_unused"},
+			"Logger":        {GoFunc: "__gopy_logging_handler_unused"},
+		},
+		Subs: map[string]stdlibModule{
+			"handlers": {
+				Funcs: map[string]stdlibFunc{
+					"RotatingFileHandler":   {GoFunc: "__gopy_logging_handler_unused"},
+					"TimedRotatingFileHandler": {GoFunc: "__gopy_logging_handler_unused"},
+					"WatchedFileHandler":    {GoFunc: "__gopy_logging_handler_unused"},
+					"SysLogHandler":         {GoFunc: "__gopy_logging_handler_unused"},
+					"SocketHandler":         {GoFunc: "__gopy_logging_handler_unused"},
+					"DatagramHandler":       {GoFunc: "__gopy_logging_handler_unused"},
+					"SMTPHandler":           {GoFunc: "__gopy_logging_handler_unused"},
+					"MemoryHandler":         {GoFunc: "__gopy_logging_handler_unused"},
+					"HTTPHandler":           {GoFunc: "__gopy_logging_handler_unused"},
+					"QueueHandler":          {GoFunc: "__gopy_logging_handler_unused"},
+					"QueueListener":         {GoFunc: "__gopy_logging_handler_unused"},
+					"NTEventLogHandler":     {GoFunc: "__gopy_logging_handler_unused"},
+					"BufferingHandler":      {GoFunc: "__gopy_logging_handler_unused"},
+				},
+			},
+			"config": {
+				Funcs: map[string]stdlibFunc{
+					"fileConfig":   {GoFunc: "__gopy_logging_config_unused"},
+					"dictConfig":   {GoFunc: "__gopy_logging_config_unused"},
+					"listen":       {GoFunc: "__gopy_logging_config_unused"},
+					"stopListening": {GoFunc: "__gopy_logging_config_unused"},
+				},
+			},
 		},
 	},
 	"heapq": {
@@ -1178,6 +1382,16 @@ var stdlibModules = map[string]stdlibModule{
 			"assert_type":       {GoFunc: "__gopy_typing_assert_type", Helper: helperTypingAssertType},
 			"assert_never":      {GoFunc: "__gopy_typing_assert_never", Helper: helperTypingAssertNever},
 			"reveal_type":       {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"TypeGuard":         {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"TypeIs":            {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"ParamSpec":         {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"Concatenate":       {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"NotRequired":       {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"Required":          {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"ReadOnly":          {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"dataclass_transform": {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"deprecated":        {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
+			"TypeAliasType":     {GoFunc: "__gopy_typing_passthrough", Helper: helperTypingPassthrough},
 		},
 	},
 	"threading": {
@@ -1188,10 +1402,19 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"pathlib": {
 		Funcs: map[string]stdlibFunc{
-			"Path": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
+			"Path":            {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
+			"PurePath":        {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
+			"PurePosixPath":   {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
+			"PureWindowsPath": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
+			"PosixPath":       {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
+			"WindowsPath":     {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
 		},
 	},
 	"datetime": {
+		Attrs: map[string]stdlibAttr{
+			"MINYEAR": {GoExpr: "int64(1)"},
+			"MAXYEAR": {GoExpr: "int64(9999)"},
+		},
 		Funcs: map[string]stdlibFunc{
 			"timezone":  {GoFunc: "__gopy_datetime_timezone_unused"},
 			"timedelta": {GoFunc: "__gopy_timedelta_new", GoImport: "time", Helper: helperTimedeltaNew, RetTag: "__Timedelta", ExtraHelpers: map[string]string{"__Timedelta": helperTimedeltaType}, HelperImports: []string{"fmt"}},
@@ -1201,6 +1424,11 @@ var stdlibModules = map[string]stdlibModule{
 			"time":      {GoFunc: "__gopy_time_new", GoImport: "fmt", Helper: helperTimeNew, RetTag: "__Time", ExtraHelpers: map[string]string{"__Time": helperTimeType}},
 		},
 		Subs: map[string]stdlibModule{
+			"timezone": {
+				Attrs: map[string]stdlibAttr{
+					"utc": {GoExpr: `"UTC"`},
+				},
+			},
 			"date": {
 				Funcs: map[string]stdlibFunc{
 					"today":         {GoFunc: "__gopy_date_today", GoImport: "time", Helper: helperDateToday, RetTag: "__Date", ExtraHelpers: map[string]string{"__Date": helperDateType, "__gopy_py_time_format": helperPyTimeFormat, "__gopy_datetime_strftime": helperDatetimeStrftime}, HelperImports: []string{"time", "strings", "fmt"}},
@@ -1411,11 +1639,60 @@ var stdlibModules = map[string]stdlibModule{
 			"IPv6Network":  {GoFunc: "__gopy_ipaddress_net", Helper: helperIpaddressNet, HelperImports: []string{"net"}, RetKind: "str"},
 		},
 	},
-	"_urllib_error_ext": {
+	"netrc": {
 		Funcs: map[string]stdlibFunc{
-			"URLError":     {GoFunc: "__gopy_urllib_error_unused"},
-			"HTTPError":    {GoFunc: "__gopy_urllib_error_unused"},
-			"ContentTooShortError": {GoFunc: "__gopy_urllib_error_unused"},
+			"netrc":      {GoFunc: "__gopy_netrc_new", Helper: helperNetrcNew, HelperImports: []string{"bufio", "os", "strings"}},
+			"NetrcParseError": {GoFunc: "__gopy_netrc_err_unused"},
+		},
+	},
+	"socketserver": {
+		Funcs: map[string]stdlibFunc{
+			"TCPServer":             {GoFunc: "__gopy_socketserver_unused"},
+			"UDPServer":             {GoFunc: "__gopy_socketserver_unused"},
+			"ThreadingTCPServer":    {GoFunc: "__gopy_socketserver_unused"},
+			"ThreadingUDPServer":    {GoFunc: "__gopy_socketserver_unused"},
+			"ForkingTCPServer":      {GoFunc: "__gopy_socketserver_unused"},
+			"ForkingUDPServer":      {GoFunc: "__gopy_socketserver_unused"},
+			"BaseRequestHandler":    {GoFunc: "__gopy_socketserver_unused"},
+			"StreamRequestHandler":  {GoFunc: "__gopy_socketserver_unused"},
+			"DatagramRequestHandler": {GoFunc: "__gopy_socketserver_unused"},
+			"BaseServer":            {GoFunc: "__gopy_socketserver_unused"},
+		},
+	},
+	"wsgiref": {
+		Subs: map[string]stdlibModule{
+			"util": {
+				Funcs: map[string]stdlibFunc{
+					"shift_path_info":         {GoFunc: "__gopy_wsgi_shift_unused"},
+					"setup_testing_defaults":  {GoFunc: "__gopy_wsgi_setup_unused"},
+					"request_uri":             {GoFunc: "__gopy_wsgi_uri_unused"},
+					"application_uri":         {GoFunc: "__gopy_wsgi_uri_unused"},
+					"guess_scheme":            {GoFunc: "__gopy_wsgi_scheme_unused"},
+					"FileWrapper":             {GoFunc: "__gopy_wsgi_wrap_unused"},
+					"is_hop_by_hop":           {GoFunc: "__gopy_wsgi_hop_unused"},
+				},
+			},
+			"headers": {
+				Funcs: map[string]stdlibFunc{
+					"Headers": {GoFunc: "__gopy_wsgi_headers_unused"},
+				},
+			},
+			"simple_server": {
+				Funcs: map[string]stdlibFunc{
+					"WSGIServer":          {GoFunc: "__gopy_wsgi_server_unused"},
+					"WSGIRequestHandler":  {GoFunc: "__gopy_wsgi_handler_unused"},
+					"make_server":         {GoFunc: "__gopy_wsgi_makeserver_unused"},
+					"demo_app":            {GoFunc: "__gopy_wsgi_demo_unused"},
+				},
+			},
+			"handlers": {
+				Funcs: map[string]stdlibFunc{
+					"BaseHandler":    {GoFunc: "__gopy_wsgi_basehandler_unused"},
+					"SimpleHandler":  {GoFunc: "__gopy_wsgi_simplehandler_unused"},
+					"CGIHandler":     {GoFunc: "__gopy_wsgi_cgi_unused"},
+					"IISCGIHandler":  {GoFunc: "__gopy_wsgi_iiscgi_unused"},
+				},
+			},
 		},
 	},
 }
@@ -6653,6 +6930,82 @@ const helperTokenIsnonterminal = `func __gopy_token_isnonterminal(t int64) bool 
 const helperTokenIseof = `func __gopy_token_iseof(t int64) bool { return t == 0 }`
 
 const helperDisCodeInfo = `func __gopy_dis_codeinfo(_ any) string { return "Name:              <gopy>\nArgcount:          0\nKwonlyargcount:    0\nNumber of locals:  0" }`
+
+const helperEmailParseaddr = `func __gopy_email_parseaddr(s string) []string {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndex(s, "<"); i >= 0 {
+		if j := strings.Index(s[i:], ">"); j >= 0 {
+			name := strings.TrimSpace(s[:i])
+			addr := s[i+1 : i+j]
+			return []string{name, addr}
+		}
+	}
+	return []string{"", s}
+}`
+
+const helperEmailFormataddr = `func __gopy_email_formataddr(pair []string) string {
+	if len(pair) < 2 { return "" }
+	name, addr := pair[0], pair[1]
+	if name == "" { return addr }
+	return fmt.Sprintf("%s <%s>", name, addr)
+}`
+
+const helperEmailMakeMsgid = `func __gopy_email_make_msgid(args ...string) string {
+	host, _ := os.Hostname()
+	if host == "" { host = "localhost" }
+	return fmt.Sprintf("<%d.%d@%s>", time.Now().UnixNano(), os.Getpid(), host)
+}`
+
+const helperNetrcNew = `func __gopy_netrc_new(args ...string) map[string]any {
+	path := ""
+	if len(args) > 0 {
+		path = args[0]
+	} else if h, err := os.UserHomeDir(); err == nil {
+		path = h + "/.netrc"
+	}
+	hosts := map[string][]string{}
+	macros := map[string][]string{}
+	f, err := os.Open(path)
+	if err != nil {
+		return map[string]any{"hosts": hosts, "macros": macros}
+	}
+	defer f.Close()
+	scan := bufio.NewScanner(f)
+	var curMachine string
+	var login, password, account string
+	flush := func() {
+		if curMachine != "" {
+			hosts[curMachine] = []string{login, account, password}
+		}
+		curMachine, login, password, account = "", "", "", ""
+	}
+	for scan.Scan() {
+		line := strings.TrimSpace(scan.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		tokens := strings.Fields(line)
+		for i := 0; i+1 < len(tokens); i += 2 {
+			k, v := tokens[i], tokens[i+1]
+			switch k {
+			case "machine":
+				flush()
+				curMachine = v
+			case "default":
+				flush()
+				curMachine = "default"
+			case "login":
+				login = v
+			case "password":
+				password = v
+			case "account":
+				account = v
+			}
+		}
+	}
+	flush()
+	return map[string]any{"hosts": hosts, "macros": macros}
+}`
 
 const helperTextwrapShorten = `func __gopy_textwrap_shorten(s string, width int64) string {
 	words := strings.Fields(s)

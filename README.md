@@ -198,6 +198,19 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - Tuple-unpack of stdlib helpers that return `[]T` (e.g. `a, b = shutil.disk_usage("/")`, `slope, intercept = statistics.linear_regression(xs, ys)`) now emits a temp `__multi_N := f(); a, b := __multi_N[0], __multi_N[1]` pattern. Per-MultiAssign counter keeps the temp name unique within a function
 - Bare type / class names in expression position (e.g. `assert_type(x, int)`, `inspect.isclass(C)`) now emit a string sentinel of the type name. Receivers that only need the name (typing.assert_type, inspect.isclass, etc.) work; receivers that expected a real type object still won't
 - `x in container` with an unknown receiver type now falls back to a runtime helper `__gopy_contains_any(haystack, needle)` that pattern-matches the concrete container (string / map[string]* / []any / []string / []int64 / []int / []float64 / []bool). Lets `"key" in stdlib_helper()` work without a `dict[str, str]` annotation
+- `datetime.MINYEAR` / `datetime.MAXYEAR` exposed as ints; `datetime.timezone.utc` as the literal `"UTC"` string (subs.Attrs reachable through the new submodule-attribute resolver)
+- `mimetypes.types_map` / `common_types` / `suffix_map` / `encodings_map` exposed as `map[string]string` constants; `mimetypes.MimeTypes` class registered as a stub
+- `netrc.netrc([file])` returns `map[string]any{"hosts": map[string][3]string, "macros": map[string][]string}` parsed via `bufio.Scanner`
+- `collections` extras: `namedtuple` / `ChainMap` / `UserDict` / `UserList` / `UserString` registered as stubs; `collections.abc` submodule with all standard ABCs (`Container` / `Hashable` / `Iterable` / `Iterator` / `Reversible` / `Generator` / `Sized` / `Callable` / `Collection` / `Sequence` / `MutableSequence` / `ByteString` / `Set` / `MutableSet` / `Mapping` / `MutableMapping` / `MappingView` / `ItemsView` / `KeysView` / `ValuesView` / `Awaitable` / `AsyncIterable` / `AsyncIterator` / `AsyncGenerator` / `Coroutine` / `Buffer`)
+- `pathlib` extras: `PurePath` / `PurePosixPath` / `PureWindowsPath` / `PosixPath` / `WindowsPath` all alias `Path` (same `__Path` tagged type — Go's `filepath` doesn't separate pure vs concrete)
+- `email.utils.parseaddr(s)` → `[name, addr]`; `email.utils.formataddr([name, addr])` → `"Name <addr>"`; `email.utils.make_msgid()` → `<unix_ns.pid@hostname>` format
+- `email.parser` (`Parser` / `BytesParser` / `FeedParser` / `HeaderParser`), `email.message` (`EmailMessage` / `Message`), `email.policy` (`default` / `strict` / `compat32` / `SMTP` / `HTTP` / `EmailPolicy`), `email.charset.Charset`, `email.contentmanager` (`ContentManager` / `raw_data_manager`), `email.mime.text.MIMEText`, `email.mime.base.MIMEBase`, `email.mime.multipart.MIMEMultipart`, `email.mime.image.MIMEImage`, `email.mime.audio.MIMEAudio`, `email.mime.application.MIMEApplication` all registered as stubs
+- `http.server` (`HTTPServer` / `ThreadingHTTPServer` / `BaseHTTPRequestHandler` / `SimpleHTTPRequestHandler` / `CGIHTTPRequestHandler`), `http.cookies` (`SimpleCookie` / `Morsel` / `BaseCookie` / `CookieError`), `http.cookiejar` (`CookieJar` / `FileCookieJar` / `MozillaCookieJar` / `LWPCookieJar` / `Cookie`) registered as stubs
+- `socketserver` (`TCPServer` / `UDPServer` / `Threading*Server` / `Forking*Server` / `BaseRequestHandler` / `StreamRequestHandler` / `DatagramRequestHandler` / `BaseServer`) registered as stubs
+- `logging` extras: level constants `DEBUG` / `INFO` / `WARNING` / `WARN` / `ERROR` / `CRITICAL` / `FATAL` / `NOTSET`; `Handler` / `StreamHandler` / `FileHandler` / `NullHandler` / `Formatter` / `Filter` / `LogRecord` / `Logger` class stubs; `logging.handlers` (`RotatingFileHandler` / `TimedRotatingFileHandler` / `WatchedFileHandler` / `SysLogHandler` / `SocketHandler` / `DatagramHandler` / `SMTPHandler` / `MemoryHandler` / `HTTPHandler` / `QueueHandler` / `QueueListener` / `NTEventLogHandler` / `BufferingHandler`); `logging.config` (`fileConfig` / `dictConfig` / `listen` / `stopListening`)
+- `urllib.error` (`URLError` / `HTTPError` / `ContentTooShortError`), `urllib.robotparser.RobotFileParser`, `urllib.response.addinfourl` registered as stubs
+- `wsgiref` submodules: `wsgiref.util` (`shift_path_info` / `setup_testing_defaults` / `request_uri` / `application_uri` / `guess_scheme` / `FileWrapper` / `is_hop_by_hop`), `wsgiref.headers.Headers`, `wsgiref.simple_server` (`WSGIServer` / `WSGIRequestHandler` / `make_server` / `demo_app`), `wsgiref.handlers` (`BaseHandler` / `SimpleHandler` / `CGIHandler` / `IISCGIHandler`) registered as stubs
+- `typing` extras: `TypeGuard` / `TypeIs` / `ParamSpec` / `Concatenate` / `NotRequired` / `Required` / `ReadOnly` / `dataclass_transform` / `deprecated` / `TypeAliasType` are all identity passthroughs (usable as decorators / no-op annotations)
 - HTTP GET: `urllib.request.urlopen(url)` returns an `HTTPResponse`-like wrapper with `.read()` (body as str), `.status`, `.headers` (dict), `.close()`, `.getcode()` — minimal subset, no POST yet
 - `html.escape(s)` (replaces `& < > " '`) and `html.unescape(s)` (via Go's `html.UnescapeString` for the full entity set)
 - `secrets.token_hex(n)` / `secrets.token_urlsafe(n)` / `secrets.token_bytes(n)` / `secrets.randbelow(n)` — backed by `crypto/rand`
@@ -307,13 +320,13 @@ CPython 3.x vs. the `gopy`-transpiled Go binary, on identical CPU-bound workload
 
 <!-- BENCH_START -->
 
-_Generated by `scripts/update_bench.sh` on 2026-05-22T07:56:29Z._
+_Generated by `scripts/update_bench.sh` on 2026-05-22T08:58:02Z._
 
 | Benchmark | CPython (ms) | gopy Go (ms) | Speedup | Python RSS (MB) | gopy RSS (MB) | RSS save |
 |-----------|-------------:|-------------:|--------:|----------------:|--------------:|---------:|
-| bench_class | 52.11 | 1.67 | 31.2x | 12.78 | 5.53 | 2.31x |
-| bench_fib | 148.01 | 5.84 | 25.3x | 12.95 | 5.39 | 2.40x |
-| bench_loop | 109.61 | 1.93 | 56.8x | 12.71 | 5.19 | 2.45x |
+| bench_class | 46.40 | 1.57 | 29.6x | 12.84 | 5.68 | 2.26x |
+| bench_fib | 135.47 | 5.35 | 25.3x | 12.95 | 5.21 | 2.49x |
+| bench_loop | 104.91 | 1.72 | 61.0x | 12.91 | 5.31 | 2.43x |
 
 _Hardware: Linux 6.18.32-1-lts x86_64. Go: go1.26.3-X:nodwarf5. Python: 3.14.5._
 
