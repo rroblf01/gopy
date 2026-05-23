@@ -616,6 +616,13 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] `any`-typed list literals (`xs: list = [42, "a", 3.14]`) now box numeric elements through `int64(...)` / `float64(...)` so `.(int64)` / `.(float64)` type assertions hit the canonical Python widths rather than Go's untyped-int default
 - [x] Set operations on `set[T]` (which gopy lowers to `[]T`): `a & b` (intersection), `a | b` (union), `a - b` (difference), `a ^ b` (symmetric difference) emit IIFEs that build the result slice with map-based de-duplication. Membership (`in` / `not in`) was already supported; `&`/`|` on dicts keeps its existing semantics
 - [x] **Class variables**: a class-level annotated field with a default value (`count: int = 0`) that is never assigned via `self.<name>` in any method is hoisted to a module-level `var <Class>_<name> <Ty> = <Default>`. `Class.field` reads/writes and instance reads (`c.field`) route to the hoisted slot, matching Python's class-shared semantics. Per-instance shadowing via `self.field = ...` is detected at lower time and keeps the field as a struct member instead
+- [x] Star-splat with mixed positional args: `f(10, 20, *xs)` (and any combination of pre / mid / post splats) builds the vararg slice through an IIFE that appends each piece in source order — previously only the single-splat shape `f(*xs)` was lowered
+- [x] `enumerate(s)` over a string binds the value as a single-char `string` (was a rune-int). Indices remain the codepoint position, matching CPython
+- [x] `list(xs)` over a list-typed value produces a fresh copy (`append([]T{}, xs...)`) so callers can mutate without aliasing the source. `list(range(...))` materializes the integer sequence into a concrete `[]int64`
+- [x] `range(...)` with a negative literal step now compares with `>` instead of `<`, so `range(10, 0, -2)` actually iterates (was skipping the body entirely)
+- [x] `Exception.String()` / `.Error()` strip the leading `"ClassName: "` metadata prefix so `print(e)` and `f"{e}"` match CPython's `str(exc)` (which only shows the message). The prefix stays internally so prefix-based `except ClassName` dispatch keeps working
+- [x] `assert cond, msg` now panics with an `"AssertionError: <msg>"` prefix so `except AssertionError` can catch it; display strips the prefix the same way as built-in exceptions
+- [x] List-builtin argument inference (`sum`, `sorted`, `min`, `max`, `any`, `all`, `reversed`, `map`, `filter`, `chain`, `accumulate`, etc.) now widens through `effectiveType`, so receivers like `self.items` propagate their declared list element type rather than tripping `argument must be a typed list`
 
 ### Hard / open questions
 

@@ -217,9 +217,28 @@ const exceptionBaseSource = `type Exception struct {
 
 func NewException(msg string) *Exception { return &Exception{Msg: msg} }
 
-func (e *Exception) Error() string { return e.Msg }
+// stripExcPrefix mirrors CPython's str(exc): a leading "ClassName: " is
+// metadata used for prefix-based dispatch, not part of the displayed
+// message. Strip it when present so f"{e}" / print(e) match Python.
+func (e *Exception) stripExcPrefix() string {
+	for i := 0; i < len(e.Msg); i++ {
+		c := e.Msg[i]
+		if c == ':' {
+			if i+1 < len(e.Msg) && e.Msg[i+1] == ' ' {
+				return e.Msg[i+2:]
+			}
+			return ""
+		}
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+			return e.Msg
+		}
+	}
+	return e.Msg
+}
 
-func (e *Exception) String() string { return e.Msg }
+func (e *Exception) Error() string { return e.stripExcPrefix() }
+
+func (e *Exception) String() string { return e.stripExcPrefix() }
 
 // __gopy_exc_chain attaches a cause value to an exception (raise X from Y).
 // Returns the same exception so panic(__gopy_exc_chain(X, Y)) reads
@@ -1829,13 +1848,16 @@ func (g *gen) assertStmt(a *ir.Assert) error {
 	g.writeIndent()
 	if a.Msg != nil {
 		g.addImport("fmt")
-		g.writef("panic(NewException(fmt.Sprintf(\"%%v\", ")
+		// Use the "AssertionError: <msg>" prefix scheme so except
+		// AssertionError can match the panic via HasPrefix. The
+		// Exception.String() strips the prefix back out at display time.
+		g.writef("panic(NewException(\"AssertionError: \" + fmt.Sprintf(\"%%v\", ")
 		if err := g.boxedExpr(a.Msg); err != nil {
 			return err
 		}
 		g.writef(")))\n")
 	} else {
-		g.writef("panic(NewException(\"\"))\n")
+		g.writef("panic(NewException(\"AssertionError:\"))\n")
 	}
 	g.indent--
 	g.writeIndent()
@@ -2585,11 +2607,28 @@ func (g *gen) forRange(x *ir.ForRange) error {
 	g.writeIndent()
 	// Force int64 on the counter so the loop tolerates mixed-typed bounds
 	// (e.g. untyped IntLit 1 alongside an int64 parameter).
+	// Detect a negative literal step so the comparison flips from `<` to
+	// `>`; range(10, 0, -2) yields 10, 8, 6, … and Go's `<` would skip
+	// the body entirely otherwise.
+	stepNeg := false
+	if x.Step != nil {
+		if lit, ok := x.Step.(*ir.IntLit); ok && lit.V < 0 {
+			stepNeg = true
+		} else if u, ok := x.Step.(*ir.UnaryOp); ok && u.Op == "-" {
+			if lit, ok := u.X.(*ir.IntLit); ok && lit.V > 0 {
+				stepNeg = true
+			}
+		}
+	}
+	cmp := "<"
+	if stepNeg {
+		cmp = ">"
+	}
 	g.writef("for %s := int64(", x.Var)
 	if err := g.expr(x.Start); err != nil {
 		return err
 	}
-	g.writef("); %s < int64(", x.Var)
+	g.writef("); %s %s int64(", x.Var, cmp)
 	if err := g.expr(x.Stop); err != nil {
 		return err
 	}
@@ -2654,6 +2693,40 @@ func (g *gen) forEach(x *ir.ForEach) error {
 		g.indent--
 		return g.forEachBody(x)
 	case "enum":
+		// Special case: enumerate over a string. Go's `range` on string
+		// yields rune indices, but Python's enumerate yields the same
+		// per-codepoint indices and single-char string slices. Use a
+		// __r rune accumulator and convert to string(rune) for the value.
+		iterTy := g.effectiveType(x.Iter)
+		if iterTy != nil && iterTy.Kind == ir.TyStr {
+			g.writeIndent()
+			g.writef("__si := int64(0)\n")
+			g.writeIndent()
+			g.writef("for _, __r := range ")
+			if err := g.expr(x.Iter); err != nil {
+				return err
+			}
+			g.writef(" {\n")
+			g.indent++
+			g.writeIndent()
+			if x.Iter2 != nil {
+				g.writef("%s := __si + ", x.Var)
+				if err := g.expr(x.Iter2); err != nil {
+					return err
+				}
+				g.writef("\n")
+			} else {
+				g.writef("%s := __si\n", x.Var)
+			}
+			g.writeIndent()
+			g.writef("%s := string(__r)\n", x.Var2)
+			g.writeIndent()
+			g.writef("_ = %s; _ = %s\n", x.Var, x.Var2)
+			g.writeIndent()
+			g.writef("__si++\n")
+			g.indent--
+			return g.forEachBody(x)
+		}
 		g.writeIndent()
 		g.writef("for __i, %s := range ", x.Var2)
 		if err := g.expr(x.Iter); err != nil {
@@ -4642,10 +4715,10 @@ func (g *gen) call(c *ir.Call) error {
 		case "issubclass":
 			return g.builtinIsSubclass(c)
 		case "list":
-			// `list(iter)` materializes an iterator. In the gopy shim,
-			// iterables that map to slices already are slices, so this
-			// is a pass-through. Strings split into single-char strings
-			// (matching CPython's per-codepoint iteration).
+			// `list(iter)` materializes an iterator. Strings split into
+			// single-char strings; existing slices copy through a fresh
+			// `append` so callers can mutate the result without aliasing
+			// the source.
 			if len(c.Args) != 1 {
 				return fmt.Errorf("list() takes 1 argument")
 			}
@@ -4668,6 +4741,76 @@ func (g *gen) call(c *ir.Call) error {
 				g.writeIndent()
 				g.writef("}()")
 				return nil
+			}
+			if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyList && t.Elem != nil {
+				elemGo := g.goType(t.Elem)
+				g.writef("append([]%s{}, ", elemGo)
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef("...)")
+				return nil
+			}
+			// `list(range(...))` materializes the integer sequence into a
+			// concrete slice. Other iterators fall through to pass-through.
+			if inner, ok := c.Args[0].(*ir.Call); ok {
+				if n, ok := inner.Func.(*ir.Name); ok && n.N == "range" && len(inner.Args) >= 1 && len(inner.Args) <= 3 {
+					g.writef("func() []int64 {\n")
+					g.indent++
+					g.writeIndent()
+					g.writef("__out := []int64{}\n")
+					switch len(inner.Args) {
+					case 1:
+						g.writeIndent()
+						g.writef("for __i := int64(0); __i < int64(")
+						if err := g.expr(inner.Args[0]); err != nil {
+							return err
+						}
+						g.writef("); __i++ { __out = append(__out, __i) }\n")
+					case 2:
+						g.writeIndent()
+						g.writef("for __i := int64(")
+						if err := g.expr(inner.Args[0]); err != nil {
+							return err
+						}
+						g.writef("); __i < int64(")
+						if err := g.expr(inner.Args[1]); err != nil {
+							return err
+						}
+						g.writef("); __i++ { __out = append(__out, __i) }\n")
+					case 3:
+						g.writeIndent()
+						g.writef("__step := int64(")
+						if err := g.expr(inner.Args[2]); err != nil {
+							return err
+						}
+						g.writef(")\n")
+						g.writeIndent()
+						g.writef("if __step > 0 { for __i := int64(")
+						if err := g.expr(inner.Args[0]); err != nil {
+							return err
+						}
+						g.writef("); __i < int64(")
+						if err := g.expr(inner.Args[1]); err != nil {
+							return err
+						}
+						g.writef("); __i += __step { __out = append(__out, __i) } } else if __step < 0 { for __i := int64(")
+						if err := g.expr(inner.Args[0]); err != nil {
+							return err
+						}
+						g.writef("); __i > int64(")
+						if err := g.expr(inner.Args[1]); err != nil {
+							return err
+						}
+						g.writef("); __i += __step { __out = append(__out, __i) } }\n")
+					}
+					g.writeIndent()
+					g.writef("return __out\n")
+					g.indent--
+					g.writeIndent()
+					g.writef("}()")
+					return nil
+				}
 			}
 			return g.expr(c.Args[0])
 		case "id":
@@ -4897,19 +5040,40 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 		}
 		// Splat: `f(*xs)` for a Vararg-accepting function. Convert the
 		// typed input slice to the Vararg's actual Go element type.
-		if len(extras) == 1 {
-			if st, ok := extras[0].(*ir.Starred); ok {
-				g.writef("func() []%s { __r := []%s{}; for _, __v := range ", elemGo, elemGo)
-				if err := g.expr(st.Value); err != nil {
-					return err
-				}
-				if typedElem {
-					g.writef(" { __r = append(__r, __v) }; return __r }()")
-				} else {
-					g.writef(" { __r = append(__r, __v) }; return __r }()")
-				}
-				goto kwargsBlock
+		// Mixed positional + splat (`f(10, 20, *xs)`) builds the slice
+		// inside an IIFE that appends each piece in source order.
+		hasStar := false
+		for _, e := range extras {
+			if _, ok := e.(*ir.Starred); ok {
+				hasStar = true
+				break
 			}
+		}
+		if hasStar {
+			g.writef("func() []%s { __r := []%s{}; ", elemGo, elemGo)
+			for _, e := range extras {
+				if st, ok := e.(*ir.Starred); ok {
+					g.writef("for _, __v := range ")
+					if err := g.expr(st.Value); err != nil {
+						return err
+					}
+					g.writef(" { __r = append(__r, __v) }; ")
+				} else {
+					g.writef("__r = append(__r, ")
+					if typedElem {
+						if err := g.expr(e); err != nil {
+							return err
+						}
+					} else {
+						if err := g.boxedExpr(e); err != nil {
+							return err
+						}
+					}
+					g.writef("); ")
+				}
+			}
+			g.writef("return __r }()")
+			goto kwargsBlock
 		}
 		g.writef("[]%s{", elemGo)
 		for i, a := range extras {
@@ -6665,7 +6829,7 @@ func (g *gen) builtinSorted(c *ir.Call) error {
 			return fmt.Errorf("sorted(): unknown keyword %q", kw.Name)
 		}
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("sorted(): %w", err)
 	}
@@ -6761,7 +6925,7 @@ func (g *gen) builtinMap(c *ir.Call) error {
 	if len(lam.Params) != 1 {
 		return fmt.Errorf("map(): lambda must take one argument")
 	}
-	elem, err := listElemTypeOf(c.Args[1])
+	elem, err := g.listElemTypeOfG(c.Args[1])
 	if err != nil {
 		return fmt.Errorf("map(): %w", err)
 	}
@@ -6817,7 +6981,7 @@ func (g *gen) builtinFilter(c *ir.Call) error {
 	if len(lam.Params) != 1 {
 		return fmt.Errorf("filter(): lambda must take one argument")
 	}
-	elem, err := listElemTypeOf(c.Args[1])
+	elem, err := g.listElemTypeOfG(c.Args[1])
 	if err != nil {
 		return fmt.Errorf("filter(): %w", err)
 	}
@@ -7301,7 +7465,7 @@ func (g *gen) builtinReduceFn(c *ir.Call) error {
 	if len(lam.Params) != 2 {
 		return fmt.Errorf("reduce(): lambda must take two arguments")
 	}
-	elem, err := listElemTypeOf(c.Args[1])
+	elem, err := g.listElemTypeOfG(c.Args[1])
 	if err != nil {
 		return fmt.Errorf("reduce(): %w", err)
 	}
@@ -7725,7 +7889,7 @@ func (g *gen) builtinSet(c *ir.Call) error {
 	if len(c.Args) != 1 {
 		return fmt.Errorf("set()/frozenset() take at most 1 argument")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("set(): %w", err)
 	}
@@ -7818,7 +7982,7 @@ func (g *gen) builtinRandomChoice(c *ir.Call) error {
 	if len(c.Args) != 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("random.choice() takes one positional argument")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("random.choice(): %w", err)
 	}
@@ -7849,7 +8013,7 @@ func (g *gen) builtinRandomShuffle(c *ir.Call) error {
 	if len(c.Args) != 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("random.shuffle() takes one positional argument")
 	}
-	if _, err := listElemTypeOf(c.Args[0]); err != nil {
+	if _, err := g.listElemTypeOfG(c.Args[0]); err != nil {
 		return fmt.Errorf("random.shuffle(): %w", err)
 	}
 	g.addImport("math/rand")
@@ -7890,7 +8054,7 @@ func (g *gen) builtinRandomSample(c *ir.Call) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
 		return fmt.Errorf("random.sample() takes (population, k)")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("random.sample(): %w", err)
 	}
@@ -8673,11 +8837,11 @@ func (g *gen) builtinZipLongest(c *ir.Call) error {
 		}
 		fill = kw.Value
 	}
-	elemA, err := listElemTypeOf(c.Args[0])
+	elemA, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("zip_longest(): %w", err)
 	}
-	elemB, err := listElemTypeOf(c.Args[1])
+	elemB, err := g.listElemTypeOfG(c.Args[1])
 	if err != nil {
 		return fmt.Errorf("zip_longest(): %w", err)
 	}
@@ -8756,7 +8920,7 @@ func (g *gen) builtinFilterfalse(c *ir.Call) error {
 	if len(lam.Params) != 1 {
 		return fmt.Errorf("filterfalse(): lambda must take 1 argument")
 	}
-	elem, err := listElemTypeOf(c.Args[1])
+	elem, err := g.listElemTypeOfG(c.Args[1])
 	if err != nil {
 		return fmt.Errorf("filterfalse(): %w", err)
 	}
@@ -8799,11 +8963,11 @@ func (g *gen) builtinCompress(c *ir.Call) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
 		return fmt.Errorf("compress() takes (data, selectors)")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("compress(): %w", err)
 	}
-	selElem, err := listElemTypeOf(c.Args[1])
+	selElem, err := g.listElemTypeOfG(c.Args[1])
 	if err != nil {
 		return fmt.Errorf("compress(): %w", err)
 	}
@@ -8971,7 +9135,7 @@ func (g *gen) builtinNsmallest(c *ir.Call, largest bool) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
 		return fmt.Errorf("heapq.%s() takes (n, iterable)", map[bool]string{false: "nsmallest", true: "nlargest"}[largest])
 	}
-	elem, err := listElemTypeOf(c.Args[1])
+	elem, err := g.listElemTypeOfG(c.Args[1])
 	if err != nil {
 		return fmt.Errorf("heapq.nsmallest(): %w", err)
 	}
@@ -9023,7 +9187,7 @@ func (g *gen) builtinHeappush(c *ir.Call) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
 		return fmt.Errorf("heapq.heappush() takes (heap, item)")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("heapq.heappush(): %w", err)
 	}
@@ -9100,7 +9264,7 @@ func (g *gen) builtinHeappop(c *ir.Call) error {
 	if len(c.Args) != 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("heapq.heappop() takes (heap)")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("heapq.heappop(): %w", err)
 	}
@@ -9241,7 +9405,7 @@ func (g *gen) builtinHeapify(c *ir.Call) error {
 	if len(c.Args) != 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("heapq.heapify() takes (heap)")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("heapq.heapify(): %w", err)
 	}
@@ -9285,7 +9449,7 @@ func (g *gen) builtinBisect(c *ir.Call, right bool) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
 		return fmt.Errorf("bisect_left/right() takes (a, x)")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("bisect(): %w", err)
 	}
@@ -9337,7 +9501,7 @@ func (g *gen) builtinInsort(c *ir.Call) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
 		return fmt.Errorf("bisect.insort() takes (a, x)")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("insort(): %w", err)
 	}
@@ -9420,7 +9584,7 @@ func (g *gen) builtinStarmap(c *ir.Call) error {
 	if len(lam.Params) != 2 {
 		return fmt.Errorf("starmap(): lambda must take 2 arguments (pair-tuples only)")
 	}
-	outer, err := listElemTypeOf(c.Args[1])
+	outer, err := g.listElemTypeOfG(c.Args[1])
 	if err != nil {
 		return fmt.Errorf("starmap(): %w", err)
 	}
@@ -9486,7 +9650,7 @@ func (g *gen) builtinPermutations(c *ir.Call) error {
 	if !ok || rLit.V != 2 {
 		return fmt.Errorf("permutations(): r must be the literal 2")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("permutations(): %w", err)
 	}
@@ -9532,7 +9696,7 @@ func (g *gen) builtinIslice(c *ir.Call) error {
 	if len(c.Args) < 2 || len(c.Args) > 4 || len(c.Keywords) != 0 {
 		return fmt.Errorf("islice() takes (iterable, stop) or (iterable, start, stop[, step])")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("islice(): %w", err)
 	}
@@ -9756,7 +9920,7 @@ func (g *gen) builtinGroupBy(c *ir.Call) error {
 		}
 		keyLam = lam
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("groupby(): %w", err)
 	}
@@ -9895,7 +10059,7 @@ func (g *gen) builtinCombinations(c *ir.Call) error {
 	if !ok || rLit.V != 2 {
 		return fmt.Errorf("combinations(): r must be the literal 2")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("combinations(): %w", err)
 	}
@@ -9938,7 +10102,7 @@ func (g *gen) builtinProduct(c *ir.Call) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
 		return fmt.Errorf("product() takes two iterables (F+: 2-way product only)")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("product(): %w", err)
 	}
@@ -10002,7 +10166,7 @@ func (g *gen) builtinWhile(c *ir.Call, take bool) error {
 	if len(lam.Params) != 1 {
 		return fmt.Errorf("%s(): lambda must take one argument", name)
 	}
-	elem, err := listElemTypeOf(c.Args[1])
+	elem, err := g.listElemTypeOfG(c.Args[1])
 	if err != nil {
 		return fmt.Errorf("%s(): %w", name, err)
 	}
@@ -10077,7 +10241,7 @@ func (g *gen) builtinDeque(c *ir.Call) error {
 	}
 	var elem *ir.Type
 	if len(c.Args) == 1 {
-		e, err := listElemTypeOf(c.Args[0])
+		e, err := g.listElemTypeOfG(c.Args[0])
 		if err != nil {
 			return fmt.Errorf("deque(): %w", err)
 		}
@@ -10171,7 +10335,7 @@ func (g *gen) builtinCounter(c *ir.Call) error {
 	if len(c.Args) != 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("Counter() takes one positional iterable")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("Counter(): %w", err)
 	}
@@ -10199,7 +10363,7 @@ func (g *gen) builtinChain(c *ir.Call) error {
 	if len(c.Args) < 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("chain() takes at least one list argument")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("chain(): %w", err)
 	}
@@ -10230,7 +10394,7 @@ func (g *gen) builtinAccumulate(c *ir.Call) error {
 	if len(c.Args) != 1 || len(c.Keywords) != 0 {
 		return fmt.Errorf("accumulate() takes one positional argument (key/func not supported)")
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("accumulate(): %w", err)
 	}
@@ -10281,7 +10445,7 @@ func (g *gen) builtinReversed(c *ir.Call) error {
 			return nil
 		}
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("reversed(): %w", err)
 	}
@@ -10606,7 +10770,7 @@ func (g *gen) builtinMinMaxArgs(c *ir.Call, kind string) error {
 // instead of zero. Type follows the start expression so callers can sum
 // floats into an int-typed list etc.
 func (g *gen) builtinSumStart(c *ir.Call) error {
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("sum(): %w", err)
 	}
@@ -10698,7 +10862,7 @@ func (g *gen) builtinReduce(c *ir.Call, kind string) error {
 	if len(c.Args) != 1 {
 		return fmt.Errorf("%s() takes exactly one positional argument", kind)
 	}
-	elem, err := listElemTypeOf(c.Args[0])
+	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("%s(): %w", kind, err)
 	}
@@ -10816,6 +10980,20 @@ func listElemTypeOf(e ir.Expr) (*ir.Type, error) {
 	t := e.TypeOf()
 	if t == nil || t.Kind != ir.TyList {
 		return nil, fmt.Errorf("argument must be a typed list")
+	}
+	if t.Elem == nil {
+		return &ir.Type{Kind: ir.TyAny}, nil
+	}
+	return t.Elem, nil
+}
+
+// listElemTypeOfG widens listElemTypeOf with the codegen's effectiveType
+// lookup so receiver expressions like `self.field` (whose IR static type
+// is TyUnknown) resolve through the user-class field registry.
+func (g *gen) listElemTypeOfG(e ir.Expr) (*ir.Type, error) {
+	t := g.effectiveType(e)
+	if t == nil || t.Kind != ir.TyList {
+		return listElemTypeOf(e)
 	}
 	if t.Elem == nil {
 		return &ir.Type{Kind: ir.TyAny}, nil

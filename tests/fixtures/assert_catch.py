@@ -7,8 +7,8 @@ def main() -> None:
     print(check(5))
     try:
         check(-1)
-    except Exception as e:
-        print("caught:", e)
+    except AssertionError as e:
+        print("caught assert:", e)
 
 
 if __name__ == "__main__":
