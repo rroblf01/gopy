@@ -139,6 +139,20 @@ type Class struct {
 	// InterfaceMethods captures the method signatures (excluding self)
 	// for the interface emission: name + params + ret type.
 	InterfaceMethods []InterfaceMethod
+	// ClassVars is the set of fields declared at the class level with
+	// a default value and never assigned via `self.<field>` in any
+	// method. They emit as module-level Go vars named `<Class>_<field>`;
+	// `<Class>.<field>` / `cls.<field>` access at codegen rewrites to
+	// that name, mirroring Python's shared class-state semantics.
+	ClassVars map[string]ClassVar
+}
+
+// ClassVar holds the default value and IR type of a hoisted class-level
+// variable. The codegen uses this to emit a module-level `var
+// <Class>_<field> <Ty> = <Default>` declaration once per class.
+type ClassVar struct {
+	Ty      *Type
+	Default Expr
 }
 
 type InterfaceMethod struct {

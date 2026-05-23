@@ -541,6 +541,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		Value Expr
 	}
 	var classFieldDefaults []classFieldDefault
+	var userInitBody []Stmt // user-written __init__ before defaults prepend
 
 	for _, m := range bodyNodes {
 		if dataclassDone && m.Type() == "AnnAssign" {
@@ -785,6 +786,11 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			if err != nil {
 				return nil, err
 			}
+			// Preserve a slice of the user-written __init__ body before
+			// we prepend the class-level field defaults; the ClassVars
+			// detection below uses it to tell which fields are written
+			// only by the auto-prelude (eligible to hoist).
+			userInitBody = body
 			// Prepend class-level field defaults so they run before the
 			// user-written __init__ body. If __init__ already sets the
 			// same field, the user's assignment wins (executed second).
@@ -946,6 +952,63 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		}
 	}
 
+	// Detect class-level fields that are *only* assigned at class level
+	// (default initializer) and never via `self.<field>` in any method.
+	// These are class-shared state in Python — promote them to Go
+	// module-level vars so `Class.<field>` reads/writes hit a single
+	// storage cell rather than per-instance struct fields.
+	{
+		writtenViaSelf := map[string]bool{}
+		walkAssignAttrTargets(decls, "self", writtenViaSelf)
+		// Only the user-written portion of __init__ counts — the auto
+		// prepended `self.<f> = <default>` block doesn't disqualify a
+		// field from becoming a class var.
+		walkAssignAttrTargetsStmts(userInitBody, "self", writtenViaSelf)
+		defaultByName := map[string]Expr{}
+		for _, d := range classFieldDefaults {
+			defaultByName[d.Name] = d.Value
+		}
+		var keptFields []Param
+		for _, f := range class.Fields {
+			defVal, hasDef := defaultByName[f.Name]
+			if hasDef && !writtenViaSelf[f.Name] {
+				if class.ClassVars == nil {
+					class.ClassVars = map[string]ClassVar{}
+				}
+				class.ClassVars[f.Name] = ClassVar{Ty: f.Ty, Default: defVal}
+				continue
+			}
+			keptFields = append(keptFields, f)
+		}
+		class.Fields = keptFields
+		// Drop the corresponding default-init entries so the constructor
+		// doesn't try to write `self.<field> = <default>` for a hoisted
+		// class var (the field no longer exists on the struct).
+		if len(class.ClassVars) > 0 {
+			var keptDefaults []classFieldDefault
+			for _, d := range classFieldDefaults {
+				if _, ok := class.ClassVars[d.Name]; ok {
+					continue
+				}
+				keptDefaults = append(keptDefaults, d)
+			}
+			classFieldDefaults = keptDefaults
+			// Also peel any leading default-init statements from InitBody.
+			var keptInit []Stmt
+			for _, st := range class.InitBody {
+				if aa, ok := st.(*AssignAttr); ok {
+					if recv, ok := aa.Target.(*Name); ok && recv.N == "self" {
+						if _, isCV := class.ClassVars[aa.Name]; isCV {
+							continue
+						}
+					}
+				}
+				keptInit = append(keptInit, st)
+			}
+			class.InitBody = keptInit
+		}
+	}
+
 	// Synthesize a constructor body for class-level field defaults when
 	// the class has no explicit __init__ — otherwise the defaults would
 	// vanish at codegen time.
@@ -962,6 +1025,57 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 
 	// Class first, then methods, so codegen order is type → methods.
 	return append([]Decl{class}, decls...), nil
+}
+
+// walkAssignAttrTargets visits every statement / nested block looking for
+// `<receiver>.<name> = ...` writes, recording the attribute name into
+// `out`. Used by lowerClass to decide which fields are pure class-level
+// (never touched per-instance) and thus eligible for module-var hoisting.
+func walkAssignAttrTargets(decls []Decl, receiver string, out map[string]bool) {
+	var walkStmts func([]Stmt)
+	walkStmts = func(ss []Stmt) {
+		for _, s := range ss {
+			switch x := s.(type) {
+			case *AssignAttr:
+				if recv, ok := x.Target.(*Name); ok && recv.N == receiver {
+					out[x.Name] = true
+				}
+			case *If:
+				walkStmts(x.Then)
+				walkStmts(x.Else)
+			case *While:
+				walkStmts(x.Body)
+			case *ForEach:
+				walkStmts(x.Body)
+			case *ForRange:
+				walkStmts(x.Body)
+			case *Try:
+				walkStmts(x.Body)
+				walkStmts(x.Finally)
+				for _, h := range x.Handlers {
+					walkStmts(h.Body)
+				}
+			}
+		}
+	}
+	for _, d := range decls {
+		fn, ok := d.(*Func)
+		if !ok {
+			continue
+		}
+		walkStmts(fn.Body)
+	}
+}
+
+// walkAssignAttrTargetsStmts is an overload for raw stmt slices (init body).
+func walkAssignAttrTargetsStmts(ss []Stmt, receiver string, out map[string]bool) {
+	for _, s := range ss {
+		if aa, ok := s.(*AssignAttr); ok {
+			if recv, ok := aa.Target.(*Name); ok && recv.N == receiver {
+				out[aa.Name] = true
+			}
+		}
+	}
 }
 
 func lowerFunc(n parser.Node) (*Func, error) {
@@ -2646,6 +2760,14 @@ func lowerCmpKind(s string) (string, error) {
 // top of common operator trees — deeper nestings (lambda bodies,
 // function call args, comprehensions) fall through unchanged and rely
 // on the codegen-level error path.
+// HoistNamedExprs is the exported form used by transpile codegen for
+// listcomp / dictcomp lowering — peels NamedExpr nodes out of an
+// expression into prior Assign statements and returns the rewritten
+// expression with plain Name references in place of the walrus.
+func HoistNamedExprs(e Expr) ([]Stmt, Expr) {
+	return hoistNamedExprs(e)
+}
+
 func hoistNamedExprs(e Expr) ([]Stmt, Expr) {
 	var pre []Stmt
 	var visit func(Expr) Expr
@@ -3647,6 +3769,14 @@ func promoteOp(op string, a, b *Type) *Type {
 	}
 	if op == "|" && a != nil && b != nil && a.Kind == TyDict && b.Kind == TyDict {
 		return &Type{Kind: TyDict, Key: a.Key, Val: a.Val}
+	}
+	// Set operations on lists (gopy lowers sets to slices): preserve the
+	// element type so downstream uses (sorted, in, etc.) see a typed list.
+	if a != nil && b != nil && a.Kind == TyList && b.Kind == TyList {
+		switch op {
+		case "&", "|", "-", "^":
+			return &Type{Kind: TyList, Elem: a.Elem}
+		}
 	}
 	if op == "%" && a != nil && a.Kind == TyStr {
 		return &Type{Kind: TyStr}

@@ -530,6 +530,26 @@ func (g *gen) class(c *ir.Class) error {
 	g.indent--
 	g.writef("}\n\n")
 
+	// Emit module-level class vars (shared across all instances): one
+	// `var <Class>_<field> <Ty> = <Default>` per ClassVar entry. Stable
+	// alphabetical order so codegen is deterministic.
+	if len(c.ClassVars) > 0 {
+		names := make([]string, 0, len(c.ClassVars))
+		for n := range c.ClassVars {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			cv := c.ClassVars[n]
+			g.writef("var %s_%s %s = ", c.Name, n, g.goType(cv.Ty))
+			if err := g.expr(cv.Default); err != nil {
+				return err
+			}
+			g.writef("\n")
+		}
+		g.writef("\n")
+	}
+
 	// Per-class accessor helpers used by setattr / getattr / hasattr.
 	// Emitting these unconditionally is cheap and keeps the dynamic
 	// builtins type-safe without falling back to runtime reflection.
@@ -910,6 +930,19 @@ func (g *gen) stmt(s ir.Stmt) error {
 			return err
 		}
 		g.writef("\n")
+		// Class-var-only classes: instance attr reads rewrite to module
+		// vars, so a freshly-bound `c := NewClass()` may end up never
+		// referenced. Emit a blank assign to keep Go from rejecting it.
+		if x.Decl {
+			if call, ok := x.Value.(*ir.Call); ok {
+				if n, ok := call.Func.(*ir.Name); ok {
+					if cls, ok := g.classes[n.N]; ok && len(cls.Fields) == 0 && len(cls.ClassVars) > 0 {
+						g.writeIndent()
+						g.writef("_ = %s\n", x.Target)
+					}
+				}
+			}
+		}
 		return nil
 	case *ir.AssignSub:
 		// User-class __setitem__: route `recv[k] = v` to `recv.Setitem(k, v)`.
@@ -948,6 +981,21 @@ func (g *gen) stmt(s ir.Stmt) error {
 		return nil
 	case *ir.AssignAttr:
 		g.writeIndent()
+		// Class var assignment: `Class.field = expr` or `cls.field = expr`
+		// (inside a @classmethod where cls was already substituted with
+		// the class name) rewrites to `Class_field = expr`.
+		if n, ok := x.Target.(*ir.Name); ok {
+			if cls, ok := g.classes[n.N]; ok {
+				if _, isCV := cls.ClassVars[x.Name]; isCV {
+					g.writef("%s_%s = ", cls.Name, x.Name)
+					if err := g.expr(x.Value); err != nil {
+						return err
+					}
+					g.writef("\n")
+					return nil
+				}
+			}
+		}
 		// @<name>.setter dispatch: when the target's class registers
 		// a property setter for x.Name, emit `target.SetX(value)`
 		// instead of a direct field write. Skip when emitting inside
@@ -1030,8 +1078,14 @@ func (g *gen) stmt(s ir.Stmt) error {
 		// through the class's full method set.
 		if narrow, ok := g.isinstanceNarrow(x.Cond); ok {
 			g.writeIndent()
-			g.writef("if %s, __isnok := any(%s).(%s); __isnok {\n", narrow.Var, narrow.Var, narrow.GoType)
+			// Declare narrowed `x` inside the then-branch only, so the
+			// else branch sees the original loop-binding rather than the
+			// zero value of a failed type assertion. The header just
+			// checks the OK flag.
+			g.writef("if _, __isnok := any(%s).(%s); __isnok {\n", narrow.Var, narrow.GoType)
 			g.indent++
+			g.writeIndent()
+			g.writef("%s := any(%s).(%s)\n", narrow.Var, narrow.Var, narrow.GoType)
 			g.writeIndent()
 			g.writef("_ = %s\n", narrow.Var)
 			prev, hadPrev := g.localVarTypes[narrow.Var]
@@ -2707,6 +2761,31 @@ func (g *gen) forEach(x *ir.ForEach) error {
 			}
 		}
 	}
+	// String iteration: `for c in "abc"` yields single-char strings to
+	// match CPython. Go's `range string` yields runes, so wrap as
+	// `string(r)`.
+	if iterTy := g.effectiveType(x.Iter); iterTy != nil && iterTy.Kind == ir.TyStr {
+		g.writeIndent()
+		switch x.Var {
+		case "_":
+			g.writef("for range ")
+		default:
+			g.writef("for _, __r := range ")
+		}
+		if err := g.expr(x.Iter); err != nil {
+			return err
+		}
+		g.writef(" {\n")
+		g.indent++
+		if x.Var != "_" {
+			g.writeIndent()
+			g.writef("%s := string(__r)\n", x.Var)
+			g.writeIndent()
+			g.writef("_ = %s\n", x.Var)
+		}
+		g.indent--
+		return g.forEachBody(x)
+	}
 	// Default single-var range. Dict iterates keys (Python semantics);
 	// channels (generators) take the value side.
 	g.writeIndent()
@@ -2911,9 +2990,103 @@ func (g *gen) expr(e ir.Expr) error {
 				return nil
 			}
 		}
+		// Set ops on TyList (sets lower to slices in gopy): `a & b`,
+		// `a | b`, `a - b`, `a ^ b` build a result slice. Uniqueness is
+		// not enforced when inputs already deduped at use site.
+		if x.Op == "&" || x.Op == "-" || x.Op == "^" {
+			lTy, rTy := x.L.TypeOf(), x.R.TypeOf()
+			if lTy != nil && rTy != nil && lTy.Kind == ir.TyList && rTy.Kind == ir.TyList && lTy.Elem != nil {
+				elemGo := g.goType(lTy.Elem)
+				g.writef("func() []%s {\n", elemGo)
+				g.indent++
+				g.writeIndent()
+				g.writef("__a := ")
+				if err := g.expr(x.L); err != nil {
+					return err
+				}
+				g.writef("\n")
+				g.writeIndent()
+				g.writef("__b := ")
+				if err := g.expr(x.R); err != nil {
+					return err
+				}
+				g.writef("\n")
+				g.writeIndent()
+				g.writef("__out := []%s{}\n", elemGo)
+				switch x.Op {
+				case "&":
+					g.writeIndent()
+					g.writef("__seen := map[%s]bool{}\n", elemGo)
+					g.writeIndent()
+					g.writef("for _, __v := range __b { __seen[__v] = true }\n")
+					g.writeIndent()
+					g.writef("__dup := map[%s]bool{}\n", elemGo)
+					g.writeIndent()
+					g.writef("for _, __v := range __a { if __seen[__v] && !__dup[__v] { __dup[__v] = true; __out = append(__out, __v) } }\n")
+				case "-":
+					g.writeIndent()
+					g.writef("__seen := map[%s]bool{}\n", elemGo)
+					g.writeIndent()
+					g.writef("for _, __v := range __b { __seen[__v] = true }\n")
+					g.writeIndent()
+					g.writef("__dup := map[%s]bool{}\n", elemGo)
+					g.writeIndent()
+					g.writef("for _, __v := range __a { if !__seen[__v] && !__dup[__v] { __dup[__v] = true; __out = append(__out, __v) } }\n")
+				case "^":
+					g.writeIndent()
+					g.writef("__sb := map[%s]bool{}\n", elemGo)
+					g.writeIndent()
+					g.writef("for _, __v := range __b { __sb[__v] = true }\n")
+					g.writeIndent()
+					g.writef("__sa := map[%s]bool{}\n", elemGo)
+					g.writeIndent()
+					g.writef("for _, __v := range __a { __sa[__v] = true }\n")
+					g.writeIndent()
+					g.writef("__dup := map[%s]bool{}\n", elemGo)
+					g.writeIndent()
+					g.writef("for _, __v := range __a { if !__sb[__v] && !__dup[__v] { __dup[__v] = true; __out = append(__out, __v) } }\n")
+					g.writeIndent()
+					g.writef("for _, __v := range __b { if !__sa[__v] && !__dup[__v] { __dup[__v] = true; __out = append(__out, __v) } }\n")
+				}
+				g.writeIndent()
+				g.writef("return __out\n")
+				g.indent--
+				g.writeIndent()
+				g.writef("}()")
+				return nil
+			}
+		}
 		// `a | b` over dicts → merged dict (b wins on key collision).
+		// Same op on lists/sets builds the union (dedup via map).
 		if x.Op == "|" {
 			lTy, rTy := x.L.TypeOf(), x.R.TypeOf()
+			if lTy != nil && rTy != nil && lTy.Kind == ir.TyList && rTy.Kind == ir.TyList && lTy.Elem != nil {
+				elemGo := g.goType(lTy.Elem)
+				g.writef("func() []%s {\n", elemGo)
+				g.indent++
+				g.writeIndent()
+				g.writef("__seen := map[%s]bool{}\n", elemGo)
+				g.writeIndent()
+				g.writef("__out := []%s{}\n", elemGo)
+				g.writeIndent()
+				g.writef("for _, __v := range ")
+				if err := g.expr(x.L); err != nil {
+					return err
+				}
+				g.writef(" { if !__seen[__v] { __seen[__v] = true; __out = append(__out, __v) } }\n")
+				g.writeIndent()
+				g.writef("for _, __v := range ")
+				if err := g.expr(x.R); err != nil {
+					return err
+				}
+				g.writef(" { if !__seen[__v] { __seen[__v] = true; __out = append(__out, __v) } }\n")
+				g.writeIndent()
+				g.writef("return __out\n")
+				g.indent--
+				g.writeIndent()
+				g.writef("}()")
+				return nil
+			}
 			if lTy != nil && rTy != nil && lTy.Kind == ir.TyDict && rTy.Kind == ir.TyDict {
 				mapGo := g.goType(lTy)
 				g.writef("func() %s {\n", mapGo)
@@ -3119,6 +3292,29 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.MethodCall:
 		return g.methodCall(x)
 	case *ir.Attribute:
+		// `Class.field` where Class is registered and field is a class
+		// var → rewrite to module-level `Class_field`. Same shape for
+		// `cls.field` inside a @classmethod, where `cls` was already
+		// substituted with the class name during lowering.
+		if n, ok := x.Recv.(*ir.Name); ok {
+			if cls, ok := g.classes[n.N]; ok {
+				if _, isCV := cls.ClassVars[x.Name]; isCV {
+					g.writef("%s_%s", cls.Name, x.Name)
+					return nil
+				}
+			}
+		}
+		// Instance attribute access (`inst.field`) where the receiver's
+		// class has the attribute as a class var: read through the
+		// module-level slot since the field doesn't exist on the struct.
+		if recvTy := g.effectiveType(x.Recv); recvTy != nil && recvTy.Kind == ir.TyNamed {
+			if cls, ok := g.classes[recvTy.Name]; ok {
+				if _, isCV := cls.ClassVars[x.Name]; isCV {
+					g.writef("%s_%s", cls.Name, x.Name)
+					return nil
+				}
+			}
+		}
 		// `type(x).__name__` in CPython yields the class name as a str.
 		// __gopy_type(...) returns a *__Type with .Name = the class name.
 		if x.Name == "__name__" {
@@ -3400,6 +3596,15 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		return g.sliceWithHelper(x)
 	case *ir.ListLit:
+		// `[]any{42, ...}` would store Go's untyped `int` for 42. When
+		// the element type is `any`, box numeric literals through their
+		// canonical Go widths (int64 / float64) so type assertions on
+		// the boxed values work as Python expects.
+		boxScalar := false
+		if x.ElemTy != nil && x.ElemTy.Kind == ir.TyAny {
+			boxScalar = true
+		}
+		_ = boxScalar
 		// Star-unpack support: `[*a, *b, x]` becomes
 		//   append(append([]T{}, a...), b...) with `x` joined directly.
 		// Walk the elements; on any Starred, switch to a multi-append IIFE.
@@ -3457,8 +3662,18 @@ func (g *gen) expr(e ir.Expr) error {
 			if i > 0 {
 				g.writef(", ")
 			}
-			if err := g.expr(e); err != nil {
-				return err
+			// When the slice's static element type is `any`, box numeric
+			// literals through int64 / float64 so the boxed value's
+			// runtime type matches Python's int / float (otherwise Go's
+			// untyped int lands as `int`, breaking `.(int64)` asserts).
+			if boxScalar {
+				if err := g.boxedExpr(e); err != nil {
+					return err
+				}
+			} else {
+				if err := g.expr(e); err != nil {
+					return err
+				}
 			}
 		}
 		g.writef("}")
@@ -3636,6 +3851,16 @@ func (g *gen) listComp(c *ir.ListComp) error {
 		g.writef(" {\n")
 		g.indent++
 		if cond != nil {
+			// Walrus inside the filter: hoist `y := f(x)` to a statement
+			// preceding the `if !cond` so `y` is in scope for both the
+			// condition and the element expression.
+			pre, cond2 := ir.HoistNamedExprs(cond)
+			for _, ps := range pre {
+				if err := g.stmt(ps); err != nil {
+					return err
+				}
+			}
+			cond = cond2
 			g.writeIndent()
 			g.writef("if !(")
 			if err := g.expr(cond); err != nil {
@@ -3659,9 +3884,16 @@ func (g *gen) listComp(c *ir.ListComp) error {
 			return err
 		}
 	}
+	// Walrus in element expression — hoist before the append.
+	pre, elt := ir.HoistNamedExprs(c.Elt)
+	for _, ps := range pre {
+		if err := g.stmt(ps); err != nil {
+			return err
+		}
+	}
 	g.writeIndent()
 	g.writef("__out = append(__out, ")
-	if err := g.expr(c.Elt); err != nil {
+	if err := g.expr(elt); err != nil {
 		return err
 	}
 	g.writef(")\n")
@@ -4412,10 +4644,30 @@ func (g *gen) call(c *ir.Call) error {
 		case "list":
 			// `list(iter)` materializes an iterator. In the gopy shim,
 			// iterables that map to slices already are slices, so this
-			// is a pass-through. Strings could feasibly be supported by
-			// splitting into runes, but we punt for now.
+			// is a pass-through. Strings split into single-char strings
+			// (matching CPython's per-codepoint iteration).
 			if len(c.Args) != 1 {
 				return fmt.Errorf("list() takes 1 argument")
+			}
+			if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyStr {
+				g.writef("func() []string {\n")
+				g.indent++
+				g.writeIndent()
+				g.writef("__s := ")
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef("\n")
+				g.writeIndent()
+				g.writef("__out := make([]string, 0, len(__s))\n")
+				g.writeIndent()
+				g.writef("for _, __r := range __s { __out = append(__out, string(__r)) }\n")
+				g.writeIndent()
+				g.writef("return __out\n")
+				g.indent--
+				g.writeIndent()
+				g.writef("}()")
+				return nil
 			}
 			return g.expr(c.Args[0])
 		case "id":
@@ -10266,13 +10518,21 @@ func (g *gen) builtinIsInstance(c *ir.Call) error {
 		case g.classes[name] != nil:
 			g.writef("\tif _, __ok := __v.(*%s); __ok { return true }\n", name)
 		case name == "int":
-			g.writef("\tif _, __ok := __v.(int64); __ok { return true }\n")
+			// Match int / int8…64 / uint variants — Go's untyped int
+			// often lands as `int` when boxed into any.
+			g.writef("\tswitch __v.(type) { case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64: return true }\n")
 		case name == "float":
-			g.writef("\tif _, __ok := __v.(float64); __ok { return true }\n")
+			g.writef("\tswitch __v.(type) { case float32, float64: return true }\n")
 		case name == "str":
 			g.writef("\tif _, __ok := __v.(string); __ok { return true }\n")
 		case name == "bool":
 			g.writef("\tif _, __ok := __v.(bool); __ok { return true }\n")
+		case name == "list":
+			g.addImport("reflect")
+			g.writef("\tif __rv := reflect.ValueOf(__v); __rv.IsValid() && (__rv.Kind() == reflect.Slice || __rv.Kind() == reflect.Array) { return true }\n")
+		case name == "dict":
+			g.addImport("reflect")
+			g.writef("\tif __rv := reflect.ValueOf(__v); __rv.IsValid() && __rv.Kind() == reflect.Map { return true }\n")
 		default:
 			return fmt.Errorf("isinstance() against %q not supported", name)
 		}
