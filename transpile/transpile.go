@@ -2128,7 +2128,18 @@ func (g *gen) localFunc(lf *ir.LocalFunc) error {
 	}
 	g.writef(")")
 	if fn.Ret != nil && fn.Ret.Kind != ir.TyUnknown && fn.Ret.Kind != ir.TyNone {
-		g.writef(" %s", g.goType(fn.Ret))
+		if fn.Ret.Kind == ir.TyTuple {
+			g.writef(" (")
+			for i, t := range fn.Ret.Tuple {
+				if i > 0 {
+					g.writef(", ")
+				}
+				g.writef("%s", g.goType(t))
+			}
+			g.writef(")")
+		} else {
+			g.writef(" %s", g.goType(fn.Ret))
+		}
 	}
 	g.writef(" {\n")
 	g.indent++
@@ -2140,9 +2151,18 @@ func (g *gen) localFunc(lf *ir.LocalFunc) error {
 		g.writeIndent()
 		g.writef("_ = %s\n", fn.Kwarg.Name)
 	}
+	// Register nested func in g.funcs so the rest of the enclosing
+	// scope's `userCallRetType` lookups discover the tuple-return shape
+	// for `a, b = inner()`. Stays registered for the whole emit cycle
+	// — collisions with top-level names are unlikely in practice.
+	g.funcs[fn.Name] = fn
+	prevCurrentFn := g.currentFn
+	g.currentFn = fn
 	if err := g.stmts(fn.Body); err != nil {
+		g.currentFn = prevCurrentFn
 		return err
 	}
+	g.currentFn = prevCurrentFn
 	g.indent--
 	g.writeIndent()
 	g.writef("}\n")
@@ -3373,28 +3393,28 @@ func (g *gen) expr(e ir.Expr) error {
 			if lTy != nil && rTy != nil {
 				if lTy.Kind == ir.TyStr && rTy.Kind == ir.TyInt {
 					g.addImport("strings")
-					g.writef("strings.Repeat(")
-					if err := g.expr(x.L); err != nil {
-						return err
-					}
-					g.writef(", int(")
+					g.writef("func() string { __n := int(")
 					if err := g.expr(x.R); err != nil {
 						return err
 					}
-					g.writef("))")
+					g.writef("); if __n < 0 { __n = 0 }; return strings.Repeat(")
+					if err := g.expr(x.L); err != nil {
+						return err
+					}
+					g.writef(", __n) }()")
 					return nil
 				}
 				if lTy.Kind == ir.TyInt && rTy.Kind == ir.TyStr {
 					g.addImport("strings")
-					g.writef("strings.Repeat(")
-					if err := g.expr(x.R); err != nil {
-						return err
-					}
-					g.writef(", int(")
+					g.writef("func() string { __n := int(")
 					if err := g.expr(x.L); err != nil {
 						return err
 					}
-					g.writef("))")
+					g.writef("); if __n < 0 { __n = 0 }; return strings.Repeat(")
+					if err := g.expr(x.R); err != nil {
+						return err
+					}
+					g.writef(", __n) }()")
 					return nil
 				}
 				if lTy.Kind == ir.TyList && rTy.Kind == ir.TyInt {
@@ -3906,6 +3926,43 @@ func (g *gen) expr(e ir.Expr) error {
 					return err
 				}
 				g.writef(")%d]", negV)
+				if vTy.Kind == ir.TyStr {
+					g.writef(")")
+				}
+				return nil
+			}
+		}
+		// Runtime-negative index normalization on list / str: Python wraps
+		// negative indices (xs[-1] == xs[len(xs)-1]); Go panics. When the
+		// index expression isn't a literal we can't rewrite, so emit an
+		// IIFE that normalizes.
+		if vTy := g.effectiveType(x.Value); vTy != nil && (vTy.Kind == ir.TyList || vTy.Kind == ir.TyStr) {
+			// Skip when index is already a non-negative literal (the
+			// common case stays a clean `xs[i]`).
+			isPositiveLit := false
+			if lit, ok := x.Index.(*ir.IntLit); ok && lit.V >= 0 {
+				isPositiveLit = true
+			}
+			idxTy := x.Index.TypeOf()
+			if !isPositiveLit && idxTy != nil && idxTy.Kind == ir.TyInt {
+				if vTy.Kind == ir.TyStr {
+					g.writef("string(")
+				}
+				g.writef("func() ")
+				if vTy.Kind == ir.TyStr {
+					g.writef("byte")
+				} else {
+					g.writef("%s", g.goType(vTy.Elem))
+				}
+				g.writef(" { __i := int(")
+				if err := g.expr(x.Index); err != nil {
+					return err
+				}
+				g.writef("); __c := ")
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef("; if __i < 0 { __i += len(__c) }; return __c[__i] }()")
 				if vTy.Kind == ir.TyStr {
 					g.writef(")")
 				}
@@ -4507,12 +4564,21 @@ func (g *gen) fstring(f *ir.FStr) error {
 			// through __gopy_repr for the no-spec / no-conv case so the
 			// output keeps decimal point + zero on whole-valued floats.
 			isFloat := false
+			isBool := false
+			isNone := false
 			if p.Spec == "" && p.Conv == 0 && !hasUserFormat {
-				if t := g.effectiveType(p.Expr); t != nil && t.Kind == ir.TyFloat {
-					isFloat = true
+				if t := g.effectiveType(p.Expr); t != nil {
+					switch t.Kind {
+					case ir.TyFloat:
+						isFloat = true
+					case ir.TyBool:
+						isBool = true
+					case ir.TyNone:
+						isNone = true
+					}
 				}
 			}
-			if p.Spec != "" || p.Conv != 0 || hasUserFormat || isFloat {
+			if p.Spec != "" || p.Conv != 0 || hasUserFormat || isFloat || isBool || isNone {
 				// Spec / conv / user dispatch / float dispatch all yield a
 				// fully-formatted string. Placeholder becomes %s.
 				fmtBuf.WriteString("%s")
@@ -4593,6 +4659,15 @@ func (g *gen) fstring(f *ir.FStr) error {
 					return err
 				}
 				g.writef(")")
+			} else if t := g.effectiveType(a.expr); t != nil && t.Kind == ir.TyBool {
+				// Python prints True/False; Go's %v prints true/false.
+				g.writef("func() string { if ")
+				if err := g.expr(a.expr); err != nil {
+					return err
+				}
+				g.writef(" { return \"True\" }; return \"False\" }()")
+			} else if t := g.effectiveType(a.expr); t != nil && t.Kind == ir.TyNone {
+				g.writef("\"None\"")
 			} else {
 				if err := g.expr(a.expr); err != nil {
 					return err
@@ -11802,8 +11877,14 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 			return true, nil
 		}
 		if len(m.Args) == 2 {
-			// split(sep, maxsplit): Go's SplitN takes n = maxsplit+1.
-			g.writef("strings.SplitN(")
+			// split(sep, maxsplit): Python -1 means unbounded; Go's
+			// SplitN takes n = maxsplit+1 and treats -1 as unbounded
+			// directly. Wrap so negative maxsplit dispatches to Split.
+			g.writef("func() []string { __n := int(")
+			if err := g.expr(m.Args[1]); err != nil {
+				return true, err
+			}
+			g.writef("); if __n < 0 { return strings.Split(")
 			if err := g.expr(m.Recv); err != nil {
 				return true, err
 			}
@@ -11811,11 +11892,15 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 			if err := g.expr(m.Args[0]); err != nil {
 				return true, err
 			}
-			g.writef(", int(")
-			if err := g.expr(m.Args[1]); err != nil {
+			g.writef(") }; return strings.SplitN(")
+			if err := g.expr(m.Recv); err != nil {
 				return true, err
 			}
-			g.writef("+1))")
+			g.writef(", ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return true, err
+			}
+			g.writef(", __n+1) }()")
 			return true, nil
 		}
 		g.writef("strings.Split(")

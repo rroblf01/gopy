@@ -15,6 +15,10 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 	}
 	moduleScopeReset()
 	m := &Module{Name: modName}
+	// Pre-pass: capture imports nested inside functions / classes too,
+	// so `from itertools import chain` inside `def main():` still
+	// registers the alias before name resolution runs.
+	collectNestedImports(root, m)
 	for _, stmt := range root.Children("body") {
 		if isMainGuard(stmt) {
 			// `if __name__ == "__main__":` — Go runs main() automatically,
@@ -50,6 +54,49 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 		m.Decls = append(m.Decls, decls...)
 	}
 	return m, nil
+}
+
+// collectNestedImports walks function / class bodies looking for Import
+// and ImportFrom statements, mirroring them into m.Imports so the alias
+// resolver picks them up regardless of where in the source they appear.
+func collectNestedImports(n parser.Node, m *Module) {
+	if n == nil {
+		return
+	}
+	walkImports(n, m, true)
+}
+
+func walkImports(n parser.Node, m *Module, isRoot bool) {
+	if n == nil {
+		return
+	}
+	t := n.Type()
+	// Module root: descend without recording top-level imports here (the
+	// main loop already does that). For nested nodes, record each Import.
+	if !isRoot {
+		if t == "Import" {
+			for _, alias := range n.Children("names") {
+				m.Imports = append(m.Imports, Import{
+					Names: []ImportName{{Name: alias.Str("name"), Alias: alias.Str("asname")}},
+				})
+			}
+			return
+		}
+		if t == "ImportFrom" {
+			from := n.Str("module")
+			imp := Import{From: from}
+			for _, alias := range n.Children("names") {
+				imp.Names = append(imp.Names, ImportName{Name: alias.Str("name"), Alias: alias.Str("asname")})
+			}
+			m.Imports = append(m.Imports, imp)
+			return
+		}
+	}
+	for _, k := range []string{"body", "orelse", "finalbody", "handlers"} {
+		for _, c := range n.Children(k) {
+			walkImports(c, m, false)
+		}
+	}
 }
 
 // isMainGuard matches the Python idiom `if __name__ == "__main__": ...`.
@@ -352,6 +399,9 @@ func isModuleTypeVar(name string) bool { return moduleTypeVars[name] }
 // scanned to derive struct fields.
 func lowerClass(n parser.Node) ([]Decl, error) {
 	name := n.Str("name")
+	// Register the class name in module scope so subsequent `Class(...)`
+	// constructor calls infer TyNamed as their static return type.
+	moduleScopeDeclare(name, &Type{Kind: TyNamed, Name: name})
 	class := &Class{Name: name}
 	// First pass: collect all base names (including any registered plugin
 	// markers like `Model`). Plugin bases are consumed by the lower hook
@@ -1449,12 +1499,23 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 		}
 		return nil, fmt.Errorf("unsupported constant annotation")
 	case "BinOp":
-		// `int | str` style unions desugar to `any`. We don't track the
-		// alternative types separately — every operand winds up boxed
-		// when passed through, and explicit `isinstance` covers the
-		// reverse direction.
+		// `int | str` style unions desugar to `any`. `T | None` (or
+		// `None | T`) where T is a class narrows to T so the nullable
+		// pointer carries the class type for attribute access.
 		op := n.Child("op")
 		if op != nil && op.Type() == "BitOr" {
+			left := n.Child("left")
+			right := n.Child("right")
+			leftTy, lErr := lowerAnnotation(left)
+			rightTy, rErr := lowerAnnotation(right)
+			if lErr == nil && rErr == nil && leftTy != nil && rightTy != nil {
+				if leftTy.Kind == TyNone && rightTy.Kind == TyNamed {
+					return rightTy, nil
+				}
+				if rightTy.Kind == TyNone && leftTy.Kind == TyNamed {
+					return leftTy, nil
+				}
+			}
 			return &Type{Kind: TyAny}, nil
 		}
 		return nil, fmt.Errorf("unsupported annotation BinOp %q", op.Type())
@@ -1712,6 +1773,11 @@ func lowerBody(stmts []parser.Node, sc *scope) ([]Stmt, error) {
 
 func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 	switch n.Type() {
+	case "Import", "ImportFrom":
+		// Function-level imports are no-ops in gopy — names resolve via
+		// the module-level alias table that was already populated when
+		// the file was loaded. Drop the statement.
+		return nil, nil
 	case "Expr":
 		// `yield X` parses as Expr(value=Yield(value=X)). Catch it here so
 		// we can treat it as a control-flow statement rather than a
@@ -2409,6 +2475,13 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 				retTy = &Type{Kind: TyInt}
 			case "hex", "oct", "bin", "repr":
 				retTy = &Type{Kind: TyStr}
+			default:
+				// `Foo(...)` where Foo is a registered class returns a
+				// TyNamed instance — surfaced here so ListLit / DictLit
+				// element-type inference sees the concrete class type.
+				if ty, ok := moduleScopeLookup(name.N); ok && ty != nil && ty.Kind == TyNamed {
+					retTy = ty
+				}
 			}
 		}
 		return &Call{Func: callee, Args: args, Keywords: kws, Ty: retTy}, nil
@@ -2829,13 +2902,18 @@ func inferMethodRet(recv Expr, method string) *Type {
 	switch rt.Kind {
 	case TyStr:
 		switch method {
-		case "upper", "lower", "strip", "replace":
+		case "upper", "lower", "strip", "lstrip", "rstrip", "replace",
+			"title", "capitalize", "swapcase", "casefold", "center",
+			"ljust", "rjust", "zfill", "expandtabs", "translate",
+			"encode", "removeprefix", "removesuffix", "format":
 			return &Type{Kind: TyStr}
-		case "startswith", "endswith":
+		case "startswith", "endswith", "isalpha", "isdigit", "isalnum",
+			"isspace", "isupper", "islower", "isdecimal", "isnumeric",
+			"isidentifier", "isprintable", "istitle", "isascii":
 			return &Type{Kind: TyBool}
-		case "find":
+		case "find", "rfind", "index", "rindex", "count":
 			return &Type{Kind: TyInt}
-		case "split":
+		case "split", "rsplit", "splitlines", "partition", "rpartition":
 			return &Type{Kind: TyList, Elem: &Type{Kind: TyStr}}
 		case "join":
 			return &Type{Kind: TyStr}

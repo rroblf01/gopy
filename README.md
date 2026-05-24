@@ -302,17 +302,148 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - `str[i]` (positive or negative literal) returns a single-character string in Python; gopy now wraps the index in `string(...)` so `s[0] == "h"` and downstream str concatenation works (Go's `s[i]` returns a byte). Negative literal indices also rewrite to `s[len(s)-N]` like list indexing
 - `groups[k] = []` / `nested[k] = {}` (typed dict whose value type is `list[T]` / `dict[K, V]`) now reshapes the empty literal to match the declared value type — `[]string{}` / `map[K]V{}` — instead of emitting `[]any{}`
 - All slicing (string + list) routes through the generic helper now: out-of-range bounds clamp like Python rather than panic — `"abc"[10:20]` returns `""`, `[1,2,3][5:]` returns `[]` instead of crashing with `slice bounds out of range`. The fast literal path is gone since static bound-safety is unreliable
+- Function-level `import` / `from X import Y` statements lower as no-ops; the pre-pass walks every function / class body and registers nested imports into the module's alias table, so `def main(): from itertools import chain; ...` resolves `chain` exactly as a top-level import would
+- Runtime-negative indices on list/str (`xs[i]` where `i` is a variable that may be negative) now wrap via an IIFE — `if __i < 0 { __i += len(__c) }` — instead of panicking like Go does on `xs[-1]`. Literal-negative path remains the simpler `xs[len(xs)-N]` rewrite
+- `"ab" * -3` (and `-3 * "ab"`) return empty string instead of panicking `strings: negative Repeat count`. Negative count clamps to zero before `strings.Repeat`
+- f-string `{b}` on TyBool emits `"True"` / `"False"` instead of Go's `"true"` / `"false"`; TyNone substitutes `"None"`. Float/user-class dispatch and conv/spec handling unchanged
+- `str.split(sep, maxsplit)` now treats negative maxsplit as unbounded (Python convention: `s.split(",", -1)` returns every part) — wrapping IIFE dispatches to `strings.Split` instead of `SplitN(..., 0)` which would return only `[""]`
+- Chained string method calls infer return types through a wider table: `casefold`, `swapcase`, `title`, `capitalize`, `removeprefix`, `removesuffix`, `expandtabs`, `translate`, `center`/`ljust`/`rjust`/`zfill` all keep TyStr so a subsequent `.upper()` / `.strip()` resolves. Predicates `isdigit`/`isalpha`/`isalnum`/`isspace`/`isupper`/`islower`/`isdecimal`/`isnumeric`/`isidentifier`/`isprintable`/`istitle`/`isascii` carry TyBool. `rfind` / `index` / `rindex` / `count` carry TyInt
+- Nested function definitions returning `tuple[T, U, ...]` now emit Go's multi-return signature (`func(...) (T, U, ...)`) and `a, b = inner()` consumes them directly via Go multi-assign — previously the signature collapsed to `any` and the call site complained `assignment mismatch: 2 variables but inner returns 1 value`. Nested fns also register their signature in `g.funcs` so the rest of the enclosing scope sees the tuple return type
 
 ### Not yet supported
 
-- Custom decorators (user-written `@my_wrapper`) and decorators with arguments — only built-in `@staticmethod` / `@classmethod` / `@property` are accepted
-- `csv.writer` as a stateful file-bound writer; today only `csv.reader(lines)` round-trips
-- `timedelta(seconds=..., minutes=...)` keyword constructors (only positional days)
-- Metaclasses, `__getattr__` / descriptors
-- Dynamic features: `eval`, `exec`, monkey-patching, runtime `setattr`
-- Generator `send()` / `throw()`, async / `await` — these require a fundamentally different runtime model (coroutine state machine vs. plain goroutines) and are intentionally out of scope for v1
-- C extensions
-- Library frameworks that depend on dynamic Python features (Django, Flask, SQLAlchemy, ...). The transpiler stays library-agnostic: third-party library code must itself be written in the supported Python subset so it can be transpiled alongside the application code.
+#### Object model
+
+- **Custom decorators** (`@my_wrapper`) and decorators with arguments (`@cache(maxsize=128)`) — only built-in `@staticmethod` / `@classmethod` / `@property` and a few stdlib pass-throughs (`@lru_cache`, `@dataclass`, `@final`, `@override`, `@deprecated`) are recognized
+- **Virtual dispatch via inheritance**: an overridden method called from a base-class method dispatches to the base, not the subclass. Go struct embedding doesn't support late-binding. Workaround: route through an explicit interface or call the override directly
+- **Multiple inheritance with C3 linearization** beyond the simple two-base case; diamond conflicts already error out at transpile time
+- **Metaclasses** (`class Foo(metaclass=Meta):`) — accepted with a warning but the metaclass body never runs
+- **Descriptors** (`__get__` / `__set__` / `__delete__` protocol)
+- **`__getattr__` / `__setattr__` / `__delattr__` / `__getattribute__`** dynamic attribute hooks
+- **`__init_subclass__`** body — name is recognized as a no-op method, hook isn't invoked
+- **`__slots__`** enforcement (accepted as a no-op; attribute creation is already constrained by Go's struct)
+- **`@dataclass(frozen=True)` hash/equality plus `set[Point]` / dict-key use** — gopy's set is a slice, frozen dataclasses aren't hashable through Go's map machinery
+- **`@dataclass(slots=True)` / `eq=False` / `order=True`** variants — kwargs accepted, behavior unchanged
+- **Property setters on inherited classes** — setters work on the declaring class only; subclass overrides don't rewire the `obj.prop = v` call site
+- **Nested class definitions inside a function body**
+- **Recursive nested functions** — `def f(): ... f(...)` inside an outer function fails because Go's `name := func(...)` literal isn't in scope inside itself. Top-level recursion is fine
+- **Lambda closures retyped at the call site** — lambdas passed to user functions taking `Callable[[T], U]` stay `func(any) any` and clash with the typed parameter; only the well-known builtins (`map` / `filter` / `sorted(key=)` / `functools.reduce`) re-lower lambda bodies with concrete element types
+
+#### Runtime features
+
+- **`yield from`** on user generators returning typed channels; the simple form forwards values but type erasure may force `any` in the consumer
+- **Generator `.send(value)` / `.throw(exc)` / `.close()`** — gopy's generator is a one-way channel, not a coroutine
+- **Real `async` / `await` concurrency** — `async def` strips to a sync function, `await x` collapses to `x`, `asyncio.run` runs the coroutine synchronously. Real overlap needs hand-written goroutines
+- **`bytes` / `bytearray` as a distinct type** — gopy uses `string` for both; `b'...'` literals work as quoted strings, `.encode()` / `.decode()` are no-ops. Slicing / indexing returns string bytes, not int codepoints. Functions like `struct.pack` return strings, not real bytes
+- **`memoryview` / buffer protocol**
+- **Real `complex` arbitrary precision** — backed by Go's `complex128`; very large or precise values lose digits compared to CPython's variable precision
+- **Arbitrary-precision integers** — gopy uses `int64`; values beyond ±9.22e18 overflow silently. CPython's bignum semantics aren't reproduced. Same goes for `decimal.Decimal` (float-backed in gopy)
+- **Fractions** — `fractions.Fraction` exists but `+ - * /` operator overloading isn't wired; call `.Add` / `.Sub` etc. directly
+- **`__pyx_method__`-style C extensions** and any module that imports a `.so`
+- **GIL semantics / thread safety** — generated Go code is goroutine-safe only where the stdlib shim guarantees it (`queue.Queue`, etc.). Plain dicts / lists aren't mutex-protected
+- **`__del__` finalizers** are recognized but Go's GC doesn't guarantee execution order
+
+#### Dynamic / introspection
+
+- **`eval` / `exec` / `compile`** — explicit error at transpile time
+- **`globals()` / `locals()` returning mutable mapping** — gopy has no runtime symbol table; the calls return empty stubs
+- **Runtime `setattr` / `getattr` on arbitrary objects** — works only on user-class instances whose `__<Class>_set` / `__<Class>_get` helpers were generated; arbitrary modules / built-in objects fail
+- **`type(name, bases, dict)` three-arg form** to build a class at runtime
+- **`__import__` / `importlib.import_module` / `importlib.reload`** — gopy resolves imports at transpile time; runtime import is a stub
+- **Monkey-patching** module attributes / class methods at runtime
+- **`inspect.getsource` / `inspect.signature`** returning real values — both are stubs since gopy doesn't carry source / argspec info
+- **Real `traceback.format_exc()` with frame info** — gopy panics don't carry Python-style frames
+
+#### Syntax / expressions
+
+- **Slice assignment / deletion**: `xs[1:3] = [...]` / `del xs[1:3]` not parsed
+- **Augmented `xs[i] +=` / `xs[k] +=` on subscripted indices** — augmented form on dict[k] works, on list[i] works; on nested `d[k][j] +=` may miss
+- **Walrus inside `while (n := ...) < x:` body that mutates `n`** — works at the header level, but reusing the walrus binding inside the body may shadow incorrectly
+- **`del name`** — accepted as no-op (Go scope handles binding removal); `del d[k]` and `del xs[i]` work
+- **Star-expr LHS** like `first, *rest = xs`
+- **`for n in <generator_expr>:`** in some shapes where the gen-expr return type can't be inferred — wrap in `list(...)` to force materialization
+- **`5 in range(N)`** — `range` isn't a first-class value, only valid in a `for` head or as `list(range(...))`
+- **`x is y`** identity on arbitrary objects — only `x is None` / `x is not None` is wired; `id`-comparison for other values returns wrong results
+- **Chained `cmp1 == cmp2 == cmp3` with side-effecting middle term** evaluates the middle twice (Python evaluates once)
+- **Nested format specs** (`f"{x:>{width}}"`) — only literal specs are parsed
+- **String slicing with step > 1 on extremely large strings** — works but routes through a per-rune helper, not byte-fast
+
+#### Stdlib gaps
+
+- **`csv.writer`** as a stateful file-bound writer (only `csv.reader(lines)` round-trips)
+- **`csv.DictReader` / `DictWriter`**
+- **`timedelta(seconds=..., minutes=...)`** keyword constructors (only positional days)
+- **`datetime.timezone.utc`** as a real tz-aware object — exposed as the literal `"UTC"` string
+- **`datetime` parsing** (`strptime`, `fromisoformat` with offsets)
+- **`asyncio.Lock` / `Queue` / `Semaphore`** with real blocking semantics
+- **`threading.Lock` / `Condition` / `Event`** beyond the stub registration
+- **`multiprocessing` real fork / IPC**
+- **`subprocess.Popen` streaming stdin/stdout** — `run` / `check_output` are synchronous-only
+- **`re` flags** (`re.IGNORECASE`, `re.MULTILINE`, etc.) — flag args parse but compiled patterns ignore them. Use embedded flag syntax `(?i)` instead
+- **`re.compile` returning a reusable pattern with `.match` / `.search` / `.sub` methods** — top-level helpers work, `Pattern` objects don't
+- **`json.JSONEncoder` / `JSONDecoder` subclassing** — registered as stub
+- **`pickle` binary protocol** — JSON-backed; not wire-compatible with CPython
+- **`socket` UDP / Unix-domain / raw sockets** — only TCP TCP-stream forms wired
+- **`http.server.BaseHTTPRequestHandler`** real request handling — registered as stub
+- **`http.client` POST/PUT bodies, redirects, cookies**
+- **`urllib.request.urlretrieve` headers / progress callback** — only the basic download form works
+- **`ssl.SSLContext` / certificate verification** — context constructors are stubs
+- **`logging.Logger` hierarchy, `Filter` chaining, custom `Handler`**
+- **`argparse` subparsers / mutually exclusive groups / type=int conversion** — only flat positional / optional args work
+- **`configparser` interpolation (`%(key)s`), `defaults=`, write-back to file**
+- **`mmap`, `select`, `selectors`, `signal`** real wakeups — all registered as stubs
+- **`sqlite3`** real driver — registered as stub
+- **`xml.etree.ElementTree` mutation / write** — only parse + read works
+- **`xml.dom.minidom`, `xml.sax`** parsers — registered as stubs
+- **`html.parser.HTMLParser`** — stub
+- **`email.parser` / `email.message`** — stubs
+- **`turtle`, `tkinter`, `curses`, `readline`** — UI / terminal modules not wired
+- **`ctypes`, `cffi`** — no FFI bridge
+- **`__future__` non-`annotations` features** — accepted as no-op but the feature isn't toggled
+
+#### Numerics
+
+- **`math.frexp` / `math.modf` returning `(float, int)`** — wired as `(float, float)` analog
+- **`math.nan` / `math.inf` comparisons** match Go's IEEE-754; some Python edge cases (NaN-as-dict-key) differ
+- **`int.from_bytes` / `int.to_bytes`** with endianness — not implemented
+- **`int.bit_length()` / `int.bit_count()`** as instance methods — gopy doesn't expose method calls on bare int literals (`(5).bit_length()`)
+- **Float `__format__` edge cases**: `g` type with very small numbers, special values (`-0.0`, `nan`, `inf`) — Go's `%g` differs slightly from Python's repr
+
+#### Type system
+
+- **`typing.TypeGuard` / `TypeIs`** narrowing — accepted as passthrough decorators, no actual narrowing wired
+- **`typing.Self`** in method signatures — lowers to `any` rather than the enclosing class
+- **`typing.ParamSpec` / `Concatenate`** — passthrough, no real generic-callable support
+- **`typing.overload` runtime dispatch** — the overload stubs are dropped, only the real impl runs
+- **`typing.Protocol` with runtime `isinstance(obj, Proto)`** — interface satisfaction only checked structurally at the call site, not runtime
+- **PEP 612 / 695 generic class syntax** beyond the function-level form (`class C[T]:` not supported; use `Generic[T]` base)
+- **Higher-kinded generics** like `list[T] -> dict[T, list[T]]` chains beyond two type parameters
+
+#### Tooling / packaging
+
+- **PyPI library transpilation** — third-party libraries that use unsupported features (most do) won't transpile. Pure-Python libs in the supported subset transpile alongside application code
+- **`pip install` of transpiled output** — no Python wheel produced; the binary is a single Go executable
+- **REPL / interactive mode** — `python -i` has no equivalent
+- **Source maps from generated Go back to Python** — line numbers in panics point at Go file
+- **Incremental rebuild** — re-running `gopy` re-emits every file even if only one source changed
+
+#### Long-tail Python idioms
+
+- **List of N-tuples with N > 2** in for-loop unpacking — only 2-tuple destructure is special-cased
+- **Dict with tuple key** beyond simple `dict[tuple[int, int], V]` — Go's map can't use slice keys, so tuples are converted to string-formatted keys at runtime (lossy if elements contain `,`)
+- **String formatting locale-aware** (`{:n}` type with current locale grouping)
+- **`unicodedata.normalize` NFKD / NFC** — only category lookup is wired
+- **`gettext.translation` with `.mo` catalogs** — `gettext`/`ngettext` return source string unchanged
+- **`pathlib.Path` glob / rglob walking** — `iterdir` works, `glob` patterns don't
+- **`os.scandir`** as a context manager iterator — eager-materialized like `os.walk`
+- **`shutil.copy` / `copytree` preserving permissions and metadata** — basic copy works, full attribute preservation may differ from CPython
+
+#### Out of scope (intentional)
+
+- **C extensions** (`.so` / `.pyd` / `Cython`-compiled modules)
+- **Library frameworks that depend on dynamic Python features** — Django, Flask, SQLAlchemy, FastAPI, etc. require eval / metaclasses / runtime ORM that gopy doesn't reproduce. The transpiler stays library-agnostic: third-party library code must itself be written in the supported Python subset so it can be transpiled alongside the application code
+- **Just-in-time recompilation** — gopy is ahead-of-time only; the generated binary doesn't include a Python interpreter
+- **Reference-counting GC semantics** — Go's tracing GC differs from CPython's deterministic refcount, so `__del__` timing and cyclic-reference cleanup behave differently
 
 ## Requirements for the input Python code
 
