@@ -1499,15 +1499,15 @@ var stdlibModules = map[string]stdlibModule{
 			"X":          {GoExpr: "int64(64)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"findall":   {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall},
-			"search":    {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
-			"match":     {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
-			"fullmatch": {GoFunc: "__gopy_re_fullmatch", GoImport: "regexp", Helper: helperReFullmatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
-			"sub":       {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub},
-			"subn":      {GoFunc: "__gopy_re_subn", GoImport: "regexp", Helper: helperReSubn},
-			"split":     {GoFunc: "__gopy_re_split", GoImport: "regexp", Helper: helperReSplit},
+			"findall":   {GoFunc: "__gopy_re_findall", GoImport: "regexp", Helper: helperReFindall, ExtraHelpers: map[string]string{"__gopy_re_flag_prefix": helperReFlagPrefix}},
+			"search":    {GoFunc: "__gopy_re_search", GoImport: "regexp", Helper: helperReSearch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild, "__gopy_re_flag_prefix": helperReFlagPrefix}},
+			"match":     {GoFunc: "__gopy_re_match", GoImport: "regexp", Helper: helperReMatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild, "__gopy_re_flag_prefix": helperReFlagPrefix}},
+			"fullmatch": {GoFunc: "__gopy_re_fullmatch", GoImport: "regexp", Helper: helperReFullmatch, RetTag: "__Match", ExtraHelpers: map[string]string{"__Match": helperMatchType, "__gopy_match_build": helperMatchBuild, "__gopy_re_flag_prefix": helperReFlagPrefix}},
+			"sub":       {GoFunc: "__gopy_re_sub", GoImport: "regexp", Helper: helperReSub, ExtraHelpers: map[string]string{"__gopy_re_flag_prefix": helperReFlagPrefix}},
+			"subn":      {GoFunc: "__gopy_re_subn", GoImport: "regexp", Helper: helperReSubn, ExtraHelpers: map[string]string{"__gopy_re_flag_prefix": helperReFlagPrefix}},
+			"split":     {GoFunc: "__gopy_re_split", GoImport: "regexp", Helper: helperReSplit, ExtraHelpers: map[string]string{"__gopy_re_flag_prefix": helperReFlagPrefix}},
 			"escape":    {GoFunc: "regexp.QuoteMeta", GoImport: "regexp", RetKind: "str"},
-			"compile":   {GoFunc: "__gopy_re_compile", GoImport: "regexp", Helper: helperReCompile, RetTag: "__Pattern", ExtraHelpers: map[string]string{"__Pattern": helperPatternType, "__Match": helperMatchType, "__gopy_match_build": helperMatchBuild}},
+			"compile":   {GoFunc: "__gopy_re_compile", GoImport: "regexp", Helper: helperReCompile, RetTag: "__Pattern", ExtraHelpers: map[string]string{"__Pattern": helperPatternType, "__Match": helperMatchType, "__gopy_match_build": helperMatchBuild, "__gopy_re_flag_prefix": helperReFlagPrefix}},
 		},
 	},
 	"csv": {
@@ -2929,8 +2929,8 @@ const helperJSONDump = `func __gopy_json_dump(v any, w interface{ Write([]byte) 
 // helperReFindall mirrors Python's re.findall(pattern, string): returns
 // every non-overlapping match as a []string. Go's regexp uses RE2 syntax
 // so user patterns relying on backrefs / lookarounds will fail at compile.
-const helperReFindall = `func __gopy_re_findall(pattern, s string) []string {
-	r := regexp.MustCompile(pattern)
+const helperReFindall = `func __gopy_re_findall(pattern, s string, flags ...int64) []string {
+	r := regexp.MustCompile(__gopy_re_flag_prefix(flags...) + pattern)
 	out := r.FindAllString(s, -1)
 	if out == nil {
 		return []string{}
@@ -3048,18 +3048,47 @@ func (m *__Match) Groupdict() map[string]string {
 
 func (m *__Match) String() string { return m.full }`
 
+// helperReFlagPrefix translates Python re flag bits into Go regexp's
+// embedded flag syntax. IGNORECASE=2 → (?i), MULTILINE=8 → (?m),
+// DOTALL=16 → (?s); other flags are silently ignored (Go regexp's
+// syntax differs from Python's so e.g. VERBOSE doesn't translate).
+const helperReFlagPrefix = `func __gopy_re_flag_prefix(flags ...int64) string {
+	var bits int64
+	for _, f := range flags {
+		bits |= f
+	}
+	if bits == 0 {
+		return ""
+	}
+	out := "(?"
+	if bits&2 != 0 {
+		out += "i"
+	}
+	if bits&8 != 0 {
+		out += "m"
+	}
+	if bits&16 != 0 {
+		out += "s"
+	}
+	if out == "(?" {
+		return ""
+	}
+	return out + ")"
+}`
+
 // helperReSearch returns a *__Match on hit, nil on miss — mirroring
 // Python's re.search semantics. Truthy / `is None` checks at call sites
-// work because the codegen rewrites them to a nil comparison.
-const helperReSearch = `func __gopy_re_search(pattern, s string) *__Match {
-	r := regexp.MustCompile(pattern)
+// work because the codegen rewrites them to a nil comparison. Trailing
+// variadic flag args are mapped to Go regexp's (?i)/(?m)/(?s) syntax.
+const helperReSearch = `func __gopy_re_search(pattern, s string, flags ...int64) *__Match {
+	r := regexp.MustCompile(__gopy_re_flag_prefix(flags...) + pattern)
 	return __gopy_match_build(r, s, false)
 }`
 
 // helperReMatch anchors the pattern to the start of the string, matching
 // Python's re.match semantics. Returns nil on miss.
-const helperReMatch = `func __gopy_re_match(pattern, s string) *__Match {
-	r := regexp.MustCompile("^(?:" + pattern + ")")
+const helperReMatch = `func __gopy_re_match(pattern, s string, flags ...int64) *__Match {
+	r := regexp.MustCompile("^(?:" + __gopy_re_flag_prefix(flags...) + pattern + ")")
 	return __gopy_match_build(r, s, false)
 }`
 
@@ -3082,31 +3111,69 @@ const helperMatchBuild = `func __gopy_match_build(r *regexp.Regexp, s string, _ 
 	return &__Match{full: full, groups: groups, names: r.SubexpNames(), idx: idx}
 }`
 
-// helperReSub replaces every match of pattern with repl.
-const helperReSub = `func __gopy_re_sub(pattern, repl, s string) string {
-	r := regexp.MustCompile(pattern)
-	return r.ReplaceAllString(s, repl)
+// helperReSub replaces every match of pattern with repl. Trailing
+// int args are interpreted as (count, flags) per Python's
+// `re.sub(pattern, repl, string, count=0, flags=0)` signature: a
+// non-zero count caps the number of substitutions.
+const helperReSub = `func __gopy_re_sub(pattern, repl, s string, args ...int64) string {
+	var count, flagBits int64
+	if len(args) >= 1 {
+		count = args[0]
+	}
+	if len(args) >= 2 {
+		flagBits = args[1]
+	}
+	r := regexp.MustCompile(__gopy_re_flag_prefix(flagBits) + pattern)
+	if count <= 0 {
+		return r.ReplaceAllString(s, repl)
+	}
+	remaining := count
+	return r.ReplaceAllStringFunc(s, func(match string) string {
+		if remaining <= 0 {
+			return match
+		}
+		remaining--
+		return r.ReplaceAllString(match, repl)
+	})
 }`
 
 // helperReSubn returns []any{result_string, n_substitutions} so callers
 // can unpack via positional indexing. Mirrors Python's re.subn tuple.
-const helperReSubn = `func __gopy_re_subn(pattern, repl, s string) []any {
-	r := regexp.MustCompile(pattern)
-	count := int64(len(r.FindAllStringIndex(s, -1)))
-	return []any{r.ReplaceAllString(s, repl), count}
+const helperReSubn = `func __gopy_re_subn(pattern, repl, s string, args ...int64) []any {
+	var count, flagBits int64
+	if len(args) >= 1 {
+		count = args[0]
+	}
+	if len(args) >= 2 {
+		flagBits = args[1]
+	}
+	r := regexp.MustCompile(__gopy_re_flag_prefix(flagBits) + pattern)
+	n := int64(len(r.FindAllStringIndex(s, -1)))
+	if count <= 0 || count >= n {
+		return []any{r.ReplaceAllString(s, repl), n}
+	}
+	remaining := count
+	out := r.ReplaceAllStringFunc(s, func(match string) string {
+		if remaining <= 0 {
+			return match
+		}
+		remaining--
+		return r.ReplaceAllString(match, repl)
+	})
+	return []any{out, count}
 }`
 
 // helperReFullmatch anchors at both ends, mirroring re.fullmatch.
-const helperReFullmatch = `func __gopy_re_fullmatch(pattern, s string) *__Match {
-	r := regexp.MustCompile("^(?:" + pattern + ")$")
+const helperReFullmatch = `func __gopy_re_fullmatch(pattern, s string, flags ...int64) *__Match {
+	r := regexp.MustCompile("^(?:" + __gopy_re_flag_prefix(flags...) + pattern + ")$")
 	return __gopy_match_build(r, s, false)
 }`
 
 // helperReSplit splits s on every occurrence of the pattern. Mirrors
 // re.split's default form; the maxsplit argument is not supported (use
 // strings.SplitN with a literal sep for that pattern).
-const helperReSplit = `func __gopy_re_split(pattern, s string) []string {
-	r := regexp.MustCompile(pattern)
+const helperReSplit = `func __gopy_re_split(pattern, s string, flags ...int64) []string {
+	r := regexp.MustCompile(__gopy_re_flag_prefix(flags...) + pattern)
 	out := r.Split(s, -1)
 	if out == nil {
 		return []string{}
@@ -3160,10 +3227,11 @@ func (p *__Pattern) Fullmatch(s string) *__Match {
 	return __gopy_match_build(anchored, s, false)
 }`
 
-const helperReCompile = `func __gopy_re_compile(pattern string) *__Pattern {
+const helperReCompile = `func __gopy_re_compile(pattern string, flags ...int64) *__Pattern {
+	pref := __gopy_re_flag_prefix(flags...)
 	return &__Pattern{
-		r:      regexp.MustCompile(pattern),
-		anchor: regexp.MustCompile("^(?:" + pattern + ")"),
+		r:      regexp.MustCompile(pref + pattern),
+		anchor: regexp.MustCompile("^(?:" + pref + pattern + ")"),
 	}
 }`
 
@@ -5006,18 +5074,35 @@ func (f *__Fraction) Truediv(o *__Fraction) *__Fraction {
 }
 
 func (f *__Fraction) Eq(o *__Fraction) bool { return f.Num*o.Den == o.Num*f.Den }
+func (f *__Fraction) Ne(o *__Fraction) bool { return f.Num*o.Den != o.Num*f.Den }
 func (f *__Fraction) Lt(o *__Fraction) bool { return f.Num*o.Den < o.Num*f.Den }
+func (f *__Fraction) Le(o *__Fraction) bool { return f.Num*o.Den <= o.Num*f.Den }
+func (f *__Fraction) Gt(o *__Fraction) bool { return f.Num*o.Den > o.Num*f.Den }
+func (f *__Fraction) Ge(o *__Fraction) bool { return f.Num*o.Den >= o.Num*f.Den }
 func (f *__Fraction) Float() float64        { return float64(f.Num) / float64(f.Den) }`
 
 const helperFractionNew = `func __gopy_fraction_new(args ...any) *__Fraction {
+	asInt := func(v any) (int64, bool) {
+		switch x := v.(type) {
+		case int64:
+			return x, true
+		case int:
+			return int64(x), true
+		case int32:
+			return int64(x), true
+		case float64:
+			return int64(x), true
+		}
+		return 0, false
+	}
 	if len(args) == 0 {
 		return &__Fraction{Num: 0, Den: 1}
 	}
 	if len(args) == 1 {
-		switch v := args[0].(type) {
-		case int64:
-			return &__Fraction{Num: v, Den: 1}
-		case string:
+		if n, ok := asInt(args[0]); ok {
+			return &__Fraction{Num: n, Den: 1}
+		}
+		if v, ok := args[0].(string); ok {
 			if i := strings.Index(v, "/"); i >= 0 {
 				n, _ := strconv.ParseInt(strings.TrimSpace(v[:i]), 10, 64)
 				d, _ := strconv.ParseInt(strings.TrimSpace(v[i+1:]), 10, 64)
@@ -5030,8 +5115,8 @@ const helperFractionNew = `func __gopy_fraction_new(args ...any) *__Fraction {
 		}
 		return &__Fraction{Num: 0, Den: 1}
 	}
-	n, _ := args[0].(int64)
-	d, _ := args[1].(int64)
+	n, _ := asInt(args[0])
+	d, _ := asInt(args[1])
 	f := &__Fraction{Num: n, Den: d}
 	f.Reduce()
 	return f
@@ -5057,6 +5142,13 @@ func (d *__Decimal) Truediv(o *__Decimal) *__Decimal {
 	}
 	return __gopy_decimal_from(d.V / o.V)
 }
+
+func (d *__Decimal) Eq(o *__Decimal) bool { return d.V == o.V }
+func (d *__Decimal) Ne(o *__Decimal) bool { return d.V != o.V }
+func (d *__Decimal) Lt(o *__Decimal) bool { return d.V < o.V }
+func (d *__Decimal) Le(o *__Decimal) bool { return d.V <= o.V }
+func (d *__Decimal) Gt(o *__Decimal) bool { return d.V > o.V }
+func (d *__Decimal) Ge(o *__Decimal) bool { return d.V >= o.V }
 
 func __gopy_decimal_from(v float64) *__Decimal {
 	return &__Decimal{Repr: strconv.FormatFloat(v, 'f', -1, 64), V: v}
@@ -6476,6 +6568,56 @@ func (p *__Path) Stem() string {
 		}
 	}
 	return name
+}
+
+func (p *__Path) Absolute() *__Path {
+	abs, err := filepath.Abs(p.p)
+	if err != nil {
+		return p
+	}
+	return &__Path{p: abs}
+}
+
+func (p *__Path) Resolve() *__Path {
+	abs, err := filepath.Abs(p.p)
+	if err != nil {
+		return p
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return &__Path{p: resolved}
+	}
+	return &__Path{p: abs}
+}
+
+func (p *__Path) Touch() {
+	f, err := os.OpenFile(p.p, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		panic(err)
+	}
+	_ = f.Close()
+}
+
+func (p *__Path) Is_absolute() bool { return filepath.IsAbs(p.p) }
+
+func (p *__Path) With_suffix(suffix string) *__Path {
+	stem := p.p
+	for i := len(stem) - 1; i >= 0; i-- {
+		if stem[i] == '/' {
+			break
+		}
+		if stem[i] == '.' {
+			return &__Path{p: stem[:i] + suffix}
+		}
+	}
+	return &__Path{p: stem + suffix}
+}
+
+func (p *__Path) With_name(name string) *__Path {
+	dir := p.Parent().p
+	if dir == "" || dir == "." {
+		return &__Path{p: name}
+	}
+	return &__Path{p: dir + "/" + name}
 }`
 
 const helperPathNew = `func __gopy_path_new(s string) *__Path { return &__Path{p: s} }`

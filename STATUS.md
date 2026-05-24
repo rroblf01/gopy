@@ -312,6 +312,13 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - `str.split(sep, maxsplit)` now treats negative maxsplit as unbounded (Python convention: `s.split(",", -1)` returns every part) — wrapping IIFE dispatches to `strings.Split` instead of `SplitN(..., 0)` which would return only `[""]`
 - Chained string method calls infer return types through a wider table: `casefold`, `swapcase`, `title`, `capitalize`, `removeprefix`, `removesuffix`, `expandtabs`, `translate`, `center`/`ljust`/`rjust`/`zfill` all keep TyStr so a subsequent `.upper()` / `.strip()` resolves. Predicates `isdigit`/`isalpha`/`isalnum`/`isspace`/`isupper`/`islower`/`isdecimal`/`isnumeric`/`isidentifier`/`isprintable`/`istitle`/`isascii` carry TyBool. `rfind` / `index` / `rindex` / `count` carry TyInt
 - Nested function definitions returning `tuple[T, U, ...]` now emit Go's multi-return signature (`func(...) (T, U, ...)`) and `a, b = inner()` consumes them directly via Go multi-assign — previously the signature collapsed to `any` and the call site complained `assignment mismatch: 2 variables but inner returns 1 value`. Nested fns also register their signature in `g.funcs` so the rest of the enclosing scope sees the tuple return type
+- `Fraction` / `Decimal` native operator overloading: `+ - * /` between two `Fraction` (or two `Decimal`) values route through the corresponding helper methods, no manual `.Add(...)` calls. Comparison ops `== != < <= > >=` also wired via per-type `Eq/Ne/Lt/Le/Gt/Ge` helpers
+- `re` flag args (`re.IGNORECASE` / `re.MULTILINE` / `re.DOTALL`) translate to Go regexp's embedded `(?i)`, `(?m)`, `(?s)` syntax — pass as the 3rd positional arg to `re.search` / `match` / `findall` / `fullmatch` / `sub` / `subn` / `split` / `compile`. Combined flags OR together (`re.IGNORECASE | re.MULTILINE` works). The other Python flags (VERBOSE / UNICODE / ASCII) accept-but-no-op since Go regexp's syntax differs
+- `re.sub(pattern, repl, string, count, flags)` accepts the 4th positional `count` arg now: 0 (default) replaces every match; non-zero caps the substitution count. `re.subn` likewise honors count and reports the actual number of substitutions
+- `n in range(start[, stop[, step]])` and `n not in range(...)`: range isn't a first-class value but membership is well-defined — compiles to an inline bounds + modulo test. Works for positive and negative steps; out-of-bounds and modulo-mismatched values return `False`
+- `for a, b, c in list[tuple[T0, T1, T2]]:` (heterogeneous tuple unpacking) now lowers via a synthetic `__tup_unpack_N` temp typed as `[]any`. Each per-position access in the body emits a type assertion `__tup_unpack_N[i].(Ti)` so the body sees concrete types instead of `any` (`list[list[T]]` homogeneous shapes still take the existing fast path)
+- `int ** negative_literal` (e.g. `2 ** -3 == 0.125`) now returns a float, matching CPython. At lower time the BinOp's static type promotes to `TyFloat` and codegen routes through `math.Pow` instead of the integer loop
+- `pathlib.Path` extras: `.absolute()`, `.resolve()` (via `filepath.Abs` + `EvalSymlinks`), `.touch()`, `.is_absolute()`, `.with_suffix(".log")`, `.with_name("baz.txt")`
 
 ## Not yet supported
 
@@ -341,7 +348,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`memoryview` / buffer protocol**
 - **Real `complex` arbitrary precision** — backed by Go's `complex128`; very large or precise values lose digits compared to CPython's variable precision
 - **Arbitrary-precision integers** — gopy uses `int64`; values beyond ±9.22e18 overflow silently. CPython's bignum semantics aren't reproduced. Same goes for `decimal.Decimal` (float-backed in gopy)
-- **Fractions** — `fractions.Fraction` exists but `+ - * /` operator overloading isn't wired; call `.Add` / `.Sub` etc. directly
+- ~~**Fractions** — `fractions.Fraction` exists but `+ - * /` operator overloading isn't wired; call `.Add` / `.Sub` etc. directly~~ now wired: `Fraction + Fraction` / `Fraction - Fraction` etc. dispatch through the helper methods, and `== != < <= > >=` route through `Eq/Ne/Lt/Le/Gt/Ge`. Same applies to `Decimal`. Mixed-type forms (`Fraction + int`) still need explicit constructor wrapping
 - **`__pyx_method__`-style C extensions** and any module that imports a `.so`
 - **GIL semantics / thread safety** — generated Go code is goroutine-safe only where the stdlib shim guarantees it (`queue.Queue`, etc.). Plain dicts / lists aren't mutex-protected
 - **`__del__` finalizers** are recognized but Go's GC doesn't guarantee execution order
@@ -365,7 +372,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`del name`** — accepted as no-op (Go scope handles binding removal); `del d[k]` and `del xs[i]` work
 - ~~**Star-expr LHS**~~ `first, *rest = xs` / `*head, last = xs` / `a, *mid, z = xs` all lower via a synthesized temp `__star_unpack_N` evaluated once, then per-position index / slice into it
 - **`for n in <generator_expr>:`** in some shapes where the gen-expr return type can't be inferred — wrap in `list(...)` to force materialization
-- **`5 in range(N)`** — `range` isn't a first-class value, only valid in a `for` head or as `list(range(...))`
+- ~~**`5 in range(N)`**~~ now lowered: emits an inline bounds + modulo check (`__lo <= n < __hi && (n - __lo) % __st == 0`) without materializing the range. Works for `range(N)`, `range(start, stop)`, `range(start, stop, step)` with positive and negative steps
 - **`x is y`** identity on arbitrary objects — only `x is None` / `x is not None` is wired; `id`-comparison for other values returns wrong results
 - **Chained `cmp1 == cmp2 == cmp3` with side-effecting middle term** evaluates the middle twice (Python evaluates once)
 - ~~**Nested format specs**~~ `f"{x:>{width}}"` / `f"{x:.{prec}f}"`: the embedded `{...}` placeholders inside a format spec lower to `fmt.Sprintf`-style `%v` slots whose runtime expansion feeds `__gopy_fmt_spec`
@@ -382,7 +389,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`threading.Lock` / `Condition` / `Event`** beyond the stub registration
 - **`multiprocessing` real fork / IPC**
 - **`subprocess.Popen` streaming stdin/stdout** — `run` / `check_output` are synchronous-only
-- **`re` flags** (`re.IGNORECASE`, `re.MULTILINE`, etc.) — flag args parse but compiled patterns ignore them. Use embedded flag syntax `(?i)` instead
+- ~~**`re` flags** (`re.IGNORECASE`, `re.MULTILINE`, etc.) — flag args parse but compiled patterns ignore them~~ now applied: each Go regexp helper accepts trailing flag args and prefixes the pattern with `(?ims)` as appropriate. `IGNORECASE` / `MULTILINE` / `DOTALL` work; `VERBOSE` / `ASCII` / `UNICODE` accept-but-no-op (Go regexp syntax differs)
 - **`re.compile` returning a reusable pattern with `.match` / `.search` / `.sub` methods** — top-level helpers work, `Pattern` objects don't
 - **`json.JSONEncoder` / `JSONDecoder` subclassing** — registered as stub
 - **`pickle` binary protocol** — JSON-backed; not wire-compatible with CPython
@@ -432,7 +439,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 
 ### Long-tail Python idioms
 
-- **List of N-tuples with N > 2** in for-loop unpacking now lowers for homogeneous shapes (`list[list[T]]`) by synthesizing a `__tup_unpack_K` temp and per-position `Subscript` assigns inside the body. Heterogeneous tuple element types (`list[tuple[str, int, int]]`) still hit a Go-level `any` indexing wall — the annotation lowers to `[]any` and the temp can't be indexed without explicit type asserts
+- **List of N-tuples with N > 2** in for-loop unpacking now lowers for both homogeneous (`list[list[T]]`) and **heterogeneous** (`list[tuple[T0, T1, T2]]`) shapes: the synthesized `__tup_unpack_K` temp is `[]any` and per-position accesses gain type assertions `__tup_unpack_K[i].(Ti)` driven by the IR's per-slot type info so the body sees concrete types
 - **Dict with tuple key** beyond simple `dict[tuple[int, int], V]` — Go's map can't use slice keys, so tuples are converted to string-formatted keys at runtime (lossy if elements contain `,`)
 - **String formatting locale-aware** (`{:n}` type with current locale grouping)
 - **`unicodedata.normalize` NFKD / NFC** — only category lookup is wired

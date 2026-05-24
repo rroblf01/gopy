@@ -3708,6 +3708,28 @@ func (g *gen) expr(e ir.Expr) error {
 			}
 		case lt == "__Path" && x.Op == "/":
 			return g.emitMethodOp(x.L, "Join", x.R)
+		case lt == "__Fraction" && rt == "__Fraction":
+			switch x.Op {
+			case "+":
+				return g.emitMethodOp(x.L, "Add", x.R)
+			case "-":
+				return g.emitMethodOp(x.L, "Sub", x.R)
+			case "*":
+				return g.emitMethodOp(x.L, "Mul", x.R)
+			case "/":
+				return g.emitMethodOp(x.L, "Truediv", x.R)
+			}
+		case lt == "__Decimal" && rt == "__Decimal":
+			switch x.Op {
+			case "+":
+				return g.emitMethodOp(x.L, "Add", x.R)
+			case "-":
+				return g.emitMethodOp(x.L, "Sub", x.R)
+			case "*":
+				return g.emitMethodOp(x.L, "Mul", x.R)
+			case "/":
+				return g.emitMethodOp(x.L, "Truediv", x.R)
+			}
 		}
 		// User-class operator overloading: when L's effective type is a
 		// registered TyNamed class with a matching __op__ method, route
@@ -3734,7 +3756,20 @@ func (g *gen) expr(e ir.Expr) error {
 		if x.Op == "**" {
 			lTy, rTy := x.L.TypeOf(), x.R.TypeOf()
 			isFloat := (lTy != nil && lTy.Kind == ir.TyFloat) || (rTy != nil && rTy.Kind == ir.TyFloat)
-			if isFloat {
+			// Detect a negative-literal exponent on int**int: CPython
+			// returns a float in that case (`2 ** -3 == 0.125`). Route
+			// through math.Pow so the result is float64.
+			negLitExp := false
+			if !isFloat {
+				if lit, ok := x.R.(*ir.IntLit); ok && lit.V < 0 {
+					negLitExp = true
+				} else if u, ok := x.R.(*ir.UnaryOp); ok && u.Op == "-" {
+					if lit, ok := u.X.(*ir.IntLit); ok && lit.V > 0 {
+						negLitExp = true
+					}
+				}
+			}
+			if isFloat || negLitExp {
 				g.addImport("math")
 				g.writef("math.Pow(float64(")
 				if err := g.expr(x.L); err != nil {
@@ -3747,7 +3782,7 @@ func (g *gen) expr(e ir.Expr) error {
 				g.writef("))")
 				return nil
 			}
-			// Int ** int — small loop. Negative exponents fall back to float.
+			// Int ** int (non-negative exp). Small loop keeps result int64.
 			g.writef("func() int64 { __base, __exp := int64(")
 			if err := g.expr(x.L); err != nil {
 				return err
@@ -4050,6 +4085,30 @@ func (g *gen) expr(e ir.Expr) error {
 			if dunder := opDunderName(x.Op); dunder != "" {
 				if fn := g.lookupMethod(lTy.Name, dunder); fn != nil {
 					return g.emitMethodOp(x.L, exportedDunder(dunder), x.R)
+				}
+			}
+		}
+		// Fraction / Decimal tagged-type comparison dispatch.
+		if lTag := g.exprTag(x.L); lTag != "" && (lTag == "__Fraction" || lTag == "__Decimal") {
+			rTag := g.exprTag(x.R)
+			if rTag == lTag {
+				var m string
+				switch x.Op {
+				case "==":
+					m = "Eq"
+				case "!=":
+					m = "Ne"
+				case "<":
+					m = "Lt"
+				case "<=":
+					m = "Le"
+				case ">":
+					m = "Gt"
+				case ">=":
+					m = "Ge"
+				}
+				if m != "" {
+					return g.emitMethodOp(x.L, m, x.R)
 				}
 			}
 		}
@@ -4507,6 +4566,32 @@ func (g *gen) expr(e ir.Expr) error {
 			}
 			g.writef("])")
 			return nil
+		}
+		// Tuple destructure: if the receiver type is a TyTuple (or its
+		// element is `any`) but the IR carries a concrete element type
+		// on the Subscript node, add a type assertion. Handles
+		// `for a, b, c in list[tuple[X, Y, Z]]:` synthesized accesses.
+		if x.Ty != nil && x.Ty.Kind != ir.TyUnknown && x.Ty.Kind != ir.TyAny {
+			vTy := g.effectiveType(x.Value)
+			needAssert := false
+			if vTy != nil && (vTy.Kind == ir.TyTuple || (vTy.Kind == ir.TyList && vTy.Elem != nil && vTy.Elem.Kind == ir.TyAny)) {
+				needAssert = true
+			}
+			if needAssert {
+				assertT := g.goType(x.Ty)
+				if assertT != "" && assertT != "any" {
+					g.writef("(")
+					if err := g.expr(x.Value); err != nil {
+						return err
+					}
+					g.writef("[")
+					if err := g.expr(x.Index); err != nil {
+						return err
+					}
+					g.writef("].(%s))", assertT)
+					return nil
+				}
+			}
 		}
 		if err := g.expr(x.Value); err != nil {
 			return err
@@ -6242,15 +6327,21 @@ var taggedMethodRename = map[string]map[string]string{
 		"span":      "Span",
 	},
 	"__Path": {
-		"exists":     "Exists",
-		"is_file":    "IsFile",
-		"is_dir":     "IsDir",
-		"read_text":  "ReadText",
-		"write_text": "WriteText",
-		"iterdir":    "Iterdir",
-		"mkdir":      "Mkdir",
-		"unlink":     "Unlink",
-		"glob":       "Glob",
+		"exists":      "Exists",
+		"is_file":     "IsFile",
+		"is_dir":      "IsDir",
+		"read_text":   "ReadText",
+		"write_text":  "WriteText",
+		"iterdir":     "Iterdir",
+		"mkdir":       "Mkdir",
+		"unlink":      "Unlink",
+		"glob":        "Glob",
+		"absolute":    "Absolute",
+		"resolve":     "Resolve",
+		"touch":       "Touch",
+		"is_absolute": "Is_absolute",
+		"with_suffix": "With_suffix",
+		"with_name":   "With_name",
 	},
 	"__Datetime": {
 		"year":       "Year",
@@ -6410,6 +6501,12 @@ var taggedMethodRetTag = map[string]map[string]string{
 	},
 	"__Date": {
 		"replace": "__Date",
+	},
+	"__Path": {
+		"absolute":    "__Path",
+		"resolve":     "__Path",
+		"with_suffix": "__Path",
+		"with_name":   "__Path",
 	},
 }
 
@@ -13916,6 +14013,59 @@ func __gopy_fmt_group(s string, sep byte) string {
 func (g *gen) emitInOp(x *ir.CmpOp) error {
 	rt := g.effectiveType(x.R)
 	negate := x.Op == "notin"
+	// `n in range(...)` — range isn't a first-class value but the
+	// membership check is well-defined: it's a bounds check against the
+	// generated [lo, hi) / step sequence. Compute lo/hi/step once and
+	// test `(n - lo) % step == 0 && in-bounds` inline.
+	if call, ok := x.R.(*ir.Call); ok {
+		if name, ok := call.Func.(*ir.Name); ok && name.N == "range" && len(call.Args) >= 1 && len(call.Args) <= 3 {
+			if negate {
+				g.writef("(!")
+			}
+			g.writef("func() bool { __n := int64(")
+			if err := g.expr(x.L); err != nil {
+				return err
+			}
+			g.writef("); __lo, __hi, __st := int64(0), int64(0), int64(1); ")
+			switch len(call.Args) {
+			case 1:
+				g.writef("__hi = int64(")
+				if err := g.expr(call.Args[0]); err != nil {
+					return err
+				}
+				g.writef("); ")
+			case 2:
+				g.writef("__lo = int64(")
+				if err := g.expr(call.Args[0]); err != nil {
+					return err
+				}
+				g.writef("); __hi = int64(")
+				if err := g.expr(call.Args[1]); err != nil {
+					return err
+				}
+				g.writef("); ")
+			case 3:
+				g.writef("__lo = int64(")
+				if err := g.expr(call.Args[0]); err != nil {
+					return err
+				}
+				g.writef("); __hi = int64(")
+				if err := g.expr(call.Args[1]); err != nil {
+					return err
+				}
+				g.writef("); __st = int64(")
+				if err := g.expr(call.Args[2]); err != nil {
+					return err
+				}
+				g.writef("); ")
+			}
+			g.writef("if __st == 0 { return false }; if __st > 0 { if __n < __lo || __n >= __hi { return false } } else { if __n > __lo || __n <= __hi { return false } }; return (__n - __lo) %% __st == 0 }()")
+			if negate {
+				g.writef(")")
+			}
+			return nil
+		}
+	}
 	// User-class `__contains__` dispatch: `needle in container` routes
 	// through `container.Contains(needle)`.
 	if rt != nil && rt.Kind == ir.TyNamed {
@@ -14528,6 +14678,11 @@ func (g *gen) goType(t *ir.Type) string {
 		return ""
 	case ir.TyList:
 		return "[]" + g.goType(t.Elem)
+	case ir.TyTuple:
+		// Tuples lower to []any in Go. The per-position type info is
+		// kept on the Type so destructure code can add assertions, but
+		// the carrier remains a heterogeneous slice.
+		return "[]any"
 	case ir.TyDict:
 		return "map[" + g.goType(t.Key) + "]" + g.goType(t.Val)
 	case ir.TyNamed:

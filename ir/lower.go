@@ -2538,7 +2538,25 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", n.Lineno(), err)
 		}
-		return &BinOp{Op: op, L: l, R: r, Ty: promoteOp(op, l.TypeOf(), r.TypeOf())}, nil
+		ty := promoteOp(op, l.TypeOf(), r.TypeOf())
+		// `int ** negative_literal` returns a float in CPython
+		// (`2 ** -3 == 0.125`). Detect the literal-negative-exponent case
+		// at lower time so the BinOp's static type reads as TyFloat —
+		// otherwise downstream casts would clamp the math.Pow result.
+		if op == "**" && ty != nil && ty.Kind == TyInt {
+			isNegLit := false
+			if lit, ok := r.(*IntLit); ok && lit.V < 0 {
+				isNegLit = true
+			} else if u, ok := r.(*UnaryOp); ok && u.Op == "-" {
+				if lit, ok := u.X.(*IntLit); ok && lit.V > 0 {
+					isNegLit = true
+				}
+			}
+			if isNegLit {
+				ty = &Type{Kind: TyFloat}
+			}
+		}
+		return &BinOp{Op: op, L: l, R: r, Ty: ty}, nil
 	case "Compare":
 		ops := n.Children("ops")
 		comps := n.Children("comparators")
