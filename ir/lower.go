@@ -1613,7 +1613,7 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 				return nil, fmt.Errorf("set[...]: %w", err)
 			}
 			return &Type{Kind: TyList, Elem: elem}, nil
-		case "dict":
+		case "dict", "defaultdict", "OrderedDict", "Counter":
 			sl := n.Child("slice")
 			if sl.Type() != "Tuple" {
 				return nil, fmt.Errorf("dict annotation requires two type args")
@@ -2298,7 +2298,14 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			if err != nil {
 				return nil, err
 			}
-			acc = &BoolOp{Op: op, L: acc, R: r, Ty: &Type{Kind: TyBool}}
+			lt := acc.TypeOf()
+			rt := r.TypeOf()
+			ty := &Type{Kind: TyBool}
+			if lt != nil && rt != nil && lt.Kind == rt.Kind &&
+				lt.Kind != TyBool && lt.Kind != TyUnknown && lt.Kind != TyAny {
+				ty = lt
+			}
+			acc = &BoolOp{Op: op, L: acc, R: r, Ty: ty}
 		}
 		return acc, nil
 	case "UnaryOp":
@@ -2385,8 +2392,23 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 				if len(args) > 0 {
 					if t := args[0].TypeOf(); t != nil && t.Kind == TyList {
 						retTy = &Type{Kind: TyList, Elem: t.Elem}
+					} else if name.N == "list" {
+						// `list(range(N))` and `list(range(a, b))` materialize
+						// an int slice — recognize so downstream `sorted` /
+						// `islice` see a typed list rather than TyUnknown.
+						if call, ok := args[0].(*Call); ok {
+							if inner, ok := call.Func.(*Name); ok && inner.N == "range" {
+								retTy = &Type{Kind: TyList, Elem: &Type{Kind: TyInt}}
+							}
+						}
 					}
 				}
+			case "chr":
+				retTy = &Type{Kind: TyStr}
+			case "ord", "hash", "id":
+				retTy = &Type{Kind: TyInt}
+			case "hex", "oct", "bin", "repr":
+				retTy = &Type{Kind: TyStr}
 			}
 		}
 		return &Call{Func: callee, Args: args, Keywords: kws, Ty: retTy}, nil
@@ -2987,26 +3009,62 @@ func lowerListComp(n parser.Node, sc *scope) (Expr, error) {
 	var extra []CompGen
 	for gi, g := range gens {
 		tgt := g.Child("target")
-		if tgt.Type() != "Name" {
-			return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
-		}
-		iter, err := lowerExpr(g.Child("iter"), innerSc)
-		if err != nil {
-			return nil, err
-		}
-		varName := tgt.Str("id")
+		var varName, varName2 string
+		var iter Expr
 		var elemTy *Type
-		if t := iter.TypeOf(); t != nil {
-			switch t.Kind {
-			case TyList:
-				elemTy = t.Elem
-			case TyDict:
-				elemTy = t.Key
-			case TyStr:
-				elemTy = &Type{Kind: TyStr}
+		if tgt.Type() == "Tuple" {
+			elts := tgt.Children("elts")
+			if len(elts) != 2 || elts[0].Type() != "Name" || elts[1].Type() != "Name" {
+				return nil, fmt.Errorf("line %d: comprehension tuple target must be two names", n.Lineno())
 			}
+			itNode := g.Child("iter")
+			if itNode.Type() != "Call" || itNode.Child("func").Type() != "Attribute" || itNode.Child("func").Str("attr") != "items" {
+				return nil, fmt.Errorf("line %d: comprehension tuple target requires dict.items()", n.Lineno())
+			}
+			d, err := lowerExpr(itNode.Child("func").Child("value"), innerSc)
+			if err != nil {
+				return nil, err
+			}
+			dt := d.TypeOf()
+			if dt == nil || dt.Kind != TyDict {
+				return nil, fmt.Errorf("line %d: .items() must be called on a typed dict", n.Lineno())
+			}
+			varName = elts[0].Str("id")
+			varName2 = elts[1].Str("id")
+			iter = d
+			innerSc.declare(varName, dt.Key)
+			innerSc.declare(varName2, dt.Val)
+		} else {
+			if tgt.Type() != "Name" {
+				return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
+			}
+			it, err := lowerExpr(g.Child("iter"), innerSc)
+			if err != nil {
+				return nil, err
+			}
+			iter = it
+			varName = tgt.Str("id")
+			if t := iter.TypeOf(); t != nil {
+				switch t.Kind {
+				case TyList:
+					elemTy = t.Elem
+				case TyDict:
+					elemTy = t.Key
+				case TyStr:
+					elemTy = &Type{Kind: TyStr}
+				}
+			}
+			// `range(...)` calls don't carry a TyList type but yield ints —
+			// declare the loop var as TyInt so downstream expressions infer.
+			if elemTy == nil {
+				if call, ok := iter.(*Call); ok {
+					if nm, ok := call.Func.(*Name); ok && nm.N == "range" {
+						elemTy = &Type{Kind: TyInt}
+					}
+				}
+			}
+			innerSc.declare(varName, elemTy)
 		}
-		innerSc.declare(varName, elemTy)
 		var cond Expr
 		if ifs := g.Children("ifs"); len(ifs) > 0 {
 			if len(ifs) > 1 {
@@ -3018,7 +3076,7 @@ func lowerListComp(n parser.Node, sc *scope) (Expr, error) {
 			}
 			cond = c
 		}
-		gen := CompGen{Var: varName, Iter: iter, Cond: cond, ElemTy: elemTy}
+		gen := CompGen{Var: varName, Var2: varName2, Iter: iter, Cond: cond, ElemTy: elemTy}
 		if gi == 0 {
 			primary = gen
 		} else {
@@ -3036,6 +3094,7 @@ func lowerListComp(n parser.Node, sc *scope) (Expr, error) {
 	return &ListComp{
 		Elt:    elt,
 		Var:    primary.Var,
+		Var2:   primary.Var2,
 		Iter:   primary.Iter,
 		Cond:   primary.Cond,
 		ElemTy: resultElemTy,
@@ -3055,26 +3114,62 @@ func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
 	var extra []CompGen
 	for gi, g := range gens {
 		tgt := g.Child("target")
-		if tgt.Type() != "Name" {
-			return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
-		}
-		iter, err := lowerExpr(g.Child("iter"), innerSc)
-		if err != nil {
-			return nil, err
-		}
-		varName := tgt.Str("id")
+		var varName, varName2 string
+		var iter Expr
 		var elemTy *Type
-		if t := iter.TypeOf(); t != nil {
-			switch t.Kind {
-			case TyList:
-				elemTy = t.Elem
-			case TyDict:
-				elemTy = t.Key
-			case TyStr:
-				elemTy = &Type{Kind: TyStr}
+		if tgt.Type() == "Tuple" {
+			elts := tgt.Children("elts")
+			if len(elts) != 2 || elts[0].Type() != "Name" || elts[1].Type() != "Name" {
+				return nil, fmt.Errorf("line %d: comprehension tuple target must be two names", n.Lineno())
 			}
+			itNode := g.Child("iter")
+			if itNode.Type() != "Call" || itNode.Child("func").Type() != "Attribute" || itNode.Child("func").Str("attr") != "items" {
+				return nil, fmt.Errorf("line %d: comprehension tuple target requires dict.items()", n.Lineno())
+			}
+			d, err := lowerExpr(itNode.Child("func").Child("value"), innerSc)
+			if err != nil {
+				return nil, err
+			}
+			dt := d.TypeOf()
+			if dt == nil || dt.Kind != TyDict {
+				return nil, fmt.Errorf("line %d: .items() must be called on a typed dict", n.Lineno())
+			}
+			varName = elts[0].Str("id")
+			varName2 = elts[1].Str("id")
+			iter = d
+			innerSc.declare(varName, dt.Key)
+			innerSc.declare(varName2, dt.Val)
+		} else {
+			if tgt.Type() != "Name" {
+				return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
+			}
+			it, err := lowerExpr(g.Child("iter"), innerSc)
+			if err != nil {
+				return nil, err
+			}
+			iter = it
+			varName = tgt.Str("id")
+			if t := iter.TypeOf(); t != nil {
+				switch t.Kind {
+				case TyList:
+					elemTy = t.Elem
+				case TyDict:
+					elemTy = t.Key
+				case TyStr:
+					elemTy = &Type{Kind: TyStr}
+				}
+			}
+			// `range(...)` calls don't carry a TyList type but yield ints —
+			// declare the loop var as TyInt so downstream expressions infer.
+			if elemTy == nil {
+				if call, ok := iter.(*Call); ok {
+					if nm, ok := call.Func.(*Name); ok && nm.N == "range" {
+						elemTy = &Type{Kind: TyInt}
+					}
+				}
+			}
+			innerSc.declare(varName, elemTy)
 		}
-		innerSc.declare(varName, elemTy)
 		var cond Expr
 		if ifs := g.Children("ifs"); len(ifs) > 0 {
 			if len(ifs) > 1 {
@@ -3086,7 +3181,7 @@ func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
 			}
 			cond = c
 		}
-		gen := CompGen{Var: varName, Iter: iter, Cond: cond, ElemTy: elemTy}
+		gen := CompGen{Var: varName, Var2: varName2, Iter: iter, Cond: cond, ElemTy: elemTy}
 		if gi == 0 {
 			primary = gen
 		} else {
@@ -3113,6 +3208,7 @@ func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
 		Key:   key,
 		Val:   val,
 		Var:   primary.Var,
+		Var2:  primary.Var2,
 		Iter:  primary.Iter,
 		Cond:  primary.Cond,
 		KeyTy: kt,
@@ -3294,8 +3390,18 @@ func lowerMatchClassPattern(p parser.Node, sc *scope) (*MatchClassPat, error) {
 		return nil, fmt.Errorf("match class pattern: class must be a bare Name")
 	}
 	out := &MatchClassPat{ClassName: cls.Str("id")}
-	if pos := p.Children("patterns"); len(pos) > 0 {
-		return nil, fmt.Errorf("match class pattern: positional captures not supported (use keyword form: Class(field=value))")
+	for _, pp := range p.Children("patterns") {
+		switch pp.Type() {
+		case "MatchAs":
+			// `case Class(x)` — bare capture; inner pattern must be absent.
+			if pp.Child("pattern") != nil {
+				return nil, fmt.Errorf("match class pattern: only bare-name positional captures supported")
+			}
+			name := pp.Str("name")
+			out.PosCaptures = append(out.PosCaptures, name)
+		default:
+			return nil, fmt.Errorf("match class pattern: positional pattern %q not supported", pp.Type())
+		}
 	}
 	attrs := p["kwd_attrs"]
 	rawAttrs, _ := attrs.([]any)
@@ -3696,6 +3802,33 @@ func lowerForTuple(n parser.Node, sc *scope, v1, v2 string, iter parser.Node) (S
 				return nil, err
 			}
 			return &ForEach{Var: v1, Var2: v2, Iter: d, Kind: "dict", Body: body}, nil
+		}
+	}
+	// Fallback: iterate a list of 2-tuples by destructuring each element.
+	iterE, err := lowerExpr(iter, sc)
+	if err == nil {
+		if t := iterE.TypeOf(); t != nil && t.Kind == TyList && t.Elem != nil {
+			elemTy := t.Elem
+			var t0, t1 *Type
+			if elemTy.Kind == TyTuple && len(elemTy.Tuple) == 2 {
+				t0 = elemTy.Tuple[0]
+				t1 = elemTy.Tuple[1]
+			} else if elemTy.Kind == TyList {
+				// Homogeneous tuple (lowered to a list): both binds share
+				// the inner element type.
+				t0 = elemTy.Elem
+				t1 = elemTy.Elem
+			}
+			if t0 != nil && t1 != nil {
+				loopSc := &scope{vars: copyVars(sc.vars)}
+				loopSc.declare(v1, t0)
+				loopSc.declare(v2, t1)
+				body, berr := lowerBody(n.Children("body"), loopSc)
+				if berr != nil {
+					return nil, berr
+				}
+				return &ForEach{Var: v1, Var2: v2, Iter: iterE, ElemTy: elemTy, Kind: "tuple_list", Body: body}, nil
+			}
 		}
 	}
 	return nil, fmt.Errorf("line %d: two-name for-loop requires enumerate(xs), zip(a, b), or dict.items()", n.Lineno())

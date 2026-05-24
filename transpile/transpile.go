@@ -1628,6 +1628,15 @@ const helperGopyBool = `func __gopy_bool(v any) bool {
 	case string:
 		return len(x) > 0
 	}
+	rv := reflect.ValueOf(v)
+	if rv.IsValid() {
+		switch rv.Kind() {
+		case reflect.Slice, reflect.Array, reflect.Map, reflect.String:
+			return rv.Len() > 0
+		case reflect.Ptr, reflect.Interface, reflect.Chan, reflect.Func:
+			return !rv.IsNil()
+		}
+	}
 	return true
 }`
 
@@ -2200,6 +2209,9 @@ func (g *gen) matchStmt(m *ir.Match) error {
 				if len(cp.KwdAttrs) > 0 {
 					return fmt.Errorf("match class pattern: %s() takes no field patterns", primitive)
 				}
+				if len(cp.PosCaptures) > 0 {
+					return fmt.Errorf("match class pattern: %s() takes no positional captures", primitive)
+				}
 			} else {
 				g.writef("if __cm, __cmok := any(__subj).(*%s); __cmok", cp.ClassName)
 				for j, attr := range cp.KwdAttrs {
@@ -2220,6 +2232,27 @@ func (g *gen) matchStmt(m *ir.Match) error {
 			g.indent++
 			g.writeIndent()
 			g.writef("_ = __cm\n")
+			// Positional captures bind by declaration order: Class(x, y) →
+			// x := __cm.Field0; y := __cm.Field1.
+			if len(cp.PosCaptures) > 0 {
+				cls, ok := g.classes[cp.ClassName]
+				if !ok {
+					return fmt.Errorf("match class pattern: unknown class %q", cp.ClassName)
+				}
+				if len(cp.PosCaptures) > len(cls.Fields) {
+					return fmt.Errorf("match class pattern: %s has %d fields, got %d positional captures", cp.ClassName, len(cls.Fields), len(cp.PosCaptures))
+				}
+				for j, name := range cp.PosCaptures {
+					if name == "" || name == "_" {
+						continue
+					}
+					field := cls.Fields[j]
+					g.writeIndent()
+					g.writef("%s := __cm.%s\n", name, field.Name)
+					g.writeIndent()
+					g.writef("_ = %s\n", name)
+				}
+			}
 			if mc.Capture != "" {
 				g.writeIndent()
 				g.writef("%s := __cm\n", mc.Capture)
@@ -2689,6 +2722,71 @@ func (g *gen) forEach(x *ir.ForEach) error {
 		if x.Var2 != "_" {
 			g.writeIndent()
 			g.writef("_ = %s\n", x.Var2)
+		}
+		g.indent--
+		return g.forEachBody(x)
+	case "tuple_list":
+		// `for a, b in pairs` where pairs is list[tuple[T0, T1]] (or
+		// list[list[T]] for homogeneous tuples). Each element is a slice
+		// of length 2; type-assertions recover the static types when
+		// the slice is heterogeneous []any.
+		g.writeIndent()
+		g.writef("for _, __tp := range ")
+		if err := g.expr(x.Iter); err != nil {
+			return err
+		}
+		g.writef(" {\n")
+		g.indent++
+		var t0, t1 *ir.Type
+		needAssert := false
+		if x.ElemTy != nil {
+			switch x.ElemTy.Kind {
+			case ir.TyTuple:
+				if len(x.ElemTy.Tuple) == 2 {
+					t0 = x.ElemTy.Tuple[0]
+					t1 = x.ElemTy.Tuple[1]
+					needAssert = true
+				}
+			case ir.TyList:
+				// Homogeneous: __tp is a typed []T, no assertion needed.
+				t0 = x.ElemTy.Elem
+				t1 = x.ElemTy.Elem
+			}
+		}
+		// Iter element type may be `any` (heterogeneous tuples in []any).
+		// In that case we must coerce __tp to []any before indexing.
+		iterTy := g.effectiveType(x.Iter)
+		needSliceAssert := false
+		if iterTy != nil && iterTy.Kind == ir.TyList && iterTy.Elem != nil {
+			elemGo := g.goType(iterTy.Elem)
+			if elemGo == "any" || elemGo == "" {
+				needSliceAssert = true
+			}
+		}
+		if needSliceAssert {
+			g.writeIndent()
+			g.writef("__tps := __tp.([]any)\n")
+		}
+		idxBase := "__tp"
+		if needSliceAssert {
+			idxBase = "__tps"
+		}
+		emitAssign := func(name string, idx int, t *ir.Type) {
+			gt := g.goType(t)
+			g.writeIndent()
+			if needAssert && gt != "" && gt != "any" {
+				g.writef("%s := %s[%d].(%s)\n", name, idxBase, idx, gt)
+			} else {
+				g.writef("%s := %s[%d]\n", name, idxBase, idx)
+			}
+			g.writeIndent()
+			g.writef("_ = %s\n", name)
+		}
+		if x.Var != "_" {
+			emitAssign(x.Var, 0, t0)
+		}
+		if x.Var2 != "_" {
+			emitAssign(x.Var2, 1, t1)
 		}
 		g.indent--
 		return g.forEachBody(x)
@@ -3229,9 +3327,40 @@ func (g *gen) expr(e ir.Expr) error {
 		if op == "//" {
 			if x.L.TypeOf() != nil && x.L.TypeOf().Kind == ir.TyInt &&
 				x.R.TypeOf() != nil && x.R.TypeOf().Kind == ir.TyInt {
-				op = "/"
-			} else {
-				return fmt.Errorf("// on non-int operands not supported")
+				// Python's `//` is floor division — result rounds toward
+				// negative infinity. Go's `/` truncates toward zero, so
+				// (-10 // 3) emits -3 instead of -4. Wrap in an IIFE that
+				// adjusts when remainder is non-zero and signs differ.
+				g.writef("func() int64 { __a := int64(")
+				if err := g.expr(x.L); err != nil {
+					return err
+				}
+				g.writef("); __b := int64(")
+				if err := g.expr(x.R); err != nil {
+					return err
+				}
+				g.writef("); __q := __a / __b; if (__a %% __b != 0) && ((__a < 0) != (__b < 0)) { __q -= 1 }; return __q }()")
+				return nil
+			}
+			return fmt.Errorf("// on non-int operands not supported")
+		}
+		if op == "%" {
+			// Python's `%` is floor modulo — result has the sign of the
+			// divisor. Go's `%` returns the sign of the dividend. Apply
+			// the same correction as floor division on int operands; str
+			// formatting falls through to the existing `%` handler below.
+			lTy, rTy := x.L.TypeOf(), x.R.TypeOf()
+			if lTy != nil && rTy != nil && lTy.Kind == ir.TyInt && rTy.Kind == ir.TyInt {
+				g.writef("func() int64 { __a := int64(")
+				if err := g.expr(x.L); err != nil {
+					return err
+				}
+				g.writef("); __b := int64(")
+				if err := g.expr(x.R); err != nil {
+					return err
+				}
+				g.writef("); __r := __a %% __b; if __r != 0 && ((__r < 0) != (__b < 0)) { __r += __b }; return __r }()")
+				return nil
 			}
 		}
 		// True division: Python's `/` always returns float. Go's `/` on
@@ -3298,6 +3427,35 @@ func (g *gen) expr(e ir.Expr) error {
 				}
 			}
 		}
+		// Sequence / map equality: Go forbids `==` on slices and maps, but
+		// Python compares element-wise. Route through reflect.DeepEqual.
+		if x.Op == "==" || x.Op == "!=" {
+			lTy := g.effectiveType(x.L)
+			rTy := g.effectiveType(x.R)
+			needDeep := false
+			if lTy != nil && (lTy.Kind == ir.TyList || lTy.Kind == ir.TyDict) {
+				needDeep = true
+			}
+			if rTy != nil && (rTy.Kind == ir.TyList || rTy.Kind == ir.TyDict) {
+				needDeep = true
+			}
+			if needDeep {
+				g.addImport("reflect")
+				if x.Op == "!=" {
+					g.writef("!")
+				}
+				g.writef("reflect.DeepEqual(")
+				if err := g.expr(x.L); err != nil {
+					return err
+				}
+				g.writef(", ")
+				if err := g.expr(x.R); err != nil {
+					return err
+				}
+				g.writef(")")
+				return nil
+			}
+		}
 		g.writef("(")
 		if err := g.expr(x.L); err != nil {
 			return err
@@ -3308,16 +3466,46 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		g.writef(")")
 	case *ir.BoolOp:
+		// Non-bool operand types: Python returns the value (not bool), so
+		// emit IIFE that picks first truthy (`or`) / first falsy (`and`).
+		if x.Ty != nil && x.Ty.Kind != ir.TyBool && x.Ty.Kind != ir.TyUnknown {
+			goT := g.goType(x.Ty)
+			var truthy string
+			switch x.Ty.Kind {
+			case ir.TyStr, ir.TyList, ir.TyDict:
+				truthy = "len(__l) > 0"
+			case ir.TyInt, ir.TyFloat:
+				truthy = "__l != 0"
+			default:
+				truthy = "__l != nil"
+			}
+			g.writef("func() %s { __l := ", goT)
+			if err := g.expr(x.L); err != nil {
+				return err
+			}
+			g.writef("; if ")
+			if x.Op == "and" {
+				g.writef("!(%s)", truthy)
+			} else {
+				g.writef("%s", truthy)
+			}
+			g.writef(" { return __l }; return ")
+			if err := g.expr(x.R); err != nil {
+				return err
+			}
+			g.writef(" }()")
+			return nil
+		}
 		op := "&&"
 		if x.Op == "or" {
 			op = "||"
 		}
 		g.writef("(")
-		if err := g.expr(x.L); err != nil {
+		if err := g.boolExpr(x.L); err != nil {
 			return err
 		}
 		g.writef(" %s ", op)
-		if err := g.expr(x.R); err != nil {
+		if err := g.boolExpr(x.R); err != nil {
 			return err
 		}
 		g.writef(")")
@@ -3857,7 +4045,42 @@ func (g *gen) listComp(c *ir.ListComp) error {
 	g.indent++
 	g.writeIndent()
 	g.writef("__out := []%s{}\n", elem)
-	openLoop := func(varName string, cond ir.Expr, iter ir.Expr) error {
+	openLoop := func(varName, varName2 string, cond ir.Expr, iter ir.Expr) error {
+		if varName2 != "" {
+			g.writeIndent()
+			g.writef("for %s, %s := range ", varName, varName2)
+			if err := g.expr(iter); err != nil {
+				return err
+			}
+			g.writef(" {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("_ = %s\n", varName)
+			g.writeIndent()
+			g.writef("_ = %s\n", varName2)
+			if cond != nil {
+				pre, cond2 := ir.HoistNamedExprs(cond)
+				for _, ps := range pre {
+					if err := g.stmt(ps); err != nil {
+						return err
+					}
+				}
+				cond = cond2
+				g.writeIndent()
+				g.writef("if !(")
+				if err := g.expr(cond); err != nil {
+					return err
+				}
+				g.writef(") {\n")
+				g.indent++
+				g.writeIndent()
+				g.writef("continue\n")
+				g.indent--
+				g.writeIndent()
+				g.writef("}\n")
+			}
+			return nil
+		}
 		if call, ok := iter.(*ir.Call); ok {
 			if n, ok := call.Func.(*ir.Name); ok && n.N == "range" && len(call.Args) >= 1 && len(call.Args) <= 3 {
 				g.writeIndent()
@@ -3936,7 +4159,7 @@ func (g *gen) listComp(c *ir.ListComp) error {
 			cond = cond2
 			g.writeIndent()
 			g.writef("if !(")
-			if err := g.expr(cond); err != nil {
+			if err := g.boolExpr(cond); err != nil {
 				return err
 			}
 			g.writef(") {\n")
@@ -3949,11 +4172,11 @@ func (g *gen) listComp(c *ir.ListComp) error {
 		}
 		return nil
 	}
-	if err := openLoop(c.Var, c.Cond, c.Iter); err != nil {
+	if err := openLoop(c.Var, c.Var2, c.Cond, c.Iter); err != nil {
 		return err
 	}
 	for _, gn := range c.Extra {
-		if err := openLoop(gn.Var, gn.Cond, gn.Iter); err != nil {
+		if err := openLoop(gn.Var, gn.Var2, gn.Cond, gn.Iter); err != nil {
 			return err
 		}
 	}
@@ -4000,7 +4223,35 @@ func (g *gen) dictComp(c *ir.DictComp) error {
 	g.indent++
 	g.writeIndent()
 	g.writef("__out := map[%s]%s{}\n", kt, vt)
-	openLoop := func(varName string, cond ir.Expr, iter ir.Expr) error {
+	openLoop := func(varName, varName2 string, cond ir.Expr, iter ir.Expr) error {
+		if varName2 != "" {
+			g.writeIndent()
+			g.writef("for %s, %s := range ", varName, varName2)
+			if err := g.expr(iter); err != nil {
+				return err
+			}
+			g.writef(" {\n")
+			g.indent++
+			g.writeIndent()
+			g.writef("_ = %s\n", varName)
+			g.writeIndent()
+			g.writef("_ = %s\n", varName2)
+			if cond != nil {
+				g.writeIndent()
+				g.writef("if !(")
+				if err := g.expr(cond); err != nil {
+					return err
+				}
+				g.writef(") {\n")
+				g.indent++
+				g.writeIndent()
+				g.writef("continue\n")
+				g.indent--
+				g.writeIndent()
+				g.writef("}\n")
+			}
+			return nil
+		}
 		if call, ok := iter.(*ir.Call); ok {
 			if n, ok := call.Func.(*ir.Name); ok && n.N == "range" && len(call.Args) >= 1 && len(call.Args) <= 3 {
 				g.writeIndent()
@@ -4038,9 +4289,16 @@ func (g *gen) dictComp(c *ir.DictComp) error {
 				}
 				g.indent++
 				if cond != nil {
+					pre, cond2 := ir.HoistNamedExprs(cond)
+					for _, ps := range pre {
+						if err := g.stmt(ps); err != nil {
+							return err
+						}
+					}
+					cond = cond2
 					g.writeIndent()
 					g.writef("if !(")
-					if err := g.expr(cond); err != nil {
+					if err := g.boolExpr(cond); err != nil {
 						return err
 					}
 					g.writef(") {\n")
@@ -4067,9 +4325,16 @@ func (g *gen) dictComp(c *ir.DictComp) error {
 		g.writef(" {\n")
 		g.indent++
 		if cond != nil {
+			pre, cond2 := ir.HoistNamedExprs(cond)
+			for _, ps := range pre {
+				if err := g.stmt(ps); err != nil {
+					return err
+				}
+			}
+			cond = cond2
 			g.writeIndent()
 			g.writef("if !(")
-			if err := g.expr(cond); err != nil {
+			if err := g.boolExpr(cond); err != nil {
 				return err
 			}
 			g.writef(") {\n")
@@ -4082,21 +4347,34 @@ func (g *gen) dictComp(c *ir.DictComp) error {
 		}
 		return nil
 	}
-	if err := openLoop(c.Var, c.Cond, c.Iter); err != nil {
+	if err := openLoop(c.Var, c.Var2, c.Cond, c.Iter); err != nil {
 		return err
 	}
 	for _, gn := range c.Extra {
-		if err := openLoop(gn.Var, gn.Cond, gn.Iter); err != nil {
+		if err := openLoop(gn.Var, gn.Var2, gn.Cond, gn.Iter); err != nil {
+			return err
+		}
+	}
+	// Walrus in key/val expressions: hoist before the assignment.
+	preK, keyE := ir.HoistNamedExprs(c.Key)
+	for _, ps := range preK {
+		if err := g.stmt(ps); err != nil {
+			return err
+		}
+	}
+	preV, valE := ir.HoistNamedExprs(c.Val)
+	for _, ps := range preV {
+		if err := g.stmt(ps); err != nil {
 			return err
 		}
 	}
 	g.writeIndent()
 	g.writef("__out[")
-	if err := g.expr(c.Key); err != nil {
+	if err := g.expr(keyE); err != nil {
 		return err
 	}
 	g.writef("] = ")
-	if err := g.expr(c.Val); err != nil {
+	if err := g.expr(valE); err != nil {
 		return err
 	}
 	g.writef("\n")
@@ -4492,6 +4770,33 @@ func (g *gen) call(c *ir.Call) error {
 			} else {
 				g.writef("\"\\n\"")
 			}
+			// Detect `print(*args)` — single star-unpack arg can spread
+			// directly into __gopy_print's variadic. Mixed positional+star
+			// forms aren't supported (require runtime append, not worth it).
+			if len(c.Args) == 1 {
+				if st, ok := c.Args[0].(*ir.Starred); ok {
+					g.writef(", ")
+					at := g.effectiveType(st.Value)
+					goElem := ""
+					if at != nil && at.Kind == ir.TyList {
+						goElem = g.goType(at.Elem)
+					}
+					if goElem == "any" || goElem == "" {
+						if err := g.expr(st.Value); err != nil {
+							return err
+						}
+						g.writef("...")
+					} else {
+						g.writef("func() []any { __as := ")
+						if err := g.expr(st.Value); err != nil {
+							return err
+						}
+						g.writef("; __out := make([]any, len(__as)); for __i, __v := range __as { __out[__i] = __v }; return __out }()...")
+					}
+					g.writef(")")
+					return nil
+				}
+			}
 			for _, a := range c.Args {
 				g.writef(", ")
 				if err := g.boxedExpr(a); err != nil {
@@ -4539,6 +4844,16 @@ func (g *gen) call(c *ir.Call) error {
 					return nil
 				}
 			}
+			// str(True) / str(False) → "True" / "False" to match CPython
+			// (Go's fmt.Sprintf("%v", true) → "true").
+			if t := c.Args[0].TypeOf(); t != nil && t.Kind == ir.TyBool {
+				g.writef("func() string { if ")
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(" { return \"True\" }; return \"False\" }()")
+				return nil
+			}
 			g.addImport("fmt")
 			g.writef("fmt.Sprintf(\"%%v\", ")
 			if err := g.expr(c.Args[0]); err != nil {
@@ -4551,18 +4866,47 @@ func (g *gen) call(c *ir.Call) error {
 				return fmt.Errorf("int() takes 1 or 2 arguments")
 			}
 			// `int(s, base)` — only valid when s is a string; parse with
-			// strconv.ParseInt and the supplied base.
+			// strconv.ParseInt and the supplied base. Strip Python-style
+			// 0x/0o/0b prefixes since Go's strconv rejects them when base
+			// is non-zero.
 			if len(c.Args) == 2 {
 				g.addImport("strconv")
-				g.writef("func() int64 { __n, _ := strconv.ParseInt(")
+				g.addImport("strings")
+				g.writef("func() int64 {\n")
+				g.indent++
+				g.writeIndent()
+				g.writef("__s := ")
 				if err := g.expr(c.Args[0]); err != nil {
 					return err
 				}
-				g.writef(", int(")
+				g.writef("\n")
+				g.writeIndent()
+				g.writef("__base := int(")
 				if err := g.expr(c.Args[1]); err != nil {
 					return err
 				}
-				g.writef("), 64); return __n }()")
+				g.writef(")\n")
+				g.writeIndent()
+				g.writef("__lo := strings.ToLower(__s)\n")
+				g.writeIndent()
+				g.writef("__neg := false\n")
+				g.writeIndent()
+				g.writef("if strings.HasPrefix(__lo, \"-\") { __neg = true; __lo = __lo[1:]; __s = __s[1:] }\n")
+				g.writeIndent()
+				g.writef("if __base == 16 && strings.HasPrefix(__lo, \"0x\") { __s = __s[2:] }\n")
+				g.writeIndent()
+				g.writef("if __base == 8 && strings.HasPrefix(__lo, \"0o\") { __s = __s[2:] }\n")
+				g.writeIndent()
+				g.writef("if __base == 2 && strings.HasPrefix(__lo, \"0b\") { __s = __s[2:] }\n")
+				g.writeIndent()
+				g.writef("__n, _ := strconv.ParseInt(__s, __base, 64)\n")
+				g.writeIndent()
+				g.writef("if __neg { __n = -__n }\n")
+				g.writeIndent()
+				g.writef("return __n\n")
+				g.indent--
+				g.writeIndent()
+				g.writef("}()")
 				return nil
 			}
 			// `int(obj)` → `obj.Int()` when user class has `__int__`.
@@ -4591,6 +4935,15 @@ func (g *gen) call(c *ir.Call) error {
 						return err
 					}
 					g.writef("); return int64(__f) }()")
+					return nil
+				}
+				if t.Kind == ir.TyBool {
+					// Go forbids `int64(true)`; route through a small IIFE.
+					g.writef("func() int64 { if ")
+					if err := g.expr(c.Args[0]); err != nil {
+						return err
+					}
+					g.writef(" { return 1 }; return 0 }()")
 					return nil
 				}
 				g.writef("int64(")
@@ -4652,7 +5005,20 @@ func (g *gen) call(c *ir.Call) error {
 				g.writef(") > 0)")
 				return nil
 			}
+			if t != nil && t.Kind == ir.TyDict {
+				g.writef("(len(")
+				if err := g.expr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(") > 0)")
+				return nil
+			}
+			if t != nil && t.Kind == ir.TyNone {
+				g.writef("false")
+				return nil
+			}
 			// Fallback: route through a helper.
+			g.addImport("reflect")
 			g.helpers["__gopy_bool"] = helperGopyBool
 			g.writef("__gopy_bool(")
 			if err := g.boxedExpr(c.Args[0]); err != nil {
@@ -6153,8 +6519,8 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			g.writef("}()")
 			return nil
 		case "index":
-			if len(m.Args) != 1 {
-				return fmt.Errorf("list.index() takes 1 argument")
+			if len(m.Args) < 1 || len(m.Args) > 3 {
+				return fmt.Errorf("list.index() takes 1 to 3 arguments")
 			}
 			elemGo := g.goType(rt.Elem)
 			g.needsException = true
@@ -6173,7 +6539,35 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			}
 			g.writef("\n")
 			g.writeIndent()
-			g.writef("for __i, __v := range __src { if __v == __target { return int64(__i) } }\n")
+			g.writef("__start := int64(0)\n")
+			g.writeIndent()
+			g.writef("__stop := int64(len(__src))\n")
+			if len(m.Args) >= 2 {
+				g.writeIndent()
+				g.writef("__start = ")
+				if err := g.expr(m.Args[1]); err != nil {
+					return err
+				}
+				g.writef("\n")
+			}
+			if len(m.Args) >= 3 {
+				g.writeIndent()
+				g.writef("__stop = ")
+				if err := g.expr(m.Args[2]); err != nil {
+					return err
+				}
+				g.writef("\n")
+			}
+			g.writeIndent()
+			g.writef("if __start < 0 { __start += int64(len(__src)) }\n")
+			g.writeIndent()
+			g.writef("if __stop < 0 { __stop += int64(len(__src)) }\n")
+			g.writeIndent()
+			g.writef("if __start < 0 { __start = 0 }\n")
+			g.writeIndent()
+			g.writef("if __stop > int64(len(__src)) { __stop = int64(len(__src)) }\n")
+			g.writeIndent()
+			g.writef("for __i := __start; __i < __stop; __i++ { if __src[__i] == __target { return __i } }\n")
 			g.writeIndent()
 			g.writef("panic(NewException(\"ValueError: not in list\"))\n")
 			g.indent--
@@ -6759,6 +7153,61 @@ func (g *gen) boolExpr(e ir.Expr) error {
 				g.writef("%s == nil", n.N)
 				return nil
 			}
+			if t := g.effectiveType(x.X); t != nil {
+				switch t.Kind {
+				case ir.TyStr, ir.TyList, ir.TyDict:
+					g.writef("len(")
+					if err := g.expr(x.X); err != nil {
+						return err
+					}
+					g.writef(") == 0")
+					return nil
+				case ir.TyInt, ir.TyFloat:
+					g.writef("(")
+					if err := g.expr(x.X); err != nil {
+						return err
+					}
+					g.writef(" == 0)")
+					return nil
+				case ir.TyNamed:
+					if fn := g.lookupMethod(t.Name, "__bool__"); fn != nil {
+						_ = fn
+						g.writef("!")
+						if err := g.expr(x.X); err != nil {
+							return err
+						}
+						g.writef(".Bool()")
+						return nil
+					}
+				}
+			}
+		}
+	}
+	if t := g.effectiveType(e); t != nil {
+		switch t.Kind {
+		case ir.TyStr, ir.TyList, ir.TyDict:
+			g.writef("len(")
+			if err := g.expr(e); err != nil {
+				return err
+			}
+			g.writef(") > 0")
+			return nil
+		case ir.TyInt, ir.TyFloat:
+			g.writef("(")
+			if err := g.expr(e); err != nil {
+				return err
+			}
+			g.writef(" != 0)")
+			return nil
+		case ir.TyNamed:
+			if fn := g.lookupMethod(t.Name, "__bool__"); fn != nil {
+				_ = fn
+				if err := g.expr(e); err != nil {
+					return err
+				}
+				g.writef(".Bool()")
+				return nil
+			}
 		}
 	}
 	return g.expr(e)
@@ -7022,6 +7471,7 @@ func (g *gen) builtinFilter(c *ir.Call) error {
 // builtinDivmod returns Python's (quotient, remainder) pair as a
 // two-element slice. Both args must be int — float divmod yields
 // different semantics (floor-div semantics) and is not yet supported.
+// Uses Python's floor-div / floor-mod semantics so divmod(-10, 3) → [-4, 2].
 func (g *gen) builtinDivmod(c *ir.Call) error {
 	if len(c.Args) != 2 || len(c.Keywords) != 0 {
 		return fmt.Errorf("divmod() takes two positional arguments")
@@ -7045,7 +7495,13 @@ func (g *gen) builtinDivmod(c *ir.Call) error {
 	}
 	g.writef("\n")
 	g.writeIndent()
-	g.writef("return []int64{__a / __b, __a %% __b}\n")
+	g.writef("__q := __a / __b\n")
+	g.writeIndent()
+	g.writef("__r := __a %% __b\n")
+	g.writeIndent()
+	g.writef("if __r != 0 && ((__r < 0) != (__b < 0)) { __q -= 1; __r += __b }\n")
+	g.writeIndent()
+	g.writef("return []int64{__q, __r}\n")
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")
@@ -7054,10 +7510,56 @@ func (g *gen) builtinDivmod(c *ir.Call) error {
 
 // builtinPow lowers `pow(a, b)` to integer/float exponentiation. Float
 // arguments route through math.Pow; integer arguments use a loop that
-// keeps the result as int64 (matching Python's int**int → int).
+// keeps the result as int64 (matching Python's int**int → int). The
+// 3-arg form `pow(a, b, m)` returns `(a**b) mod m` using modular
+// exponentiation to stay within int64 range.
 func (g *gen) builtinPow(c *ir.Call) error {
-	if len(c.Args) != 2 || len(c.Keywords) != 0 {
-		return fmt.Errorf("pow() takes two positional arguments")
+	if len(c.Keywords) != 0 || (len(c.Args) != 2 && len(c.Args) != 3) {
+		return fmt.Errorf("pow() takes 2 or 3 positional arguments")
+	}
+	if len(c.Args) == 3 {
+		g.writef("func() int64 {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("var __b int64 = ")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("var __e int64 = ")
+		if err := g.expr(c.Args[1]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("var __m int64 = ")
+		if err := g.expr(c.Args[2]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("var __r int64 = 1 %% __m\n")
+		g.writeIndent()
+		g.writef("__b = __b %% __m\n")
+		g.writeIndent()
+		g.writef("for __e > 0 {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("if __e & 1 == 1 { __r = (__r * __b) %% __m }\n")
+		g.writeIndent()
+		g.writef("__e >>= 1\n")
+		g.writeIndent()
+		g.writef("__b = (__b * __b) %% __m\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+		g.writeIndent()
+		g.writef("return __r\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()")
+		return nil
 	}
 	at := c.Args[0].TypeOf()
 	bt := c.Args[1].TypeOf()
@@ -7634,6 +8136,19 @@ func (g *gen) builtinCallable(c *ir.Call) error {
 			return nil
 		}
 		if _, isCls := g.classes[n.N]; isCls {
+			g.writef("true")
+			return nil
+		}
+		// Builtin function names are callable; Go can't reference them as
+		// values, so short-circuit here.
+		switch n.N {
+		case "print", "len", "str", "int", "float", "bool", "list", "dict",
+			"set", "tuple", "frozenset", "range", "sorted", "reversed",
+			"sum", "min", "max", "any", "all", "abs", "round", "pow",
+			"divmod", "chr", "ord", "hex", "oct", "bin", "repr", "type",
+			"isinstance", "issubclass", "getattr", "setattr", "hasattr",
+			"hash", "id", "iter", "next", "callable", "ascii", "vars", "dir",
+			"map", "filter", "zip", "enumerate", "open", "input":
 			g.writef("true")
 			return nil
 		}
@@ -10830,16 +11345,25 @@ func (g *gen) builtinReduce(c *ir.Call, kind string) error {
 	// `min(xs, key=lambda x: ...)` / `max(...)` re-lower the lambda body with
 	// the iterable's element type and pick the element with the min/max key.
 	var keyLam *ir.Lambda
+	var keyBareName string
+	var defaultExpr ir.Expr
 	for _, kw := range c.Keywords {
 		if (kind == "min" || kind == "max") && kw.Name == "key" {
-			lam, ok := kw.Value.(*ir.Lambda)
-			if !ok {
-				return fmt.Errorf("%s(key=...): only inline lambda supported", kind)
+			if lam, ok := kw.Value.(*ir.Lambda); ok {
+				if len(lam.Params) != 1 {
+					return fmt.Errorf("%s(key=...): lambda must take one argument", kind)
+				}
+				keyLam = lam
+				continue
 			}
-			if len(lam.Params) != 1 {
-				return fmt.Errorf("%s(key=...): lambda must take one argument", kind)
+			if n, ok := kw.Value.(*ir.Name); ok {
+				keyBareName = n.N
+				continue
 			}
-			keyLam = lam
+			return fmt.Errorf("%s(key=...): only inline lambda or bare name supported", kind)
+		} else if (kind == "min" || kind == "max") && kw.Name == "default" {
+			defaultExpr = kw.Value
+			continue
 		} else {
 			return fmt.Errorf("%s(): keyword arguments not supported", kind)
 		}
@@ -10867,6 +11391,60 @@ func (g *gen) builtinReduce(c *ir.Call, kind string) error {
 		return fmt.Errorf("%s(): %w", kind, err)
 	}
 	elemGo := g.goType(elem)
+	if keyBareName != "" && (kind == "min" || kind == "max") {
+		var keyExpr, keyGo string
+		switch keyBareName {
+		case "len":
+			keyExpr = "int64(len(%s))"
+			keyGo = "int64"
+		case "abs":
+			if elem != nil && elem.Kind == ir.TyFloat {
+				g.addImport("math")
+				keyExpr = "math.Abs(%s)"
+				keyGo = "float64"
+			} else {
+				keyExpr = "func() int64 { __x := %s; if __x < 0 { return -__x }; return __x }()"
+				keyGo = "int64"
+			}
+		default:
+			return fmt.Errorf("%s(key=%s): bare-name key not supported (use lambda)", kind, keyBareName)
+		}
+		op := "<"
+		if kind == "max" {
+			op = ">"
+		}
+		g.writef("func() %s {\n", elemGo)
+		g.indent++
+		g.writeIndent()
+		g.writef("__src := ")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("if len(__src) == 0 { panic(NewException(\"%s() of empty sequence\")) }\n", kind)
+		g.needsException = true
+		g.writeIndent()
+		g.writef("var __best %s = __src[0]\n", elemGo)
+		g.writeIndent()
+		g.writef("var __bestK %s = "+keyExpr+"\n", keyGo, "__best")
+		g.writeIndent()
+		g.writef("for __i := 1; __i < len(__src); __i++ {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("__k := "+keyExpr+"\n", "__src[__i]")
+		g.writeIndent()
+		g.writef("if __k %s __bestK { __bestK = __k; __best = __src[__i] }\n", op)
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+		g.writeIndent()
+		g.writef("return __best\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()")
+		return nil
+	}
 	if keyLam != nil && (kind == "min" || kind == "max") {
 		body, err := ir.LowerLambdaBody(keyLam, []*ir.Type{elem})
 		if err != nil {
@@ -10954,8 +11532,16 @@ func (g *gen) builtinReduce(c *ir.Call, kind string) error {
 	}
 	switch kind {
 	case "any":
+		// Empty/`any`-typed slice: assert each element to bool so Go's
+		// type-check accepts the !/condition use.
+		if elem == nil || elem.Kind == ir.TyAny || elem.Kind == ir.TyUnknown {
+			return emit("bool", "__acc := false", "_ = __i; if __v.(bool) { __acc = true; break }")
+		}
 		return emit("bool", "__acc := false", "_ = __i; if __v { __acc = true; break }")
 	case "all":
+		if elem == nil || elem.Kind == ir.TyAny || elem.Kind == ir.TyUnknown {
+			return emit("bool", "__acc := true", "_ = __i; if !__v.(bool) { __acc = false; break }")
+		}
 		return emit("bool", "__acc := true", "_ = __i; if !__v { __acc = false; break }")
 	case "sum":
 		if elem.Kind != ir.TyInt && elem.Kind != ir.TyFloat {
@@ -10967,11 +11553,86 @@ func (g *gen) builtinReduce(c *ir.Call, kind string) error {
 		}
 		return emit(elemGo, fmt.Sprintf("var __acc %s = %s", elemGo, zero), "_ = __i; __acc += __v")
 	case "min":
+		if defaultExpr != nil {
+			return g.builtinMinMaxDefault(c, "min", elem, defaultExpr)
+		}
 		return emit(elemGo, "var __acc "+elemGo, "if __i == 0 || __v < __acc { __acc = __v }")
 	case "max":
+		if defaultExpr != nil {
+			return g.builtinMinMaxDefault(c, "max", elem, defaultExpr)
+		}
 		return emit(elemGo, "var __acc "+elemGo, "if __i == 0 || __v > __acc { __acc = __v }")
 	}
 	return fmt.Errorf("unknown reduction %q", kind)
+}
+
+// builtinMinMaxDefault emits min/max with the `default=` kwarg. When the
+// source is empty, returns the default; otherwise loops normally.
+func (g *gen) builtinMinMaxDefault(c *ir.Call, kind string, elem *ir.Type, def ir.Expr) error {
+	elemGo := g.goType(elem)
+	if elemGo == "" {
+		elemGo = "any"
+	}
+	retGo := elemGo
+	if elem == nil || elem.Kind == ir.TyAny || elem.Kind == ir.TyUnknown {
+		// Untyped source (typically `min([], default=...)`). Drop the loop
+		// entirely — empty source returns the default; non-empty `any` can
+		// be added when needed.
+		g.writef("func() any {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("__src := ")
+		if err := g.expr(c.Args[0]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("if len(__src) == 0 { return ")
+		if err := g.boxedExpr(def); err != nil {
+			return err
+		}
+		g.writef(" }\n")
+		g.writeIndent()
+		g.writef("return __src[0]\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()")
+		return nil
+	}
+	op := "<"
+	if kind == "max" {
+		op = ">"
+	}
+	g.writef("func() %s {\n", retGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("if len(__src) == 0 { return ")
+	if err := g.expr(def); err != nil {
+		return err
+	}
+	g.writef(" }\n")
+	g.writeIndent()
+	g.writef("var __acc %s = __src[0]\n", retGo)
+	g.writeIndent()
+	g.writef("for __i := 1; __i < len(__src); __i++ {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("if __src[__i] %s __acc { __acc = __src[__i] }\n", op)
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("return __acc\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
 }
 
 // listElemTypeOf extracts the element type from a list-typed expression,
@@ -11092,6 +11753,48 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef(")")
 		return true, nil
+	case "rsplit":
+		g.addImport("strings")
+		if len(m.Args) == 0 {
+			// bare rsplit collapses whitespace (same as split when there's
+			// no maxsplit bound).
+			g.writef("strings.Fields(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(")")
+			return true, nil
+		}
+		if len(m.Args) == 1 {
+			g.writef("strings.Split(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(", ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return true, err
+			}
+			g.writef(")")
+			return true, nil
+		}
+		if len(m.Args) == 2 {
+			g.helpers["__gopy_str_rsplit"] = helperStrRsplit
+			g.writef("__gopy_str_rsplit(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(", ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return true, err
+			}
+			g.writef(", int(")
+			if err := g.expr(m.Args[1]); err != nil {
+				return true, err
+			}
+			g.writef("))")
+			return true, nil
+		}
+		return true, fmt.Errorf("str.rsplit() takes 0 to 2 arguments")
 	case "partition", "rpartition":
 		if len(m.Args) != 1 {
 			return true, fmt.Errorf("str.%s() takes 1 argument", m.Method)
@@ -11130,10 +11833,30 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		g.writef(")")
 		return true, nil
 	case "replace":
-		if len(m.Args) != 2 {
-			return true, fmt.Errorf("str.replace() takes (old, new)")
+		if len(m.Args) != 2 && len(m.Args) != 3 {
+			return true, fmt.Errorf("str.replace() takes (old, new[, count])")
 		}
 		g.addImport("strings")
+		if len(m.Args) == 3 {
+			g.writef("strings.Replace(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(", ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return true, err
+			}
+			g.writef(", ")
+			if err := g.expr(m.Args[1]); err != nil {
+				return true, err
+			}
+			g.writef(", int(")
+			if err := g.expr(m.Args[2]); err != nil {
+				return true, err
+			}
+			g.writef("))")
+			return true, nil
+		}
 		g.writef("strings.ReplaceAll(")
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
@@ -11214,36 +11937,140 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		g.writef(")")
 		return true, nil
 	case "find":
-		if len(m.Args) != 1 {
-			return true, fmt.Errorf("str.find() takes one argument")
+		if len(m.Args) < 1 || len(m.Args) > 3 {
+			return true, fmt.Errorf("str.find() takes 1 to 3 arguments")
 		}
 		g.addImport("strings")
-		// Both Python's str.find and Go's strings.Index return -1 when
-		// the substring isn't present, so the int64 cast is enough.
-		g.writef("int64(strings.Index(")
+		if len(m.Args) == 1 {
+			g.writef("int64(strings.Index(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(", ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return true, err
+			}
+			g.writef("))")
+			return true, nil
+		}
+		// start/stop: search within slice; return -1 if not found, else
+		// the absolute index in the original string.
+		g.writef("func() int64 {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("__s := ")
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
 		}
-		g.writef(", ")
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("__sub := ")
 		if err := g.expr(m.Args[0]); err != nil {
 			return true, err
 		}
-		g.writef("))")
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("__start := int(")
+		if err := g.expr(m.Args[1]); err != nil {
+			return true, err
+		}
+		g.writef(")\n")
+		g.writeIndent()
+		g.writef("__stop := len(__s)\n")
+		if len(m.Args) == 3 {
+			g.writeIndent()
+			g.writef("__stop = int(")
+			if err := g.expr(m.Args[2]); err != nil {
+				return true, err
+			}
+			g.writef(")\n")
+		}
+		g.writeIndent()
+		g.writef("if __start < 0 { __start += len(__s) }\n")
+		g.writeIndent()
+		g.writef("if __stop < 0 { __stop += len(__s) }\n")
+		g.writeIndent()
+		g.writef("if __start < 0 { __start = 0 }\n")
+		g.writeIndent()
+		g.writef("if __stop > len(__s) { __stop = len(__s) }\n")
+		g.writeIndent()
+		g.writef("if __start >= __stop { return -1 }\n")
+		g.writeIndent()
+		g.writef("__i := strings.Index(__s[__start:__stop], __sub)\n")
+		g.writeIndent()
+		g.writef("if __i < 0 { return -1 }\n")
+		g.writeIndent()
+		g.writef("return int64(__start + __i)\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()")
 		return true, nil
 	case "rfind":
-		if len(m.Args) != 1 {
-			return true, fmt.Errorf("str.rfind() takes one argument")
+		if len(m.Args) < 1 || len(m.Args) > 3 {
+			return true, fmt.Errorf("str.rfind() takes 1 to 3 arguments")
 		}
 		g.addImport("strings")
-		g.writef("int64(strings.LastIndex(")
+		if len(m.Args) == 1 {
+			g.writef("int64(strings.LastIndex(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef(", ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return true, err
+			}
+			g.writef("))")
+			return true, nil
+		}
+		g.writef("func() int64 {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("__s := ")
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
 		}
-		g.writef(", ")
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("__sub := ")
 		if err := g.expr(m.Args[0]); err != nil {
 			return true, err
 		}
-		g.writef("))")
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("__start := int(")
+		if err := g.expr(m.Args[1]); err != nil {
+			return true, err
+		}
+		g.writef(")\n")
+		g.writeIndent()
+		g.writef("__stop := len(__s)\n")
+		if len(m.Args) == 3 {
+			g.writeIndent()
+			g.writef("__stop = int(")
+			if err := g.expr(m.Args[2]); err != nil {
+				return true, err
+			}
+			g.writef(")\n")
+		}
+		g.writeIndent()
+		g.writef("if __start < 0 { __start += len(__s) }\n")
+		g.writeIndent()
+		g.writef("if __stop < 0 { __stop += len(__s) }\n")
+		g.writeIndent()
+		g.writef("if __start < 0 { __start = 0 }\n")
+		g.writeIndent()
+		g.writef("if __stop > len(__s) { __stop = len(__s) }\n")
+		g.writeIndent()
+		g.writef("if __start >= __stop { return -1 }\n")
+		g.writeIndent()
+		g.writef("__i := strings.LastIndex(__s[__start:__stop], __sub)\n")
+		g.writeIndent()
+		g.writef("if __i < 0 { return -1 }\n")
+		g.writeIndent()
+		g.writef("return int64(__start + __i)\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()")
 		return true, nil
 	case "index":
 		// Python raises ValueError on miss; we route through a helper
@@ -11290,15 +12117,31 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		return true, nil
 	case "format":
-		// Positional-only `{}` placeholder support. Indexed `{0}` and
-		// named `{name}` substitutions are not yet implemented.
+		// Bare `{}`, indexed `{0}`, and named `{name}` substitutions all
+		// route through __gopy_str_format. Kwargs travel as a map[string]any.
 		g.addImport("strings")
 		g.addImport("fmt")
+		g.addImport("reflect")
+		g.addImport("strconv")
 		g.helpers["__gopy_str_format"] = helperStrFormat
+		g.helpers["__gopy_repr"] = helperGopyRepr
 		g.writef("__gopy_str_format(")
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
 		}
+		g.writef(", map[string]any{")
+		first := true
+		for _, kw := range m.Keywords {
+			if !first {
+				g.writef(", ")
+			}
+			first = false
+			g.writef("%q: ", kw.Name)
+			if err := g.boxedExpr(kw.Value); err != nil {
+				return true, err
+			}
+		}
+		g.writef("}")
 		for _, a := range m.Args {
 			g.writef(", ")
 			if err := g.boxedExpr(a); err != nil {
@@ -11827,6 +12670,26 @@ const helperStrSplitlines = `func __gopy_str_splitlines(s string) []string {
 	return out
 }`
 
+// helperStrRsplit mirrors Python's str.rsplit(sep, maxsplit): splits from
+// the right side, producing at most maxsplit+1 parts. When maxsplit is
+// negative, splits exhaustively.
+const helperStrRsplit = `func __gopy_str_rsplit(s, sep string, maxsplit int) []string {
+	if maxsplit < 0 {
+		return strings.Split(s, sep)
+	}
+	parts := []string{}
+	for maxsplit > 0 {
+		i := strings.LastIndex(s, sep)
+		if i < 0 {
+			break
+		}
+		parts = append([]string{s[i+len(sep):]}, parts...)
+		s = s[:i]
+		maxsplit--
+	}
+	return append([]string{s}, parts...)
+}`
+
 // helperStrPartition mirrors Python's str.partition: returns the head,
 // separator, and tail. When sep is absent, head=s, sep="", tail="".
 const helperStrPartition = `func __gopy_str_partition(s, sep string) []string {
@@ -11845,7 +12708,7 @@ const helperStrRpartition = `func __gopy_str_rpartition(s, sep string) []string 
 	return []string{s[:i], sep, s[i+len(sep):]}
 }`
 
-const helperStrFormat = `func __gopy_str_format(s string, args ...any) string {
+const helperStrFormat = `func __gopy_str_format(s string, kw map[string]any, args ...any) string {
 	var b strings.Builder
 	argi := 0
 	i := 0
@@ -11879,12 +12742,60 @@ const helperStrFormat = `func __gopy_str_format(s string, args ...any) string {
 				}
 			}
 			fspec := ""
+			nameOrIdx := spec
 			if colon >= 0 {
+				nameOrIdx = spec[:colon]
 				fspec = spec[colon+1:]
 			}
-			if argi < len(args) {
-				b.WriteString(__gopy_fmt_spec(fspec, args[argi]))
-				argi++
+			conv := byte(0)
+			if bang := strings.Index(nameOrIdx, "!"); bang >= 0 {
+				if bang+1 < len(nameOrIdx) {
+					conv = nameOrIdx[bang+1]
+				}
+				nameOrIdx = nameOrIdx[:bang]
+			}
+			var v any
+			have := false
+			if nameOrIdx == "" {
+				if argi < len(args) {
+					v = args[argi]
+					argi++
+					have = true
+				}
+			} else {
+				allDigit := len(nameOrIdx) > 0
+				for k := 0; k < len(nameOrIdx); k++ {
+					if nameOrIdx[k] < '0' || nameOrIdx[k] > '9' {
+						allDigit = false
+						break
+					}
+				}
+				if allDigit {
+					idx := 0
+					for k := 0; k < len(nameOrIdx); k++ {
+						idx = idx*10 + int(nameOrIdx[k]-'0')
+					}
+					if idx < len(args) {
+						v = args[idx]
+						have = true
+					}
+				} else if kw != nil {
+					if got, ok := kw[nameOrIdx]; ok {
+						v = got
+						have = true
+					}
+				}
+			}
+			if have {
+				switch conv {
+				case 'r':
+					v = __gopy_repr(v)
+				case 's':
+					v = fmt.Sprint(v)
+				case 'a':
+					v = __gopy_repr(v)
+				}
+				b.WriteString(__gopy_fmt_spec(fspec, v))
 			}
 			i = j + 1
 			continue
@@ -11936,6 +12847,11 @@ func __gopy_fmt_spec(spec string, v any) string {
 		width = width*10 + int(spec[i]-'0')
 		i++
 	}
+	grouping := byte(0)
+	if i < n && (spec[i] == ',' || spec[i] == '_') {
+		grouping = spec[i]
+		i++
+	}
 	if i < n && spec[i] == '.' {
 		i++
 		prec = 0
@@ -11946,6 +12862,26 @@ func __gopy_fmt_spec(spec string, v any) string {
 	}
 	if i < n {
 		typeCh = spec[i]
+	}
+	if typeCh == '%' {
+		// Percent: multiply by 100, format as f with trailing %.
+		f := 0.0
+		switch x := v.(type) {
+		case int:
+			f = float64(x)
+		case int32:
+			f = float64(x)
+		case int64:
+			f = float64(x)
+		case float32:
+			f = float64(x)
+		case float64:
+			f = x
+		}
+		if prec < 0 {
+			prec = 6
+		}
+		return fmt.Sprintf("%."+strconv.Itoa(prec)+"f%%", f*100)
 	}
 	// Coerce v based on the requested type so Go's fmt doesn't reject it.
 	switch typeCh {
@@ -12031,6 +12967,26 @@ func __gopy_fmt_spec(spec string, v any) string {
 	}
 	sb.WriteByte(verb)
 	out := fmt.Sprintf(sb.String(), v)
+	if grouping != 0 {
+		out = __gopy_fmt_group(out, grouping)
+		// Re-pad to width after grouping insertion.
+		if len(out) < width {
+			pad := width - len(out)
+			padCh := byte(' ')
+			if zero {
+				padCh = '0'
+			}
+			if align == '^' {
+				left := pad / 2
+				right := pad - left
+				return strings.Repeat(string(padCh), left) + out + strings.Repeat(string(padCh), right)
+			}
+			if align == '<' {
+				return out + strings.Repeat(string(padCh), pad)
+			}
+			return strings.Repeat(string(padCh), pad) + out
+		}
+	}
 	if align == '^' && len(out) < width {
 		pad := width - len(out)
 		left := pad / 2
@@ -12045,6 +13001,38 @@ func __gopy_fmt_spec(spec string, v any) string {
 		return strings.Repeat(string(fill), pad) + out
 	}
 	return out
+}
+
+func __gopy_fmt_group(s string, sep byte) string {
+	dot := strings.Index(s, ".")
+	left := s
+	right := ""
+	if dot >= 0 {
+		left = s[:dot]
+		right = s[dot:]
+	}
+	signCh := ""
+	if strings.HasPrefix(left, "-") || strings.HasPrefix(left, "+") {
+		signCh = string(left[0])
+		left = left[1:]
+	}
+	// Skip leading 0x / 0o / 0b prefixes if present.
+	prefix := ""
+	if strings.HasPrefix(left, "0x") || strings.HasPrefix(left, "0X") ||
+		strings.HasPrefix(left, "0o") || strings.HasPrefix(left, "0O") ||
+		strings.HasPrefix(left, "0b") || strings.HasPrefix(left, "0B") {
+		prefix = left[:2]
+		left = left[2:]
+	}
+	var out strings.Builder
+	n := len(left)
+	for i, c := range left {
+		if i > 0 && (n-i)%3 == 0 {
+			out.WriteByte(sep)
+		}
+		out.WriteRune(c)
+	}
+	return signCh + prefix + out.String() + right
 }`
 
 // emitInOp emits Python's `in` / `not in` operators. The right operand's
@@ -12495,6 +13483,10 @@ func (g *gen) callReturnsSlice(e ir.Expr) bool {
 		n, ok := x.Func.(*ir.Name)
 		if !ok {
 			return false
+		}
+		// Builtins that emit a 2-elem slice for tuple destructure.
+		if n.N == "divmod" {
+			return true
 		}
 		p, hit := g.aliases[n.N]
 		if !hit {

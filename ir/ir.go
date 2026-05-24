@@ -329,11 +329,12 @@ type MatchCase struct {
 }
 
 // MatchClassPat captures a `case ClassName(kw=pat, ...)` arm. Positional
-// captures aren't supported yet; only literal kwd patterns.
+// captures (`Class(a, b)`) bind names to fields by declaration order.
 type MatchClassPat struct {
-	ClassName string
-	KwdAttrs  []string
-	KwdValues []Expr
+	ClassName   string
+	KwdAttrs    []string
+	KwdValues   []Expr
+	PosCaptures []string // empty string entries = wildcard at that position
 }
 
 // MatchSeqPat captures `case [v1, v2, ...]:` — sequence match.
@@ -562,6 +563,7 @@ type DictLit struct {
 type ListComp struct {
 	Elt    Expr
 	Var    string
+	Var2   string // when set, target is two-name tuple unpack over dict.items()
 	Iter   Expr
 	Cond   Expr // optional filter
 	ElemTy *Type
@@ -574,6 +576,7 @@ type ListComp struct {
 // CompGen is one `for V in ITER [if COND]` clause inside a comprehension.
 type CompGen struct {
 	Var    string
+	Var2   string
 	Iter   Expr
 	Cond   Expr
 	ElemTy *Type
@@ -585,6 +588,7 @@ type DictComp struct {
 	Key   Expr
 	Val   Expr
 	Var   string
+	Var2  string
 	Iter  Expr
 	Cond  Expr
 	KeyTy *Type
