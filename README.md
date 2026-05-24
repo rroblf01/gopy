@@ -314,7 +314,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 
 #### Object model
 
-- **Custom decorators** (`@my_wrapper`) and decorators with arguments (`@cache(maxsize=128)`) — only built-in `@staticmethod` / `@classmethod` / `@property` and a few stdlib pass-throughs (`@lru_cache`, `@dataclass`, `@final`, `@override`, `@deprecated`) are recognized
+- **Custom decorators with arguments** (`@cache(maxsize=128)` / `@route("/path")`) and attribute-form decorators (`@mod.attr`) outside the recognized list — bare-name user decorators (`@my_wrap`) are accepted as identity passthroughs (the decorator body is not invoked), but parametrized / dotted decorators are still rejected at lower time
 - **Virtual dispatch via inheritance**: an overridden method called from a base-class method dispatches to the base, not the subclass. Go struct embedding doesn't support late-binding. Workaround: route through an explicit interface or call the override directly
 - **Multiple inheritance with C3 linearization** beyond the simple two-base case; diamond conflicts already error out at transpile time
 - **Metaclasses** (`class Foo(metaclass=Meta):`) — accepted with a warning but the metaclass body never runs
@@ -455,7 +455,7 @@ For a Python file to transpile cleanly, it must obey the following rules:
 4. **Exceptions** must derive from `Exception` and accept a `msg: str` in `__init__` if you want `str(e)` to round-trip across Python and Go.
 5. **Multi-file projects**: place every `.py` in a single directory. `from sibling import name` is dropped at lowering time — names resolve via Go's shared package namespace.
 6. **Stdlib imports**: only the modules listed under *Supported* are recognized. `import sys` / `import os` / `import time` are accepted; anything else falls through and produces an undefined-name error.
-7. **No `return` inside a `try` block** — the IIFE wrapper would only return from the wrapper, not the enclosing function.
+7. ~~No `return` inside a `try` block~~ — supported as of the try-return trap. `return` inside `try` / `except` / `finally` ferries the value out of the IIFE wrapper through generated `__try_retval_N` / `__try_ret_N` locals and re-returns from the enclosing function after the deferred recover/finally unwind.
 8. **`with open(...)` per block**: variables declared inside a `with` block are scoped to that block (IIFE). If you need a value after the block, do the work inside the same block, or read into a variable declared before the `with`.
 
 ## Installation
@@ -487,6 +487,23 @@ Flags:
 - `-pkg <name>` — Go package name (default: `main`)
 - `-dumper <path>` — explicit path to `scripts/py_ast_dump.py` (auto-located by default)
 - `-python <path>` — Python interpreter to invoke (default: `./.venv/bin/python3` / `./venv/bin/python3` if present, else `python3` on `PATH`). Honors `GOPY_PYTHON`.
+
+### Build a single binary in one step
+
+```bash
+go run ./cmd/gopy build -o fib tests/fixtures/fib.py
+./fib
+```
+
+The `build` subcommand transpiles the input into a temp directory, drops a minimal `go.mod`, and runs `go build` to produce a native executable. Pass `-keep` to retain the intermediate Go source dir for inspection.
+
+### Watch and rebuild on change
+
+```bash
+go run ./cmd/gopy watch -o fib -interval 500ms tests/fixtures/fib.py
+```
+
+The `watch` subcommand polls the input mtime (no fsnotify dep) and re-runs `gopy build` whenever it changes. Build failures print to stderr and the loop keeps running so a transient bad save doesn't kill the watcher.
 
 ### Transpile a whole directory
 
@@ -585,16 +602,16 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] Generator expressions `(expr for x in xs)` (materialized eagerly)
 - [x] Walrus operator (`:=`) inside `if` / `while` conditions
 - [x] `match`/`case` statement (literal + `|` + `_` + guards; structural patterns deferred)
-- [ ] `async def` / `await` / `async for` / `async with`
-- [ ] Custom decorators (user-written `@wrap`) and decorators with arguments (`@route("/path")`)
-- [ ] Decorators on class methods other than the built-in three
+- [x] `async def` / `await` / `async for` / `async with` — gopy strips the async layer (sync semantics). `async for` lowers to the same range-over-iterable as `for`; `async with` accepts `__aenter__` / `__aexit__` as aliases of the sync pair. Real concurrency still requires hand-written goroutines
+- [x] Custom name-form decorators (user-written `@wrap`) on free functions and methods — accepted as identity passthroughs. The decorator body is not executed, so semantics that depend on it (caching, logging, retry) won't be reproduced. Decorators with arguments (`@cache(maxsize=128)` / `@route("/path")`) and attribute-form decorators (`@mod.attr`) outside the recognized list are still rejected
+- [x] Decorators on class methods (any name) — same passthrough treatment as free-function decorators
 - [x] Inner / nested function definitions with closure capture
 - [x] Lambda expressions (specialized inside `map` / `filter` / `sorted(key=...)`)
 - [ ] Lambdas as first-class values (closures with full type inference)
 - [x] Module-level `name = expr` / `name: T = expr` declarations (emit as Go package-scope vars)
 - [x] `global` declaration inside functions (writes route to the package var, no shadow); `nonlocal` accepted (best-effort scope binding)
 - [ ] Class methods that return new instances of the class without forward-reference annotations
-- [ ] Allow `return` inside `try` blocks (currently scoped to the IIFE wrapper)
+- [x] `return` inside `try` / `except` / `finally` blocks — when any return is present, the IIFE wrapper stages the value into local `__try_retval_N` / `__try_ret_N` and the enclosing function re-returns after the deferred finally / recover unwind
 
 ### Dynamic features
 
@@ -719,13 +736,13 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 
 ### Tooling and infrastructure
 
-- [ ] Single-shot CLI that takes a `.py` and writes a built binary (`gopy build script.py -o script`)
+- [x] Single-shot CLI that takes a `.py` and writes a built binary (`gopy build script.py -o script`) — transpiles into a temp directory, drops a minimal `go.mod`, and runs `go build` to produce a native executable in one step
 - [ ] Project mode: detect `pyproject.toml` / `requirements.txt` and produce a Go module + go.sum
-- [ ] Watch mode (`gopy watch src/`) that rebuilds on change
+- [x] Watch mode (`gopy watch [-interval 500ms] input.py`) — polls the input mtime and re-runs `gopy build` on each change. Build failures land on stderr; the watcher keeps going so a bad save doesn't kill the loop
 - [ ] Source maps / line directives so panic stacks reference the Python source
 - [ ] LSP / editor diagnostics: report unsupported features at edit time
 - [ ] Stricter transpile errors with caret pointers at the unsupported construct
-- [ ] CI workflow in this repo (GitHub Actions) running the fixture suite
+- [x] CI workflow in this repo (GitHub Actions) running the fixture suite on `ubuntu-latest` + `macos-latest`
 - [ ] Continuous benchmarks dashboard so regressions surface in PRs
 
 ### Codegen quality

@@ -275,9 +275,18 @@ func (g *gen) scanStmtsForException(ss []ir.Stmt) {
 	for _, s := range ss {
 		switch x := s.(type) {
 		case *ir.Try:
+			// Any except handler that names a builtin exception (or its
+			// alias chain) collapses to *Exception in codegen, so the
+			// runtime type must be present in the output.
 			for _, h := range x.Handlers {
-				if h.ClassName == "Exception" {
-					g.needsException = true
+				names := h.ClassNames
+				if len(names) == 0 && h.ClassName != "" {
+					names = []string{h.ClassName}
+				}
+				for _, name := range names {
+					if isBuiltinExceptionName(name) {
+						g.needsException = true
+					}
 				}
 			}
 			g.scanStmtsForException(x.Body)
@@ -285,6 +294,7 @@ func (g *gen) scanStmtsForException(ss []ir.Stmt) {
 				g.scanStmtsForException(h.Body)
 			}
 			g.scanStmtsForException(x.Finally)
+			g.scanStmtsForException(x.OrElse)
 		case *ir.Raise:
 			if c, ok := x.Exc.(*ir.Call); ok {
 				if n, ok := c.Func.(*ir.Name); ok && n.N == "Exception" {
@@ -443,6 +453,25 @@ type gen struct {
 	// reassignment) rather than `name := expr` (which would shadow with
 	// a local). Populated up-front from the IR.
 	globals map[string]*ir.Type
+	// tryReturnStack is a stack of "return-trap" contexts pushed by g.try
+	// when the body / handlers / finally contain a `return`. Each entry
+	// carries the local var names used to ferry the return value (and a
+	// boolean flag) out of the IIFE so the enclosing function can return
+	// the value after the IIFE unwinds. Nested function literals clear and
+	// restore the stack so their own returns aren't trapped.
+	tryReturnStack []*tryReturnCtx
+	tryReturnCount int
+}
+
+// tryReturnCtx records the locals a `try` IIFE writes to so the enclosing
+// function can propagate the return after the IIFE completes (and after any
+// `defer`-bound finally / recover runs). retType is the enclosing function's
+// declared return type — when nil, the function is void and only the flag is
+// needed.
+type tryReturnCtx struct {
+	retvalVar string
+	flagVar   string
+	retType   *ir.Type
 }
 
 func (g *gen) writef(f string, a ...any) { fmt.Fprintf(&g.body, f, a...) }
@@ -626,6 +655,8 @@ func (g *gen) fn(fn *ir.Func) error {
 	g.varTypes = map[string]string{}
 	prevLocal := g.localVarTypes
 	g.localVarTypes = map[string]*ir.Type{}
+	prevTryStack := g.tryReturnStack
+	g.tryReturnStack = nil
 	// Seed function parameters so attribute access on them dispatches
 	// against the right class without needing assignment-side inference.
 	for _, p := range fn.Params {
@@ -640,6 +671,7 @@ func (g *gen) fn(fn *ir.Func) error {
 		g.varTypes = prevVars
 		g.localVarTypes = prevLocal
 		g.currentFn = prevFn
+		g.tryReturnStack = prevTryStack
 	}()
 	if fn.IsGenerator {
 		return g.generatorFn(fn)
@@ -740,9 +772,30 @@ func (g *gen) fn(fn *ir.Func) error {
 		g.writeIndent()
 		g.writef("%s", "panic(NewException(\"NotImplementedError: abstract method "+fn.Name+"\"))\n")
 	}
+	// When the function body ends with a `try` whose paths all return
+	// (so the user wrote no fallback statement), Go's flow analysis
+	// can't see through our IIFE wrapper and complains "missing return".
+	// Emit a synthetic `panic` after the if-trap check so the build
+	// succeeds; in practice the panic is unreachable because every
+	// path through the user's try set the trap flag.
+	if fn.Ret != nil && fn.Ret.Kind != ir.TyNone && fn.Ret.Kind != ir.TyUnknown {
+		if last := lastStmt(fn.Body); last != nil {
+			if t, ok := last.(*ir.Try); ok && tryContainsReturn(t) {
+				g.writeIndent()
+				g.writef("panic(\"gopy: try fell through without returning\")\n")
+			}
+		}
+	}
 	g.indent--
 	g.writef("}\n")
 	return nil
+}
+
+func lastStmt(stmts []ir.Stmt) ir.Stmt {
+	if len(stmts) == 0 {
+		return nil
+	}
+	return stmts[len(stmts)-1]
 }
 
 // generatorFn lowers a Python generator (function with yield) to a Go
@@ -1101,6 +1154,32 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("\n")
 		return nil
 	case *ir.Return:
+		// `return` inside a `try` body / handler / finally: we're emitting
+		// the try IIFE, so a bare Go `return` would only exit the IIFE.
+		// The active tryReturnCtx ferries the value out via shared locals
+		// (set retvalVar = X; flagVar = true; return). After the IIFE
+		// unwinds the enclosing function re-checks the flag and re-returns.
+		if len(g.tryReturnStack) > 0 {
+			ctx := g.tryReturnStack[len(g.tryReturnStack)-1]
+			if x.X == nil || ctx.retvalVar == "" {
+				g.writeIndent()
+				g.writef("%s = true\n", ctx.flagVar)
+				g.writeIndent()
+				g.writef("return\n")
+				return nil
+			}
+			g.writeIndent()
+			g.writef("%s = ", ctx.retvalVar)
+			if err := g.expr(x.X); err != nil {
+				return err
+			}
+			g.writef("\n")
+			g.writeIndent()
+			g.writef("%s = true\n", ctx.flagVar)
+			g.writeIndent()
+			g.writef("return\n")
+			return nil
+		}
 		g.writeIndent()
 		if x.X == nil {
 			g.writef("return\n")
@@ -1997,8 +2076,18 @@ func (g *gen) withCM(w *ir.WithCM) error {
 	}
 	enter := g.lookupMethod(t.Name, "__enter__")
 	exit := g.lookupMethod(t.Name, "__exit__")
+	// Accept the async-context-manager dunders as aliases of the sync
+	// pair. gopy strips async semantics elsewhere (await collapses to
+	// the value), so __aenter__ / __aexit__ behave identically to their
+	// sync counterparts here.
+	if enter == nil {
+		enter = g.lookupMethod(t.Name, "__aenter__")
+	}
+	if exit == nil {
+		exit = g.lookupMethod(t.Name, "__aexit__")
+	}
 	if enter == nil || exit == nil {
-		return fmt.Errorf("with: class %s must define both __enter__ and __exit__", t.Name)
+		return fmt.Errorf("with: class %s must define both __enter__/__aenter__ and __exit__/__aexit__", t.Name)
 	}
 	g.writeIndent()
 	g.writef("func() {\n")
@@ -2465,7 +2554,118 @@ func isBuiltinExceptionName(name string) bool {
 	return false
 }
 
+// stmtsContainReturn reports whether any *ir.Return is reachable inside the
+// given statement slice without crossing into a nested function literal /
+// generator. Used by g.try to decide whether to wrap the IIFE with the
+// return-trap variables.
+func stmtsContainReturn(stmts []ir.Stmt) bool {
+	for _, s := range stmts {
+		if stmtContainsReturn(s) {
+			return true
+		}
+	}
+	return false
+}
+
+func stmtContainsReturn(s ir.Stmt) bool {
+	switch x := s.(type) {
+	case *ir.Return:
+		return true
+	case *ir.If:
+		if stmtsContainReturn(x.Then) || stmtsContainReturn(x.Else) {
+			return true
+		}
+	case *ir.While:
+		if stmtsContainReturn(x.Body) || stmtsContainReturn(x.OrElse) {
+			return true
+		}
+	case *ir.ForRange:
+		if stmtsContainReturn(x.Body) || stmtsContainReturn(x.OrElse) {
+			return true
+		}
+	case *ir.ForEach:
+		if stmtsContainReturn(x.Body) || stmtsContainReturn(x.OrElse) {
+			return true
+		}
+	case *ir.Try:
+		if stmtsContainReturn(x.Body) || stmtsContainReturn(x.Finally) || stmtsContainReturn(x.OrElse) {
+			return true
+		}
+		for _, h := range x.Handlers {
+			if stmtsContainReturn(h.Body) {
+				return true
+			}
+		}
+	case *ir.WithFile:
+		if stmtsContainReturn(x.Body) {
+			return true
+		}
+	case *ir.WithCM:
+		if stmtsContainReturn(x.Body) {
+			return true
+		}
+	case *ir.Match:
+		for _, c := range x.Cases {
+			if stmtsContainReturn(c.Body) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tryContainsReturn reports whether the try body, any of its handlers, the
+// else-clause, or the finally contain a *ir.Return.
+func tryContainsReturn(t *ir.Try) bool {
+	if stmtsContainReturn(t.Body) || stmtsContainReturn(t.OrElse) || stmtsContainReturn(t.Finally) {
+		return true
+	}
+	for _, h := range t.Handlers {
+		if stmtsContainReturn(h.Body) {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *gen) try(t *ir.Try) error {
+	// If the body / handlers / finally contain `return`, declare local
+	// retval+flag vars, push a tryReturnCtx so nested *ir.Return emits
+	// `flag = true; return` (and writes the value into retval first),
+	// then re-return from the enclosing function after the IIFE unwinds.
+	// This lets gopy honor Python's "return from try" semantics — finally
+	// still runs (Go's defer chain), and the enclosing function's
+	// declared return value propagates.
+	var ctx *tryReturnCtx
+	if tryContainsReturn(t) && g.currentFn != nil {
+		g.tryReturnCount++
+		n := g.tryReturnCount
+		retType := g.currentFn.Ret
+		// Functions declared `-> None` or with no annotation are void at
+		// the Go level — only emit the flag, not the retval slot. Tuple
+		// returns are treated as a single any here; existing multi-return
+		// callers don't combine with `try` yet.
+		isVoid := retType == nil || retType.Kind == ir.TyNone
+		ctx = &tryReturnCtx{
+			flagVar: fmt.Sprintf("__try_ret_%d", n),
+		}
+		if !isVoid {
+			ctx.retvalVar = fmt.Sprintf("__try_retval_%d", n)
+			ctx.retType = retType
+			g.writeIndent()
+			g.writef("var %s %s\n", ctx.retvalVar, g.goType(retType))
+			g.writeIndent()
+			g.writef("_ = %s\n", ctx.retvalVar)
+		}
+		g.writeIndent()
+		g.writef("var %s bool\n", ctx.flagVar)
+		g.writeIndent()
+		g.writef("_ = %s\n", ctx.flagVar)
+		g.tryReturnStack = append(g.tryReturnStack, ctx)
+		defer func() {
+			g.tryReturnStack = g.tryReturnStack[:len(g.tryReturnStack)-1]
+		}()
+	}
 	g.writeIndent()
 	g.writef("func() {\n")
 	g.indent++
@@ -2610,6 +2810,23 @@ func (g *gen) try(t *ir.Try) error {
 	g.indent--
 	g.writeIndent()
 	g.writef("}()\n")
+	// If the body / handlers / finally executed a `return`, the IIFE has
+	// flipped the trap flag. Re-return from the enclosing function so
+	// callers see the value (or the bare return for void funcs).
+	if ctx != nil {
+		g.writeIndent()
+		g.writef("if %s {\n", ctx.flagVar)
+		g.indent++
+		g.writeIndent()
+		if ctx.retvalVar != "" {
+			g.writef("return %s\n", ctx.retvalVar)
+		} else {
+			g.writef("return\n")
+		}
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
 	return nil
 }
 
@@ -9091,9 +9308,9 @@ func exportedDunder(name string) string {
 		return "Matmul"
 	case "__invert__":
 		return "Invert"
-	case "__enter__":
+	case "__enter__", "__aenter__":
 		return "Enter"
-	case "__exit__":
+	case "__exit__", "__aexit__":
 		return "Exit"
 	case "__iadd__":
 		return "Iadd"

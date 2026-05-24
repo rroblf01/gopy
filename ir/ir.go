@@ -85,6 +85,15 @@ type Func struct {
 	// `def f[T, U](...)` syntax. Codegen emits them as Go generics
 	// constrained to `any`.
 	TypeParams []string
+	// UserDecorators carries the names of user-defined decorators applied
+	// to the function (`@my_wrap`). Built-in / stdlib decorators that
+	// gopy already understands (e.g. @staticmethod, @lru_cache, @property)
+	// are handled inline and never appear here. Codegen treats these as
+	// identity wrappers — semantics that depend on the decorator body
+	// (caching, logging, …) are not reproduced; the decorated function
+	// runs as written. This is a best-effort accept-and-ignore so files
+	// that lean on annotation-only decorators still compile.
+	UserDecorators []string
 }
 
 func (*Func) declNode() {}

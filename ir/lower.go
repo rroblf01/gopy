@@ -777,6 +777,13 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 					}
 				}
 			}
+			// Unrecognized name-form decorator on a method: accept as a
+			// passthrough so files leaning on annotation-only decorators
+			// compile. Real behavior (logging, caching) won't run — same
+			// caveat as for free functions.
+			if d.Type() == "Name" {
+				continue
+			}
 			var dname string
 			if d.Type() == "Name" {
 				dname = d.Str("id")
@@ -1147,8 +1154,11 @@ func lowerFunc(n parser.Node) (*Func, error) {
 	// codegen): `@staticmethod` matches a free function with no self;
 	// `@functools.lru_cache` / `@lru_cache` / `@lru_cache(...)` is a
 	// performance hint we currently ignore (the function still runs,
-	// uncached). Anything else is rejected so wrong-looking output
-	// doesn't slip through quietly.
+	// uncached). User-defined name-form decorators (`@my_decorator`)
+	// are accepted as passthroughs; the decorator function is not
+	// invoked at runtime, so any behavior beyond identity (caching,
+	// logging) won't be reproduced.
+	var userDecorators []string
 	for _, d := range n.Children("decorator_list") {
 		if d.Type() == "Name" {
 			switch d.Str("id") {
@@ -1212,6 +1222,16 @@ func lowerFunc(n parser.Node) (*Func, error) {
 				}
 			}
 		}
+		// Unrecognized decorator. If it's a simple `@name` form (a user
+		// function or class), accept it as a passthrough — gopy treats
+		// it as identity so the wrapped function still runs. Call-form
+		// `@dec(args)` and attribute-form `@mod.attr` decorators that
+		// gopy doesn't know about are still rejected, since they very
+		// likely change behavior (e.g. `@cache(maxsize=128)`).
+		if d.Type() == "Name" {
+			userDecorators = append(userDecorators, d.Str("id"))
+			continue
+		}
 		var name string
 		if d.Type() == "Name" {
 			name = d.Str("id")
@@ -1220,7 +1240,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		}
 		return nil, fmt.Errorf("line %d: decorator %q not supported", n.Lineno(), name)
 	}
-	f := &Func{Name: n.Str("name")}
+	f := &Func{Name: n.Str("name"), UserDecorators: userDecorators}
 	for _, tp := range n.Children("type_params") {
 		if tp.Type() == "TypeVar" {
 			f.TypeParams = append(f.TypeParams, tp.Str("name"))
@@ -2101,7 +2121,11 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			}
 		}
 		return &Block{Body: append(pre, whileStmt)}, nil
-	case "For":
+	case "For", "AsyncFor":
+		// gopy strips async semantics: `async for x in it` lowers as the
+		// regular for-loop. Real concurrency requires hand-written
+		// goroutines — this is a compat shim so libraries using async-
+		// style APIs compile.
 		return lowerFor(n, sc)
 	case "Try":
 		body, err := lowerBody(n.Children("body"), sc)
@@ -2235,7 +2259,9 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		return &Break{}, nil
 	case "Continue":
 		return &Continue{}, nil
-	case "With":
+	case "With", "AsyncWith":
+		// Async-with lowers identically to sync with — gopy drops the
+		// async layer (see also: async def / await collapsing in lowerFunc).
 		return lowerWith(n, sc)
 	case "Assert":
 		cond, err := lowerExpr(n.Child("test"), sc)
