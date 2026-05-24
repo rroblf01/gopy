@@ -882,11 +882,35 @@ func (g *gen) stmt(s ir.Stmt) error {
 		// global with a new local. The IR doesn't carry `global` info,
 		// so we override here based on the registered globals.
 		isGlobal := g.globals[x.Target] != nil
+		// Force int64 typing for bare integer / float literal initializers
+		// when no annotation is present, so later mixed arithmetic with
+		// other int64-typed locals (e.g. slice index reads) matches Go's
+		// strict numeric types. `total := 0` would otherwise infer to
+		// Go's `int` and clash with `int64` values from `nums[i]`.
+		forceIntDecl := false
+		forceFloatDecl := false
+		if x.Decl && (x.Ty == nil || x.Ty.Kind == ir.TyUnknown) && g.varTypes[x.Target] == "" && !isGlobal {
+			if _, ok := x.Value.(*ir.IntLit); ok {
+				forceIntDecl = true
+			} else if _, ok := x.Value.(*ir.FloatLit); ok {
+				forceFloatDecl = true
+			} else if un, ok := x.Value.(*ir.UnaryOp); ok && (un.Op == "-" || un.Op == "+") {
+				if _, ok := un.X.(*ir.IntLit); ok {
+					forceIntDecl = true
+				} else if _, ok := un.X.(*ir.FloatLit); ok {
+					forceFloatDecl = true
+				}
+			}
+		}
 		switch {
 		case isGlobal:
 			g.writef("%s = ", x.Target)
 		case x.Decl && x.Ty != nil && x.Ty.Kind != ir.TyUnknown:
 			g.writef("var %s %s = ", x.Target, g.goType(x.Ty))
+		case x.Decl && forceIntDecl:
+			g.writef("var %s int64 = ", x.Target)
+		case x.Decl && forceFloatDecl:
+			g.writef("var %s float64 = ", x.Target)
 		case x.Decl && g.varTypes[x.Target] != "":
 			// Tagged var (stdlib return): let Go infer the pointer type from RHS.
 			g.writef("%s := ", x.Target)
@@ -993,8 +1017,23 @@ func (g *gen) stmt(s ir.Stmt) error {
 			return err
 		}
 		g.writef("] = ")
-		if err := g.expr(x.Value); err != nil {
-			return err
+		// Empty list/dict literal assigned to a typed dict's value slot:
+		// `groups[k] = []` would emit `[]any{}` which doesn't fit a typed
+		// `[]string` slot. Reshape using the dict's declared value type.
+		emitted := false
+		if tTy := g.effectiveType(x.Target); tTy != nil && tTy.Kind == ir.TyDict && tTy.Val != nil {
+			if ll, ok := x.Value.(*ir.ListLit); ok && len(ll.Elems) == 0 && tTy.Val.Kind == ir.TyList {
+				g.writef("%s{}", g.goType(tTy.Val))
+				emitted = true
+			} else if dl, ok := x.Value.(*ir.DictLit); ok && len(dl.Keys) == 0 && tTy.Val.Kind == ir.TyDict {
+				g.writef("%s{}", g.goType(tTy.Val))
+				emitted = true
+			}
+		}
+		if !emitted {
+			if err := g.expr(x.Value); err != nil {
+				return err
+			}
 		}
 		g.writef("\n")
 		return nil
@@ -1349,6 +1388,37 @@ func (g *gen) stmt(s ir.Stmt) error {
 		for i, v := range x.Values {
 			if i > 0 {
 				g.writef(", ")
+			}
+			// Bare int / float literals on a multi-decl RHS need an
+			// explicit cast to int64 / float64 so Go infers the static
+			// type that downstream arithmetic with int64 vars expects.
+			if x.Decl {
+				if _, ok := v.(*ir.IntLit); ok {
+					g.writef("int64(")
+					if err := g.expr(v); err != nil {
+						return err
+					}
+					g.writef(")")
+					continue
+				}
+				if _, ok := v.(*ir.FloatLit); ok {
+					g.writef("float64(")
+					if err := g.expr(v); err != nil {
+						return err
+					}
+					g.writef(")")
+					continue
+				}
+				if un, ok := v.(*ir.UnaryOp); ok && (un.Op == "-" || un.Op == "+") {
+					if _, ok := un.X.(*ir.IntLit); ok {
+						g.writef("int64(")
+						if err := g.expr(v); err != nil {
+							return err
+						}
+						g.writef(")")
+						continue
+					}
+				}
 			}
 			if err := g.expr(v); err != nil {
 				return err
@@ -2657,19 +2727,27 @@ func (g *gen) forRange(x *ir.ForRange) error {
 	if stepNeg {
 		cmp = ">"
 	}
-	g.writef("for %s := int64(", x.Var)
+	// `_` loop var: Go forbids `_` as the LHS of `:=` and `_++`. Use a
+	// synthetic name and emit a blank-assignment inside the body to keep
+	// it unused.
+	loopVar := x.Var
+	if loopVar == "_" {
+		g.tmpCounter++
+		loopVar = fmt.Sprintf("__unused_%d", g.tmpCounter)
+	}
+	g.writef("for %s := int64(", loopVar)
 	if err := g.expr(x.Start); err != nil {
 		return err
 	}
-	g.writef("); %s %s int64(", x.Var, cmp)
+	g.writef("); %s %s int64(", loopVar, cmp)
 	if err := g.expr(x.Stop); err != nil {
 		return err
 	}
 	g.writef("); ")
 	if x.Step == nil {
-		g.writef("%s++", x.Var)
+		g.writef("%s++", loopVar)
 	} else {
-		g.writef("%s += int64(", x.Var)
+		g.writef("%s += int64(", loopVar)
 		if err := g.expr(x.Step); err != nil {
 			return err
 		}
@@ -2677,6 +2755,10 @@ func (g *gen) forRange(x *ir.ForRange) error {
 	}
 	g.writef(" {\n")
 	g.indent++
+	if loopVar != x.Var {
+		g.writeIndent()
+		g.writef("_ = %s\n", loopVar)
+	}
 	if err := g.stmts(x.Body); err != nil {
 		return err
 	}
@@ -3800,7 +3882,7 @@ func (g *gen) expr(e ir.Expr) error {
 		// Negative literal index on a list-typed receiver: `xs[-1]` →
 		// `xs[len(xs)-1]`. Go rejects negative constant indices at compile
 		// time, so we rewrite when the IR carries a negative literal.
-		if vTy := g.effectiveType(x.Value); vTy != nil && vTy.Kind == ir.TyList {
+		if vTy := g.effectiveType(x.Value); vTy != nil && (vTy.Kind == ir.TyList || vTy.Kind == ir.TyStr) {
 			negV := int64(0)
 			matched := false
 			if lit, ok := x.Index.(*ir.IntLit); ok && lit.V < 0 {
@@ -3813,6 +3895,9 @@ func (g *gen) expr(e ir.Expr) error {
 				}
 			}
 			if matched {
+				if vTy.Kind == ir.TyStr {
+					g.writef("string(")
+				}
 				if err := g.expr(x.Value); err != nil {
 					return err
 				}
@@ -3821,8 +3906,26 @@ func (g *gen) expr(e ir.Expr) error {
 					return err
 				}
 				g.writef(")%d]", negV)
+				if vTy.Kind == ir.TyStr {
+					g.writef(")")
+				}
 				return nil
 			}
+		}
+		// String indexing returns a single-char string in Python; Go's
+		// `s[i]` returns a byte. Wrap in `string(...)` so downstream str
+		// operations (concat, comparison) work as expected.
+		if vTy := g.effectiveType(x.Value); vTy != nil && vTy.Kind == ir.TyStr {
+			g.writef("string(")
+			if err := g.expr(x.Value); err != nil {
+				return err
+			}
+			g.writef("[")
+			if err := g.expr(x.Index); err != nil {
+				return err
+			}
+			g.writef("])")
+			return nil
 		}
 		if err := g.expr(x.Value); err != nil {
 			return err
@@ -3833,28 +3936,11 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		g.writef("]")
 	case *ir.Slice:
-		// Fast path: bounds are non-negative literal ints and no step.
-		// Anything fancier (negative bound, step, runtime expression we
-		// can't statically check) routes through the generic helper.
-		if x.Step == nil && sliceBoundSafe(x.Low) && sliceBoundSafe(x.High) {
-			if err := g.expr(x.Value); err != nil {
-				return err
-			}
-			g.writef("[")
-			if x.Low != nil {
-				if err := g.expr(x.Low); err != nil {
-					return err
-				}
-			}
-			g.writef(":")
-			if x.High != nil {
-				if err := g.expr(x.High); err != nil {
-					return err
-				}
-			}
-			g.writef("]")
-			return nil
-		}
+		// Always route through the helper for both strings and lists so
+		// out-of-range bounds clamp like Python (`xs[5:]` on a 3-elt list
+		// returns `[]`; Go would panic). The fast literal path is only
+		// safe when both bounds are clearly within length — that's hard
+		// to verify statically, so the helper wins by default.
 		return g.sliceWithHelper(x)
 	case *ir.ListLit:
 		// `[]any{42, ...}` would store Go's untyped `int` for 42. When
@@ -6623,7 +6709,7 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 				g.writef("\n")
 			} else {
 				g.needsException = true
-				g.writef("panic(NewException(\"KeyError\"))\n")
+				g.writef("panic(NewException(\"KeyError: pop\"))\n")
 			}
 			g.indent--
 			g.writeIndent()
