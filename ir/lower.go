@@ -46,7 +46,11 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 		}
 		decls, err := lowerTopLevel(stmt)
 		if err != nil {
-			return nil, err
+			// Prefix the originating module name (typically the .py
+			// filename) so multi-file build output points at the
+			// offending source. The "line N: ..." prefix from the
+			// inner Errorf is preserved verbatim.
+			return nil, fmt.Errorf("%s: %v", modName, err)
 		}
 		if decls == nil {
 			continue
@@ -374,6 +378,12 @@ func splitFields(s string) []string {
 // at each call to Module so multi-file tests don't bleed types.
 var moduleScopeVars = map[string]*Type{}
 
+// starUnpackCounter generates fresh temp-variable names for star-LHS
+// destructuring (`first, *rest = xs`) so the RHS evaluates exactly once
+// per assignment. Reset alongside other module-scope state via
+// moduleScopeReset.
+var starUnpackCounter int
+
 func moduleScopeDeclare(name string, ty *Type) {
 	moduleScopeVars[name] = ty
 }
@@ -386,6 +396,7 @@ func moduleScopeLookup(name string) (*Type, bool) {
 func moduleScopeReset() {
 	moduleScopeVars = map[string]*Type{}
 	moduleTypeVars = map[string]bool{}
+	starUnpackCounter = 0
 }
 
 // moduleTypeVars tracks TypeVar declarations at module level so subsequent
@@ -393,6 +404,11 @@ func moduleScopeReset() {
 var moduleTypeVars = map[string]bool{}
 
 func isModuleTypeVar(name string) bool { return moduleTypeVars[name] }
+
+// currentLoweringClass tracks the class whose body is currently being
+// lowered. `typing.Self` annotations resolve to this class — outside a
+// class, the type still collapses to `any`.
+var currentLoweringClass string
 
 // lowerClass emits a Class decl plus one Func per method (with Receiver set).
 // __init__ becomes the constructor body; its self-attribute assignments are
@@ -402,6 +418,9 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 	// Register the class name in module scope so subsequent `Class(...)`
 	// constructor calls infer TyNamed as their static return type.
 	moduleScopeDeclare(name, &Type{Kind: TyNamed, Name: name})
+	prevClass := currentLoweringClass
+	currentLoweringClass = name
+	defer func() { currentLoweringClass = prevClass }()
 	class := &Class{Name: name}
 	// First pass: collect all base names (including any registered plugin
 	// markers like `Model`). Plugin bases are consumed by the lower hook
@@ -777,12 +796,19 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 					}
 				}
 			}
-			// Unrecognized name-form decorator on a method: accept as a
-			// passthrough so files leaning on annotation-only decorators
-			// compile. Real behavior (logging, caching) won't run — same
-			// caveat as for free functions.
-			if d.Type() == "Name" {
+			// Unrecognized decorator on a method: accept as a passthrough
+			// so files leaning on annotation-only decorators compile.
+			// Same caveat as free functions — real behavior (logging,
+			// caching) won't run. We accept @name, @mod.attr, and the
+			// call-form @name(args) / @mod.attr(args).
+			if d.Type() == "Name" || d.Type() == "Attribute" {
 				continue
+			}
+			if d.Type() == "Call" {
+				fn := d.Child("func")
+				if fn != nil && (fn.Type() == "Name" || fn.Type() == "Attribute") {
+					continue
+				}
 			}
 			var dname string
 			if d.Type() == "Name" {
@@ -899,7 +925,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		// like `Class.method(args)` are rewritten at codegen time.
 		// References to `cls` inside the body are rewritten to the class
 		// name, matching Python's semantics for `cls(...)`.
-		fn := &Func{Name: methName}
+		fn := &Func{Name: methName, Line: m.Lineno()}
 		if !isClassMethod && !isStaticMethod {
 			fn.Receiver = &Param{Name: "self", Ty: &Type{Kind: TyNamed, Name: name}}
 		} else {
@@ -1222,15 +1248,34 @@ func lowerFunc(n parser.Node) (*Func, error) {
 				}
 			}
 		}
-		// Unrecognized decorator. If it's a simple `@name` form (a user
-		// function or class), accept it as a passthrough — gopy treats
-		// it as identity so the wrapped function still runs. Call-form
-		// `@dec(args)` and attribute-form `@mod.attr` decorators that
-		// gopy doesn't know about are still rejected, since they very
-		// likely change behavior (e.g. `@cache(maxsize=128)`).
+		// Unrecognized decorator. Accept as a passthrough when it's a
+		// shape gopy can ignore safely:
+		//   @name                 → bare user decorator
+		//   @name(args...)        → parametrized user decorator
+		//   @mod.attr             → dotted name (treated as no-op)
+		//   @mod.attr(args...)    → dotted call form
+		// The decorator body never runs, so anything beyond identity
+		// (caching, retry, logging) won't be reproduced. This trades
+		// strict rejection for the ability to transpile real-world
+		// Python files that lean on annotation-only decorators.
 		if d.Type() == "Name" {
 			userDecorators = append(userDecorators, d.Str("id"))
 			continue
+		}
+		if d.Type() == "Attribute" {
+			userDecorators = append(userDecorators, d.Str("attr"))
+			continue
+		}
+		if d.Type() == "Call" {
+			fn := d.Child("func")
+			if fn != nil && (fn.Type() == "Name" || fn.Type() == "Attribute") {
+				if fn.Type() == "Name" {
+					userDecorators = append(userDecorators, fn.Str("id"))
+				} else {
+					userDecorators = append(userDecorators, fn.Str("attr"))
+				}
+				continue
+			}
 		}
 		var name string
 		if d.Type() == "Name" {
@@ -1240,7 +1285,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		}
 		return nil, fmt.Errorf("line %d: decorator %q not supported", n.Lineno(), name)
 	}
-	f := &Func{Name: n.Str("name"), UserDecorators: userDecorators}
+	f := &Func{Name: n.Str("name"), UserDecorators: userDecorators, Line: n.Lineno()}
 	for _, tp := range n.Children("type_params") {
 		if tp.Type() == "TypeVar" {
 			f.TypeParams = append(f.TypeParams, tp.Str("name"))
@@ -1484,10 +1529,18 @@ func lowerAnnotation(n parser.Node) (*Type, error) {
 			return &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}, nil
 		case "set", "frozenset":
 			return &Type{Kind: TyList, Elem: &Type{Kind: TyAny}}, nil
+		case "Self":
+			// PEP 673 `typing.Self`: refers to the enclosing class.
+			// When lowered inside `lowerClass`, currentLoweringClass
+			// holds the name. Free-function context falls back to `any`.
+			if currentLoweringClass != "" {
+				return &Type{Kind: TyNamed, Name: currentLoweringClass}, nil
+			}
+			return &Type{Kind: TyAny}, nil
 		case "Any", "Callable", "Iterable", "Iterator", "Sequence",
 			"Mapping", "MutableMapping", "MutableSequence", "Collection",
 			"Hashable", "Reversible", "Container", "Sized", "object",
-			"Final", "ClassVar", "TypeAlias", "Never", "NoReturn", "Self":
+			"Final", "ClassVar", "TypeAlias", "Never", "NoReturn":
 			// typing bare aliases — lower to `any` so user code can pass
 			// values around without further annotation.
 			return &Type{Kind: TyAny}, nil
@@ -1791,6 +1844,108 @@ func lowerBody(stmts []parser.Node, sc *scope) ([]Stmt, error) {
 	return out, nil
 }
 
+// lowerStarUnpack synthesizes the assigns for `a, *b, c = xs` and the
+// `a, *b = xs` / `*a, b = xs` variants. The RHS is bound to a temp
+// `__star_unpack_N` so it evaluates once even when the assignment
+// destructures into many names.
+//
+// The lowering produces a Block of:
+//
+//	__star_unpack_N := xs
+//	a              := __star_unpack_N[0]
+//	b              := __star_unpack_N[1 : len(__star_unpack_N)-postCount]
+//	c              := __star_unpack_N[len(__star_unpack_N)-postCount+0]
+//	...
+//
+// Each subscript / slice expression uses the IR's Subscript / Slice
+// nodes so existing codegen handles them. `c.left` for the post-star
+// names is computed at runtime via `len(...) - postCount + j`.
+func lowerStarUnpack(n parser.Node, sc *scope, elts []parser.Node, starIdx int) (Stmt, error) {
+	rhs, err := lowerExpr(n.Child("value"), sc)
+	if err != nil {
+		return nil, err
+	}
+	starUnpackCounter++
+	tmp := fmt.Sprintf("__star_unpack_%d", starUnpackCounter)
+	sc.declare(tmp, nil)
+	stmts := []Stmt{&Assign{Target: tmp, Value: rhs, Decl: true}}
+
+	preCount := starIdx
+	postCount := len(elts) - starIdx - 1
+	// Pre-star Names: __tmp[i].
+	for i := 0; i < preCount; i++ {
+		t := elts[i]
+		if t.Type() != "Name" {
+			return nil, fmt.Errorf("line %d: nested star-unpack not supported", n.Lineno())
+		}
+		name := t.Str("id")
+		decl := sc.declare(name, nil)
+		stmts = append(stmts, &Assign{
+			Target: name,
+			Value: &Subscript{
+				Value: &Name{N: tmp},
+				Index: &IntLit{V: int64(i)},
+			},
+			Decl: decl,
+		})
+	}
+	// Star target: __tmp[preCount : len(__tmp)-postCount]. Names emitted
+	// in source order so the star binding lands between pre and post.
+	starInner := elts[starIdx].Child("value")
+	if starInner == nil || starInner.Type() != "Name" {
+		return nil, fmt.Errorf("line %d: starred LHS must wrap a Name", n.Lineno())
+	}
+	starName := starInner.Str("id")
+	if starName != "_" {
+		decl := sc.declare(starName, nil)
+		var lowExpr, highExpr Expr
+		if preCount > 0 {
+			lowExpr = &IntLit{V: int64(preCount)}
+		}
+		if postCount > 0 {
+			highExpr = &BinOp{
+				Op: "-",
+				L:  &Call{Func: &Name{N: "len"}, Args: []Expr{&Name{N: tmp}}},
+				R:  &IntLit{V: int64(postCount)},
+			}
+		}
+		stmts = append(stmts, &Assign{
+			Target: starName,
+			Value: &Slice{
+				Value: &Name{N: tmp},
+				Low:   lowExpr,
+				High:  highExpr,
+			},
+			Decl: decl,
+		})
+	}
+	// Post-star Names: __tmp[len(__tmp)-postCount+j].
+	for j := 0; j < postCount; j++ {
+		t := elts[starIdx+1+j]
+		if t.Type() != "Name" {
+			return nil, fmt.Errorf("line %d: nested star-unpack not supported", n.Lineno())
+		}
+		name := t.Str("id")
+		decl := sc.declare(name, nil)
+		// idx = len(__tmp) - postCount + j  → as len(__tmp) - (postCount - j)
+		offset := postCount - j
+		idx := &BinOp{
+			Op: "-",
+			L:  &Call{Func: &Name{N: "len"}, Args: []Expr{&Name{N: tmp}}},
+			R:  &IntLit{V: int64(offset)},
+		}
+		stmts = append(stmts, &Assign{
+			Target: name,
+			Value: &Subscript{
+				Value: &Name{N: tmp},
+				Index: idx,
+			},
+			Decl: decl,
+		})
+	}
+	return &Block{Body: stmts}, nil
+}
+
 func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 	switch n.Type() {
 	case "Import", "ImportFrom":
@@ -1880,6 +2035,22 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 		// per-call runtime help we don't emit yet.
 		if tgt.Type() == "Tuple" {
 			elts := tgt.Children("elts")
+			// Star-expr LHS detection: `first, *rest = xs` or
+			// `*head, last = xs` or `a, *mid, z = xs`. Synthesize per-
+			// position assigns over a shared temp so the RHS is
+			// evaluated exactly once.
+			starIdx := -1
+			for i, t := range elts {
+				if t.Type() == "Starred" {
+					if starIdx >= 0 {
+						return nil, fmt.Errorf("line %d: only one starred target allowed", n.Lineno())
+					}
+					starIdx = i
+				}
+			}
+			if starIdx >= 0 {
+				return lowerStarUnpack(n, sc, elts, starIdx)
+			}
 			var names []string
 			for _, t := range elts {
 				if t.Type() != "Name" {
@@ -1935,11 +2106,60 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			decl := sc.declare(name, val.TypeOf())
 			return &Assign{Target: name, Value: val, Decl: decl}, nil
 		case "Subscript":
+			// Slice assignment `xs[a:b] = ys` rewrites to
+			// `xs = append(append(xs[:a], ys...), xs[b:]...)`. We detect
+			// it by inspecting the Subscript's slice child — if it's a
+			// Slice node, route through a synthesized Assign over a
+			// ListLit star-spread expression.
+			sliceChild := tgt.Child("slice")
+			if sliceChild != nil && sliceChild.Type() == "Slice" {
+				name, ok := tgt.Child("value"), false
+				if name != nil && name.Type() == "Name" {
+					ok = true
+				}
+				if !ok {
+					return nil, fmt.Errorf("line %d: slice assignment requires a bare-name target", n.Lineno())
+				}
+				targetName := name.Str("id")
+				// Build low/high bounds (defaulting to 0 / len(target)).
+				var lowExpr, highExpr Expr
+				if l := sliceChild.Child("lower"); l != nil {
+					lowExpr, err = lowerExpr(l, sc)
+					if err != nil {
+						return nil, err
+					}
+				}
+				if h := sliceChild.Child("upper"); h != nil {
+					highExpr, err = lowerExpr(h, sc)
+					if err != nil {
+						return nil, err
+					}
+				}
+				if sliceChild.Child("step") != nil {
+					return nil, fmt.Errorf("line %d: slice assignment with step is not supported", n.Lineno())
+				}
+				if lowExpr == nil {
+					lowExpr = &IntLit{V: 0}
+				}
+				if highExpr == nil {
+					highExpr = &Call{Func: &Name{N: "len"}, Args: []Expr{&Name{N: targetName}}}
+				}
+				// New value: list literal whose first chunk is xs[:low],
+				// then spread of RHS, then xs[high:].
+				prefix := &Slice{Value: &Name{N: targetName}, High: lowExpr}
+				suffix := &Slice{Value: &Name{N: targetName}, Low: highExpr}
+				rebuilt := &ListLit{Elems: []Expr{
+					&Starred{Value: prefix},
+					&Starred{Value: val},
+					&Starred{Value: suffix},
+				}}
+				return &Assign{Target: targetName, Value: rebuilt, Decl: false}, nil
+			}
 			obj, err := lowerExpr(tgt.Child("value"), sc)
 			if err != nil {
 				return nil, err
 			}
-			idx, err := lowerExpr(tgt.Child("slice"), sc)
+			idx, err := lowerExpr(sliceChild, sc)
 			if err != nil {
 				return nil, err
 			}
@@ -2723,14 +2943,26 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 					return nil, err
 				}
 				spec := ""
+				var specExprs []Expr
 				if fs := p.Child("format_spec"); fs != nil && fs.Type() == "JoinedStr" {
-					// format_spec is itself a JoinedStr; flatten its
-					// literal pieces into a single spec string. Nested
-					// expressions inside the spec are uncommon — skip.
+					// format_spec is itself a JoinedStr. Static segments
+					// are appended to the spec verbatim; nested
+					// FormattedValue placeholders (`f"{x:>{width}}"`)
+					// emit a `%v` marker and push the expr into
+					// specExprs so codegen can fmt.Sprintf the dynamic
+					// spec at runtime.
 					for _, sp := range fs.Children("values") {
-						if sp.Type() == "Constant" {
+						switch sp.Type() {
+						case "Constant":
 							s, _ := sp["value"].(string)
 							spec += s
+						case "FormattedValue":
+							sx, err := lowerExpr(sp.Child("value"), sc)
+							if err != nil {
+								return nil, err
+							}
+							spec += "%v"
+							specExprs = append(specExprs, sx)
 						}
 					}
 				}
@@ -2741,7 +2973,7 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 						conv = byte(ci)
 					}
 				}
-				parts = append(parts, FStrPart{Expr: x, Spec: spec, Conv: conv})
+				parts = append(parts, FStrPart{Expr: x, Spec: spec, SpecExprs: specExprs, Conv: conv})
 			default:
 				return nil, fmt.Errorf("line %d: unsupported f-string part %q", n.Lineno(), p.Type())
 			}
@@ -3674,11 +3906,23 @@ func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 	//   `for a, b in zip(xs, ys)`       — paired iteration via parallel index
 	if tgt.Type() == "Tuple" {
 		elts := tgt.Children("elts")
-		if len(elts) != 2 || elts[0].Type() != "Name" || elts[1].Type() != "Name" {
-			return nil, fmt.Errorf("line %d: only two Name targets supported in for-loop unpacking", n.Lineno())
+		for _, e := range elts {
+			if e.Type() != "Name" {
+				return nil, fmt.Errorf("line %d: for-loop unpacking targets must be Names", n.Lineno())
+			}
 		}
-		v1, v2 := elts[0].Str("id"), elts[1].Str("id")
-		s, err := lowerForTuple(n, sc, v1, v2, iter)
+		var s Stmt
+		var err error
+		if len(elts) == 2 {
+			v1, v2 := elts[0].Str("id"), elts[1].Str("id")
+			s, err = lowerForTuple(n, sc, v1, v2, iter)
+		} else {
+			// N-tuple unpack (N != 2): iterate once over a synthetic
+			// per-element temp and destructure inside the body. Works
+			// for any iterable whose static element type is a tuple
+			// (heterogeneous: tuple[T0, T1, ...]) or a homogeneous list.
+			s, err = lowerForTupleN(n, sc, elts, iter)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -3772,6 +4016,60 @@ func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 		return nil, err
 	}
 	return &ForEach{Var: varName, Iter: iterE, ElemTy: elemTy, Body: body, OrElse: orelse}, nil
+}
+
+// lowerForTupleN lowers `for a, b, c, ... in iter` for N != 2 by binding
+// each loop element to a synthetic temp and destructuring it inside the
+// body via Subscript / type assertions. The iter's static element type
+// must be a tuple (heterogeneous) or a homogeneous list of length N —
+// otherwise the body sees per-position `any` and downstream codegen has
+// to coerce.
+func lowerForTupleN(n parser.Node, sc *scope, elts []parser.Node, iter parser.Node) (Stmt, error) {
+	iterE, err := lowerExpr(iter, sc)
+	if err != nil {
+		return nil, err
+	}
+	var elemTy *Type
+	if t := iterE.TypeOf(); t != nil && t.Kind == TyList {
+		elemTy = t.Elem
+	}
+	starUnpackCounter++
+	tmp := fmt.Sprintf("__tup_unpack_%d", starUnpackCounter)
+	loopSc := &scope{vars: copyVars(sc.vars)}
+	loopSc.declare(tmp, elemTy)
+	// Synthesize destructure assigns at the top of the body.
+	var prelude []Stmt
+	for i, e := range elts {
+		name := e.Str("id")
+		var elTy *Type
+		if elemTy != nil {
+			if elemTy.Kind == TyTuple && i < len(elemTy.Tuple) {
+				elTy = elemTy.Tuple[i]
+			} else if elemTy.Kind == TyList {
+				elTy = elemTy.Elem
+			}
+		}
+		loopSc.declare(name, elTy)
+		prelude = append(prelude, &Assign{
+			Target: name,
+			Value: &Subscript{
+				Value: &Name{N: tmp, Ty: elemTy},
+				Index: &IntLit{V: int64(i)},
+				Ty:    elTy,
+			},
+			Decl: true,
+		})
+	}
+	body, err := lowerBody(n.Children("body"), loopSc)
+	if err != nil {
+		return nil, err
+	}
+	return &ForEach{
+		Var:    tmp,
+		Iter:   iterE,
+		ElemTy: elemTy,
+		Body:   append(prelude, body...),
+	}, nil
 }
 
 // lowerForTuple lowers a two-name `for a, b in iter` form by recognizing

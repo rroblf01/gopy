@@ -94,6 +94,12 @@ type Func struct {
 	// runs as written. This is a best-effort accept-and-ignore so files
 	// that lean on annotation-only decorators still compile.
 	UserDecorators []string
+	// Line is the 1-based source line of the `def` statement in the
+	// originating .py file (or 0 when unknown / synthetic). Codegen emits
+	// a `//line <module>.py:<N>` directive before the function body so
+	// Go-side panic stacks point at the Python source rather than the
+	// generated Go file.
+	Line int
 }
 
 func (*Func) declNode() {}
@@ -656,11 +662,16 @@ type FStr struct {
 // FStrPart: exactly one of Lit or Expr is set. Spec carries the optional
 // Python format spec (e.g. ".2f" / ">5d"). Conv carries the `!r` / `!s`
 // conversion flag if any (`r`, `s`, `a` → repr / str / ascii).
+// SpecExprs carries values for nested format specs (e.g. f"{x:>{width}}"
+// → Spec="%v" with SpecExprs=[width]). Codegen runs fmt.Sprintf over
+// Spec+SpecExprs first to produce the dynamic spec, then applies it
+// through the regular format helper.
 type FStrPart struct {
-	Lit  string
-	Expr Expr
-	Spec string
-	Conv byte
+	Lit       string
+	Expr      Expr
+	Spec      string
+	SpecExprs []Expr
+	Conv      byte
 }
 
 func (*IntLit) exprNode()     {}

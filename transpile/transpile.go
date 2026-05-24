@@ -16,10 +16,47 @@ import (
 type Options struct {
 	PackageName string // defaults to "main"
 	RuntimePath string // import path of the gopy runtime; "" disables import
+	// SkipHelpers, when true, suppresses emission of inline runtime
+	// helpers (e.g. __gopy_print, __gopy_repr, the Exception base type,
+	// stdlib shim glue) at the bottom of the generated source. The
+	// caller is responsible for collecting helpers via ModuleWithMeta
+	// and writing them to a sibling Go file shared by every module in
+	// the package — used by gopy-build's multi-file path to avoid the
+	// "redeclared in this block" error when two .py files share a helper.
+	SkipHelpers bool
+	// SourceModule is the originating .py filename (typically "foo.py"
+	// or "pkg/foo.py"). When non-empty, the codegen emits
+	// `//line <SourceModule>:<N>` directives before each generated
+	// function so Go-side panic stacks point at the Python source.
+	// Leave empty to disable source-map directives.
+	SourceModule string
+	// Imports needed by emitted helpers are still pulled into this
+	// module's import block when SkipHelpers is false; otherwise the
+	// caller writes them with the shared helper file.
+}
+
+// ModuleMeta exposes codegen by-products that the caller (typically the
+// multi-file build orchestrator) needs to assemble a complete program.
+// Helpers maps stable helper keys to the Go source that defines them;
+// Imports lists the Go standard library packages required by those
+// helpers and by the module body. Both are deduped — repeated keys map
+// to the same source.
+type ModuleMeta struct {
+	Helpers map[string]string
+	Imports []string
 }
 
 // Module renders an IR module as gofmt-formatted Go source.
 func Module(m *ir.Module, opt Options) ([]byte, error) {
+	out, _, err := ModuleWithMeta(m, opt)
+	return out, err
+}
+
+// ModuleWithMeta is the lower-level variant of Module that also returns
+// the helper and import metadata. Multi-file builds use this to gather
+// helpers across every source file and emit them once into a shared
+// gopy_runtime.go alongside the per-file translations.
+func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
@@ -54,7 +91,7 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	// ("ambiguous selector"); surfacing the same condition here with the
 	// Python-level class and method names is much friendlier.
 	if err := g.detectDiamondConflicts(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Up-front scan for `Exception` usage. Anything we miss here gets
 	// caught after codegen too — see the final pass below that promotes
@@ -72,18 +109,18 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 				}
 			}
 			if err := g.fn(x); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		case *ir.Class:
 			if err := g.class(x); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		case *ir.Var:
 			if err := g.moduleVar(x); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		default:
-			return nil, fmt.Errorf("transpile: unsupported decl %T", d)
+			return nil, nil, fmt.Errorf("transpile: unsupported decl %T", d)
 		}
 		g.writef("\n")
 	}
@@ -102,17 +139,55 @@ func Module(m *ir.Module, opt Options) ([]byte, error) {
 	if g.needsException {
 		g.helpers["__Exception"] = exceptionBaseSource
 	}
-	// Emit any inline runtime helpers (e.g. time.time shim) once at module end.
-	for _, names := range sortedKeys(g.helpers) {
-		g.writef("\n%s\n", g.helpers[names])
+	// Emit any inline runtime helpers (e.g. time.time shim) once at module
+	// end. When SkipHelpers is set, the caller is responsible for writing
+	// them into a shared sibling file — see ModuleMeta below.
+	if !opt.SkipHelpers {
+		for _, names := range sortedKeys(g.helpers) {
+			g.writef("\n%s\n", g.helpers[names])
+		}
 	}
 
-	src := assembleSource(opt.PackageName, g.collectImports(), g.body.String())
+	meta := &ModuleMeta{Helpers: map[string]string{}, Imports: g.collectImports()}
+	for k, v := range g.helpers {
+		meta.Helpers[k] = v
+	}
+
+	imports := g.collectImports()
+	body := g.body.String()
+	// In SkipHelpers mode the body no longer contains the helper sources,
+	// so imports that were only needed by the omitted helpers become
+	// dead. Prune anything whose package selector never appears in the
+	// remaining body text — gofmt would otherwise flag "imported and
+	// not used".
+	if opt.SkipHelpers {
+		imports = pruneUnusedImports(imports, body)
+	}
+	src := assembleSource(opt.PackageName, imports, body)
 	formatted, err := format.Source([]byte(src))
 	if err != nil {
-		return []byte(src), fmt.Errorf("gofmt: %w\n---\n%s", err, src)
+		return []byte(src), meta, fmt.Errorf("gofmt: %w\n---\n%s", err, src)
 	}
-	return formatted, nil
+	return formatted, meta, nil
+}
+
+// pruneUnusedImports removes import paths whose package selector never
+// appears in the body. Selector matching is the last path segment plus
+// `.` (e.g. `"strings"` → look for `strings.` in body). Good enough for
+// stdlib packages we use; would miss aliased imports, which gopy doesn't
+// produce.
+func pruneUnusedImports(imports []string, body string) []string {
+	kept := make([]string, 0, len(imports))
+	for _, imp := range imports {
+		sel := imp
+		if idx := strings.LastIndex(imp, "/"); idx >= 0 {
+			sel = imp[idx+1:]
+		}
+		if strings.Contains(body, sel+".") {
+			kept = append(kept, imp)
+		}
+	}
+	return kept
 }
 
 // moduleVar emits a Go package-scope variable declaration from a Var Decl.
@@ -676,6 +751,14 @@ func (g *gen) fn(fn *ir.Func) error {
 	if fn.IsGenerator {
 		return g.generatorFn(fn)
 	}
+	// Source-map line directive: pin the upcoming function to the
+	// originating Python file so Go panic stacks report `<module>.py:<N>`
+	// instead of the generated Go file's line. The directive only takes
+	// effect when emitted at the start of a Go line, so we flush an
+	// indent and the comment before the `func` keyword.
+	if g.opt.SourceModule != "" && fn.Line > 0 {
+		g.writef("//line %s:%d\n", g.opt.SourceModule, fn.Line)
+	}
 	g.writef("func ")
 	if fn.Receiver != nil {
 		g.writef("(%s *%s) ", fn.Receiver.Name, fn.Receiver.Ty.Name)
@@ -751,12 +834,14 @@ func (g *gen) fn(fn *ir.Func) error {
 	}
 	g.writef(" {\n")
 	g.indent++
-	// `_ = args / _ = kwargs` keeps unused captures from breaking the build.
-	if fn.Vararg != nil {
+	// `_ = args / _ = kwargs` keeps unused captures from breaking the
+	// build, but only emit when the body never references the name —
+	// otherwise the silencer is dead code that gofmt and govet flag.
+	if fn.Vararg != nil && !stmtsReferenceName(fn.Body, fn.Vararg.Name) {
 		g.writeIndent()
 		g.writef("_ = %s\n", fn.Vararg.Name)
 	}
-	if fn.Kwarg != nil {
+	if fn.Kwarg != nil && !stmtsReferenceName(fn.Body, fn.Kwarg.Name) {
 		g.writeIndent()
 		g.writef("_ = %s\n", fn.Kwarg.Name)
 	}
@@ -1114,8 +1199,10 @@ func (g *gen) stmt(s ir.Stmt) error {
 		// path and the setter would recurse / call into an
 		// uninitialized self).
 		if t := g.effectiveType(x.Target); t != nil && t.Kind == ir.TyNamed {
-			if cls, ok := g.classes[t.Name]; ok {
-				if setter, hasSetter := cls.PropertySetters[x.Name]; hasSetter {
+			if _, ok := g.classes[t.Name]; ok {
+				// Walk the base chain so subclasses inherit the
+				// setter registered on a parent class.
+				if setter, hasSetter := g.lookupPropertySetter(t.Name, x.Name); hasSetter {
 					insideOwnInit := g.currentClass != nil && g.currentClass.Name == t.Name && g.currentFn != nil && g.currentFn.Name == "__init__"
 					if !insideOwnInit {
 						if err := g.expr(x.Target); err != nil {
@@ -1977,6 +2064,54 @@ func (g *gen) delStmt(d *ir.Del) error {
 				continue
 			}
 			return fmt.Errorf("del on subscript requires dict or list target")
+		case *ir.Slice:
+			// `del xs[a:b]` on a typed list lowers to
+			// `xs = append(xs[:a], xs[b:]...)`. Open-ended bounds
+			// default to 0 (low) and len(xs) (high). Step != 1 (e.g.
+			// `del xs[::2]`) is not supported — it would need a
+			// per-element rebuild loop.
+			recvTy := g.effectiveType(x.Value)
+			if recvTy == nil || recvTy.Kind != ir.TyList {
+				return fmt.Errorf("del on slice requires a typed list target")
+			}
+			if x.Step != nil {
+				return fmt.Errorf("del on slice with step is not supported")
+			}
+			name, ok := x.Value.(*ir.Name)
+			if !ok {
+				return fmt.Errorf("del on slice requires a Name target")
+			}
+			g.writeIndent()
+			g.writef("%s = append(", name.N)
+			if err := g.expr(x.Value); err != nil {
+				return err
+			}
+			g.writef("[:")
+			if x.Low != nil {
+				if err := g.expr(x.Low); err != nil {
+					return err
+				}
+			} else {
+				g.writef("0")
+			}
+			g.writef("], ")
+			if err := g.expr(x.Value); err != nil {
+				return err
+			}
+			g.writef("[")
+			if x.High != nil {
+				if err := g.expr(x.High); err != nil {
+					return err
+				}
+			} else {
+				g.writef("len(")
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef(")")
+			}
+			g.writef(":]...)\n")
+			continue
 		case *ir.Name:
 			// No emission — Go scope cleanup handles unreachable locals.
 			// Mark with `_ = name` so Go doesn't complain about unused.
@@ -2191,46 +2326,62 @@ func (g *gen) localFunc(lf *ir.LocalFunc) error {
 		g.localVarTypes = prevLocal
 	}()
 
-	g.writeIndent()
-	g.writef("%s := func(", fn.Name)
+	// Build the signature string once so we can emit it twice: first as a
+	// forward `var name func(...) ret` so the body sees the name in
+	// scope (Go closures can't reference the assigned local of the same
+	// statement otherwise), then as the matching `name = func(...) ret`
+	// literal. This unblocks recursive nested functions.
+	var sigB strings.Builder
+	sigB.WriteString("func(")
 	for i, p := range fn.Params {
 		if i > 0 {
-			g.writef(", ")
+			sigB.WriteString(", ")
 		}
-		g.writef("%s %s", p.Name, g.goType(p.Ty))
+		fmt.Fprintf(&sigB, "%s %s", p.Name, g.goType(p.Ty))
 	}
 	if fn.Vararg != nil {
 		if len(fn.Params) > 0 {
-			g.writef(", ")
+			sigB.WriteString(", ")
 		}
 		elemGo := "any"
 		if fn.Vararg.Ty != nil && fn.Vararg.Ty.Elem != nil && fn.Vararg.Ty.Elem.Kind != ir.TyUnknown && fn.Vararg.Ty.Elem.Kind != ir.TyAny {
 			elemGo = g.goType(fn.Vararg.Ty.Elem)
 		}
-		g.writef("%s []%s", fn.Vararg.Name, elemGo)
+		fmt.Fprintf(&sigB, "%s []%s", fn.Vararg.Name, elemGo)
 	}
 	if fn.Kwarg != nil {
 		if len(fn.Params) > 0 || fn.Vararg != nil {
-			g.writef(", ")
+			sigB.WriteString(", ")
 		}
-		g.writef("%s map[string]any", fn.Kwarg.Name)
+		fmt.Fprintf(&sigB, "%s map[string]any", fn.Kwarg.Name)
 	}
-	g.writef(")")
+	sigB.WriteString(")")
 	if fn.Ret != nil && fn.Ret.Kind != ir.TyUnknown && fn.Ret.Kind != ir.TyNone {
 		if fn.Ret.Kind == ir.TyTuple {
-			g.writef(" (")
+			sigB.WriteString(" (")
 			for i, t := range fn.Ret.Tuple {
 				if i > 0 {
-					g.writef(", ")
+					sigB.WriteString(", ")
 				}
-				g.writef("%s", g.goType(t))
+				fmt.Fprintf(&sigB, "%s", g.goType(t))
 			}
-			g.writef(")")
+			sigB.WriteString(")")
 		} else {
-			g.writef(" %s", g.goType(fn.Ret))
+			fmt.Fprintf(&sigB, " %s", g.goType(fn.Ret))
 		}
 	}
-	g.writef(" {\n")
+	signature := sigB.String()
+
+	// `var name func(...) ret` — declared first so the closure body can
+	// recurse into itself.
+	g.writeIndent()
+	// Strip the leading "func" since `var name func(...) ret` needs the
+	// signature in func-type form already; signature starts with "func(...)".
+	g.writef("var %s %s\n", fn.Name, signature)
+	g.writeIndent()
+	g.writef("_ = %s\n", fn.Name)
+	g.writeIndent()
+	g.writef("%s = %s {\n", fn.Name, signature)
 	g.indent++
 	if fn.Vararg != nil {
 		g.writeIndent()
@@ -2550,6 +2701,162 @@ func isBuiltinExceptionName(name string) bool {
 		"PendingDeprecationWarning", "ImportWarning",
 		"UnicodeWarning", "BytesWarning", "ResourceWarning":
 		return true
+	}
+	return false
+}
+
+// stmtsReferenceName reports whether any statement in stmts mentions a
+// bare *ir.Name with N == name. Used to decide whether to emit the
+// silencer `_ = args` / `_ = kwargs` at the head of a function body —
+// when the body actually uses the capture, the silencer is dead code
+// that vet would flag.
+func stmtsReferenceName(stmts []ir.Stmt, name string) bool {
+	for _, s := range stmts {
+		if stmtReferencesName(s, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func stmtReferencesName(s ir.Stmt, name string) bool {
+	switch x := s.(type) {
+	case *ir.ExprStmt:
+		return exprReferencesName(x.X, name)
+	case *ir.Assign:
+		return exprReferencesName(x.Value, name)
+	case *ir.MultiAssign:
+		for _, v := range x.Values {
+			if exprReferencesName(v, name) {
+				return true
+			}
+		}
+	case *ir.Return:
+		return exprReferencesName(x.X, name)
+	case *ir.If:
+		return exprReferencesName(x.Cond, name) || stmtsReferenceName(x.Then, name) || stmtsReferenceName(x.Else, name)
+	case *ir.While:
+		return exprReferencesName(x.Cond, name) || stmtsReferenceName(x.Body, name) || stmtsReferenceName(x.OrElse, name)
+	case *ir.ForRange:
+		return exprReferencesName(x.Start, name) || exprReferencesName(x.Stop, name) || exprReferencesName(x.Step, name) || stmtsReferenceName(x.Body, name) || stmtsReferenceName(x.OrElse, name)
+	case *ir.ForEach:
+		return exprReferencesName(x.Iter, name) || exprReferencesName(x.Iter2, name) || stmtsReferenceName(x.Body, name) || stmtsReferenceName(x.OrElse, name)
+	case *ir.Try:
+		if stmtsReferenceName(x.Body, name) || stmtsReferenceName(x.Finally, name) || stmtsReferenceName(x.OrElse, name) {
+			return true
+		}
+		for _, h := range x.Handlers {
+			if stmtsReferenceName(h.Body, name) {
+				return true
+			}
+		}
+	case *ir.AssignSub:
+		return exprReferencesName(x.Target, name) || exprReferencesName(x.Index, name) || exprReferencesName(x.Value, name)
+	case *ir.AssignAttr:
+		return exprReferencesName(x.Value, name)
+	case *ir.Raise:
+		return exprReferencesName(x.Exc, name) || exprReferencesName(x.Cause, name)
+	case *ir.WithFile:
+		return exprReferencesName(x.Path, name) || stmtsReferenceName(x.Body, name)
+	case *ir.WithCM:
+		return exprReferencesName(x.Ctx, name) || stmtsReferenceName(x.Body, name)
+	case *ir.Match:
+		return exprReferencesName(x.Subject, name) || matchCasesReferenceName(x.Cases, name)
+	case *ir.Yield:
+		return exprReferencesName(x.X, name)
+	case *ir.YieldFrom:
+		return exprReferencesName(x.Iter, name)
+	case *ir.Assert:
+		return exprReferencesName(x.Cond, name) || exprReferencesName(x.Msg, name)
+	case *ir.Block:
+		return stmtsReferenceName(x.Body, name)
+	case *ir.LocalFunc:
+		// Nested function literal: it captures by closure, so a
+		// reference inside also counts as the outer body using the name.
+		if x.Fn != nil {
+			return stmtsReferenceName(x.Fn.Body, name)
+		}
+	}
+	return false
+}
+
+func matchCasesReferenceName(cases []ir.MatchCase, name string) bool {
+	for _, c := range cases {
+		if exprReferencesName(c.Guard, name) || stmtsReferenceName(c.Body, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func exprReferencesName(e ir.Expr, name string) bool {
+	if e == nil {
+		return false
+	}
+	switch x := e.(type) {
+	case *ir.Name:
+		return x.N == name
+	case *ir.Call:
+		if exprReferencesName(x.Func, name) {
+			return true
+		}
+		for _, a := range x.Args {
+			if exprReferencesName(a, name) {
+				return true
+			}
+		}
+		for _, kw := range x.Keywords {
+			if exprReferencesName(kw.Value, name) {
+				return true
+			}
+		}
+	case *ir.MethodCall:
+		if exprReferencesName(x.Recv, name) {
+			return true
+		}
+		for _, a := range x.Args {
+			if exprReferencesName(a, name) {
+				return true
+			}
+		}
+	case *ir.BinOp:
+		return exprReferencesName(x.L, name) || exprReferencesName(x.R, name)
+	case *ir.CmpOp:
+		return exprReferencesName(x.L, name) || exprReferencesName(x.R, name)
+	case *ir.BoolOp:
+		return exprReferencesName(x.L, name) || exprReferencesName(x.R, name)
+	case *ir.UnaryOp:
+		return exprReferencesName(x.X, name)
+	case *ir.Attribute:
+		return exprReferencesName(x.Recv, name)
+	case *ir.Subscript:
+		return exprReferencesName(x.Value, name) || exprReferencesName(x.Index, name)
+	case *ir.Slice:
+		return exprReferencesName(x.Value, name) || exprReferencesName(x.Low, name) || exprReferencesName(x.High, name) || exprReferencesName(x.Step, name)
+	case *ir.IfExpr:
+		return exprReferencesName(x.Cond, name) || exprReferencesName(x.Then, name) || exprReferencesName(x.Else, name)
+	case *ir.ListLit:
+		for _, el := range x.Elems {
+			if exprReferencesName(el, name) {
+				return true
+			}
+		}
+	case *ir.DictLit:
+		for i := range x.Keys {
+			if exprReferencesName(x.Keys[i], name) || exprReferencesName(x.Vals[i], name) {
+				return true
+			}
+		}
+	case *ir.FStr:
+		for _, p := range x.Parts {
+			if p.Expr != nil && exprReferencesName(p.Expr, name) {
+				return true
+			}
+		}
+	case *ir.Starred:
+		return exprReferencesName(x.Value, name)
+	case *ir.NamedExpr:
+		return exprReferencesName(x.Value, name)
 	}
 	return false
 }
@@ -4758,9 +5065,10 @@ func (g *gen) fstring(f *ir.FStr) error {
 	g.addImport("fmt")
 	var fmtBuf strings.Builder
 	type fstrArg struct {
-		expr ir.Expr
-		spec string
-		conv byte
+		expr      ir.Expr
+		spec      string
+		specExprs []ir.Expr
+		conv      byte
 	}
 	var args []fstrArg
 	for _, p := range f.Parts {
@@ -4802,7 +5110,7 @@ func (g *gen) fstring(f *ir.FStr) error {
 			} else {
 				fmtBuf.WriteString("%v")
 			}
-			args = append(args, fstrArg{expr: p.Expr, spec: p.Spec, conv: p.Conv})
+			args = append(args, fstrArg{expr: p.Expr, spec: p.Spec, specExprs: p.SpecExprs, conv: p.Conv})
 		} else {
 			fmtBuf.WriteString(strings.ReplaceAll(p.Lit, "%", "%%"))
 		}
@@ -4833,7 +5141,22 @@ func (g *gen) fstring(f *ir.FStr) error {
 			// uses strings.Builder / strings.Repeat.
 			g.helpers["__gopy_str_format"] = helperStrFormat
 			g.addImport("strings")
-			g.writef("__gopy_fmt_spec(%s, ", strconv.Quote(a.spec))
+			// Nested format specs (e.g. f"{x:>{width}}") carry SpecExprs
+			// whose values fill `%v` placeholders inside the spec. We
+			// fmt.Sprintf the spec at runtime first, then feed the
+			// concrete string to __gopy_fmt_spec.
+			if len(a.specExprs) > 0 {
+				g.writef("__gopy_fmt_spec(fmt.Sprintf(%s", strconv.Quote(a.spec))
+				for _, se := range a.specExprs {
+					g.writef(", ")
+					if err := g.expr(se); err != nil {
+						return err
+					}
+				}
+				g.writef("), ")
+			} else {
+				g.writef("__gopy_fmt_spec(%s, ", strconv.Quote(a.spec))
+			}
 			switch a.conv {
 			case 'r':
 				// Python repr() prefers single quotes for str unless the
@@ -6177,6 +6500,95 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 }
 
 func (g *gen) methodCall(m *ir.MethodCall) error {
+	// Int instance methods: `n.bit_length()` and `n.bit_count()`. CPython's
+	// `bit_length` returns ceil(log2(|n|)+1); `bit_count` returns popcount
+	// of the magnitude. Both ignore the sign so we abs() first, then use
+	// math/bits on the unsigned value.
+	if recvTy := g.effectiveType(m.Recv); recvTy != nil && recvTy.Kind == ir.TyInt {
+		switch m.Method {
+		case "bit_length":
+			if len(m.Args) != 0 {
+				return fmt.Errorf("int.bit_length() takes no arguments")
+			}
+			g.addImport("math/bits")
+			g.writef("func() int64 { v := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("; if v < 0 { v = -v }; return int64(bits.Len64(uint64(v))) }()")
+			return nil
+		case "bit_count":
+			if len(m.Args) != 0 {
+				return fmt.Errorf("int.bit_count() takes no arguments")
+			}
+			g.addImport("math/bits")
+			g.writef("func() int64 { v := ")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("; if v < 0 { v = -v }; return int64(bits.OnesCount64(uint64(v))) }()")
+			return nil
+		case "to_bytes":
+			// n.to_bytes(length, byteorder) — CPython returns a bytes
+			// object; gopy maps bytes to str, so we emit a string of
+			// the raw bytes. byteorder is a literal `"big"` or `"little"`
+			// (other forms fall through unimplemented).
+			if len(m.Args) != 2 {
+				return fmt.Errorf("int.to_bytes(length, byteorder) requires two args")
+			}
+			boLit, ok := m.Args[1].(*ir.StrLit)
+			if !ok {
+				return fmt.Errorf("int.to_bytes: byteorder must be a string literal")
+			}
+			big := boLit.V == "big"
+			if !big && boLit.V != "little" {
+				return fmt.Errorf("int.to_bytes: byteorder must be \"big\" or \"little\"")
+			}
+			g.writef("func() string { __n := uint64(")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("); __l := int(")
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("); __b := make([]byte, __l); ")
+			if big {
+				g.writef("for __i := __l - 1; __i >= 0; __i-- { __b[__i] = byte(__n); __n >>= 8 }; ")
+			} else {
+				g.writef("for __i := 0; __i < __l; __i++ { __b[__i] = byte(__n); __n >>= 8 }; ")
+			}
+			g.writef("return string(__b) }()")
+			return nil
+		}
+	}
+	// `int.from_bytes(b, byteorder)` — classmethod-like; parse the bytes
+	// (string-backed in gopy) into an int64 in the requested endianness.
+	if n, ok := m.Recv.(*ir.Name); ok && n.N == "int" && m.Method == "from_bytes" {
+		if len(m.Args) != 2 {
+			return fmt.Errorf("int.from_bytes(bytes, byteorder) requires two args")
+		}
+		boLit, ok := m.Args[1].(*ir.StrLit)
+		if !ok {
+			return fmt.Errorf("int.from_bytes: byteorder must be a string literal")
+		}
+		big := boLit.V == "big"
+		if !big && boLit.V != "little" {
+			return fmt.Errorf("int.from_bytes: byteorder must be \"big\" or \"little\"")
+		}
+		g.writef("func() int64 { __s := ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return err
+		}
+		g.writef("; var __n uint64 = 0; ")
+		if big {
+			g.writef("for __i := 0; __i < len(__s); __i++ { __n = (__n << 8) | uint64(byte(__s[__i])) }; ")
+		} else {
+			g.writef("for __i := len(__s) - 1; __i >= 0; __i-- { __n = (__n << 8) | uint64(byte(__s[__i])) }; ")
+		}
+		g.writef("return int64(__n) }()")
+		return nil
+	}
 	// `dict.fromkeys(iter, value)` — classmethod-like; build a typed map
 	// from the iterable. Value type comes from the second arg or defaults
 	// to None. Key type comes from the iterable's element type.
@@ -7441,6 +7853,13 @@ func (g *gen) collectInheritedMethods(cls *ir.Class) []string {
 // return the supplied default (getter), succeed silently (setter), or
 // report false (has).
 func (g *gen) emitClassAccessors(c *ir.Class) error {
+	// Detect __getattr__ / __setattr__ fallbacks so the generated getter
+	// / setter delegates to them when no declared field matches. CPython
+	// only calls __getattr__ on attribute miss, so the lookup runs through
+	// the declared switch first.
+	hasGetattr := g.lookupMethod(c.Name, "__getattr__") != nil
+	hasSetattr := g.lookupMethod(c.Name, "__setattr__") != nil
+
 	// Getter: returns (any, bool). False ok means "no such field".
 	g.writef("func __%s_get(self *%s, name string) (any, bool) {\n", c.Name, c.Name)
 	g.indent++
@@ -7456,8 +7875,13 @@ func (g *gen) emitClassAccessors(c *ir.Class) error {
 	}
 	g.writeIndent()
 	g.writef("}\n")
-	g.writeIndent()
-	g.writef("return nil, false\n")
+	if hasGetattr {
+		g.writeIndent()
+		g.writef("return self.Getattr(name), true\n")
+	} else {
+		g.writeIndent()
+		g.writef("return nil, false\n")
+	}
 	g.indent--
 	g.writef("}\n\n")
 
@@ -7478,12 +7902,47 @@ func (g *gen) emitClassAccessors(c *ir.Class) error {
 	}
 	g.writeIndent()
 	g.writef("}\n")
-	g.writeIndent()
-	g.writef("return false\n")
+	if hasSetattr {
+		g.writeIndent()
+		g.writef("self.Setattr(name, value); return true\n")
+	} else {
+		g.writeIndent()
+		g.writef("return false\n")
+	}
 	g.indent--
 	g.writef("}\n\n")
 
 	return nil
+}
+
+// lookupPropertySetter walks className and its base chain looking for a
+// @<attr>.setter registration. Returns the Go method name (e.g. "SetSize")
+// and a hit/miss flag. Used by attribute-assign codegen so subclasses
+// inherit setters from their bases instead of writing through to the
+// raw struct field.
+func (g *gen) lookupPropertySetter(className, attr string) (string, bool) {
+	visited := map[string]bool{}
+	var walk func(string) (string, bool)
+	walk = func(n string) (string, bool) {
+		if visited[n] {
+			return "", false
+		}
+		visited[n] = true
+		cls, ok := g.classes[n]
+		if !ok {
+			return "", false
+		}
+		if setter, ok := cls.PropertySetters[attr]; ok {
+			return setter, true
+		}
+		for _, b := range cls.Bases {
+			if s, ok := walk(b); ok {
+				return s, true
+			}
+		}
+		return "", false
+	}
+	return walk(className)
 }
 
 // hasProperty walks className and its base chain looking for a @property
@@ -9312,6 +9771,12 @@ func exportedDunder(name string) string {
 		return "Enter"
 	case "__exit__", "__aexit__":
 		return "Exit"
+	case "__getattr__":
+		return "Getattr"
+	case "__setattr__":
+		return "Setattr"
+	case "__delattr__":
+		return "Delattr"
 	case "__iadd__":
 		return "Iadd"
 	case "__isub__":
@@ -10941,17 +11406,20 @@ func (g *gen) builtinNext(c *ir.Call) error {
 	return nil
 }
 
-// builtinCombinations emits an IIFE producing every 2-element subset
-// (i < j) of the input slice. Only r=2 is supported — variable-r
-// combinations need recursion that adds little user-facing value.
+// builtinCombinations emits an IIFE producing every r-element ordered
+// subset (indices i0 < i1 < ... < i_{r-1}) of the input slice. r must
+// be a positive integer literal; CPython's variable-r form would need
+// recursion at runtime which gopy resolves at codegen time by unrolling
+// the index loops.
 func (g *gen) builtinCombinations(c *ir.Call) error {
 	if len(c.Args) != 2 {
-		return fmt.Errorf("combinations() takes (iterable, r); F+ accepts r=2 only")
+		return fmt.Errorf("combinations() takes (iterable, r)")
 	}
 	rLit, ok := c.Args[1].(*ir.IntLit)
-	if !ok || rLit.V != 2 {
-		return fmt.Errorf("combinations(): r must be the literal 2")
+	if !ok || rLit.V < 1 {
+		return fmt.Errorf("combinations(): r must be a positive int literal")
 	}
+	r := int(rLit.V)
 	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
 		return fmt.Errorf("combinations(): %w", err)
@@ -10967,20 +11435,31 @@ func (g *gen) builtinCombinations(c *ir.Call) error {
 	g.writef("\n")
 	g.writeIndent()
 	g.writef("__out := [][]%s{}\n", elemGo)
+	// Unroll r nested loops: each level starts one past the previous
+	// index to enforce strict ordering (which gives "r-combinations").
+	for k := 0; k < r; k++ {
+		g.writeIndent()
+		if k == 0 {
+			g.writef("for __i%d := 0; __i%d < len(__src); __i%d++ {\n", k, k, k)
+		} else {
+			g.writef("for __i%d := __i%d + 1; __i%d < len(__src); __i%d++ {\n", k, k-1, k, k)
+		}
+		g.indent++
+	}
 	g.writeIndent()
-	g.writef("for __i := 0; __i < len(__src); __i++ {\n")
-	g.indent++
-	g.writeIndent()
-	g.writef("for __j := __i + 1; __j < len(__src); __j++ {\n")
-	g.indent++
-	g.writeIndent()
-	g.writef("__out = append(__out, []%s{__src[__i], __src[__j]})\n", elemGo)
-	g.indent--
-	g.writeIndent()
-	g.writef("}\n")
-	g.indent--
-	g.writeIndent()
-	g.writef("}\n")
+	g.writef("__out = append(__out, []%s{", elemGo)
+	for k := 0; k < r; k++ {
+		if k > 0 {
+			g.writef(", ")
+		}
+		g.writef("__src[__i%d]", k)
+	}
+	g.writef("})\n")
+	for k := 0; k < r; k++ {
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
 	g.writeIndent()
 	g.writef("return __out\n")
 	g.indent--
@@ -10989,11 +11468,14 @@ func (g *gen) builtinCombinations(c *ir.Call) error {
 	return nil
 }
 
-// builtinProduct emits the cartesian product of two same-typed slices.
-// Only the 2-iterable form is supported in F+.
+// builtinProduct emits the cartesian product of N same-typed slices.
+// Each argument is a typed iterable; the result is `[][]<elem>` containing
+// every (a, b, c, …) tuple. Element types must agree across iterables
+// (gopy doesn't synthesize heterogeneous tuple types at this site —
+// promote to `any` upstream if needed).
 func (g *gen) builtinProduct(c *ir.Call) error {
-	if len(c.Args) != 2 || len(c.Keywords) != 0 {
-		return fmt.Errorf("product() takes two iterables (F+: 2-way product only)")
+	if len(c.Args) < 2 || len(c.Keywords) != 0 {
+		return fmt.Errorf("product() takes at least two iterables (kwargs unsupported)")
 	}
 	elem, err := g.listElemTypeOfG(c.Args[0])
 	if err != nil {
@@ -11002,34 +11484,39 @@ func (g *gen) builtinProduct(c *ir.Call) error {
 	elemGo := g.goType(elem)
 	g.writef("func() [][]%s {\n", elemGo)
 	g.indent++
-	g.writeIndent()
-	g.writef("__a := ")
-	if err := g.expr(c.Args[0]); err != nil {
-		return err
+	// Bind each iterable to a stable name so we can iterate them in
+	// nested for-loops below.
+	for i, a := range c.Args {
+		g.writeIndent()
+		g.writef("__a%d := ", i)
+		if err := g.expr(a); err != nil {
+			return err
+		}
+		g.writef("\n")
 	}
-	g.writef("\n")
-	g.writeIndent()
-	g.writef("__b := ")
-	if err := g.expr(c.Args[1]); err != nil {
-		return err
-	}
-	g.writef("\n")
 	g.writeIndent()
 	g.writef("__out := [][]%s{}\n", elemGo)
+	// Unroll N nested loops, one per iterable, then a single append at
+	// the innermost level builds the tuple of current elements.
+	for i := range c.Args {
+		g.writeIndent()
+		g.writef("for _, __v%d := range __a%d {\n", i, i)
+		g.indent++
+	}
 	g.writeIndent()
-	g.writef("for _, __x := range __a {\n")
-	g.indent++
-	g.writeIndent()
-	g.writef("for _, __y := range __b {\n")
-	g.indent++
-	g.writeIndent()
-	g.writef("__out = append(__out, []%s{__x, __y})\n", elemGo)
-	g.indent--
-	g.writeIndent()
-	g.writef("}\n")
-	g.indent--
-	g.writeIndent()
-	g.writef("}\n")
+	g.writef("__out = append(__out, []%s{", elemGo)
+	for i := range c.Args {
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("__v%d", i)
+	}
+	g.writef("})\n")
+	for range c.Args {
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
 	g.writeIndent()
 	g.writef("return __out\n")
 	g.indent--
