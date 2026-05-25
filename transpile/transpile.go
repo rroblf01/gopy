@@ -6933,6 +6933,14 @@ var taggedMethodRename = map[string]map[string]string{
 		"close":  "Close",
 		"keys":   "Keys",
 	},
+	"__TopologicalSorter": {
+		"add":          "Add",
+		"prepare":      "Prepare",
+		"get_ready":    "Get_ready",
+		"done":         "Done",
+		"is_active":    "Is_active",
+		"static_order": "Static_order",
+	},
 	"__Timer": {
 		"start":  "Start",
 		"cancel": "Cancel",

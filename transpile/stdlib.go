@@ -1844,7 +1844,8 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"graphlib": {
 		Funcs: map[string]stdlibFunc{
-			"TopologicalSorter": {GoFunc: "__gopy_graphlib_toposort_unused"},
+			"TopologicalSorter": {GoFunc: "__gopy_graphlib_toposort_new", Helper: helperGraphlibToposortNew, RetTag: "__TopologicalSorter", ExtraHelpers: map[string]string{"__TopologicalSorter": helperGraphlibToposortType}},
+			"CycleError":        {GoFunc: "__gopy_graphlib_toposort_unused"},
 		},
 	},
 	"sysconfig": {
@@ -11349,6 +11350,113 @@ const helperZoneinfoZone = `func __gopy_zoneinfo_zone(name string) string {
 // helperZoneinfoAvailable — scan the IANA tzdata directory and return
 // every zone name found (e.g. "Europe/Madrid", "America/New_York"). Falls
 // back to a small built-in list when the system tzdata isn't present.
+// helperGraphlibToposortType — graphlib.TopologicalSorter analog.
+// add(node, *predecessors) records edges; prepare()/get_ready()/done()
+// drive incremental traversal; static_order() yields one flat order.
+// Detects cycles when get_ready returns empty with nodes still pending.
+const helperGraphlibToposortType = `type __TopologicalSorter struct {
+	deps    map[any]map[any]bool
+	all     []any
+	allSet  map[any]bool
+	ready   []any
+	done    map[any]bool
+	pending map[any]bool
+	prepped bool
+}
+
+func (s *__TopologicalSorter) ensure() {
+	if s.deps == nil {
+		s.deps = map[any]map[any]bool{}
+		s.allSet = map[any]bool{}
+		s.done = map[any]bool{}
+		s.pending = map[any]bool{}
+	}
+}
+
+func (s *__TopologicalSorter) addNode(n any) {
+	s.ensure()
+	if !s.allSet[n] {
+		s.allSet[n] = true
+		s.all = append(s.all, n)
+	}
+	if _, ok := s.deps[n]; !ok {
+		s.deps[n] = map[any]bool{}
+	}
+}
+
+func (s *__TopologicalSorter) Add(args ...any) {
+	if len(args) == 0 {
+		return
+	}
+	node := args[0]
+	s.addNode(node)
+	for _, p := range args[1:] {
+		s.addNode(p)
+		s.deps[node][p] = true
+	}
+}
+
+func (s *__TopologicalSorter) Prepare() {
+	s.ensure()
+	s.prepped = true
+	for _, n := range s.all {
+		if len(s.deps[n]) == 0 {
+			s.ready = append(s.ready, n)
+		} else {
+			s.pending[n] = true
+		}
+	}
+}
+
+func (s *__TopologicalSorter) Get_ready() []any {
+	if !s.prepped {
+		s.Prepare()
+	}
+	out := s.ready
+	s.ready = nil
+	return out
+}
+
+func (s *__TopologicalSorter) Done(args ...any) {
+	for _, n := range args {
+		s.done[n] = true
+		for k, ps := range s.deps {
+			if ps[n] {
+				delete(ps, n)
+				if len(ps) == 0 && s.pending[k] {
+					delete(s.pending, k)
+					s.ready = append(s.ready, k)
+				}
+			}
+		}
+	}
+}
+
+func (s *__TopologicalSorter) Is_active() bool {
+	if !s.prepped {
+		return len(s.all) > 0
+	}
+	return len(s.ready) > 0 || len(s.pending) > 0
+}
+
+func (s *__TopologicalSorter) Static_order() []any {
+	s.Prepare()
+	out := []any{}
+	for s.Is_active() {
+		r := s.Get_ready()
+		if len(r) == 0 {
+			panic(NewException("CycleError: graph has at least one cycle"))
+		}
+		out = append(out, r...)
+		s.Done(r...)
+	}
+	return out
+}`
+
+const helperGraphlibToposortNew = `func __gopy_graphlib_toposort_new(args ...any) *__TopologicalSorter {
+	return &__TopologicalSorter{}
+}`
+
 // helperTarfileIs returns true when path points to a readable tar archive.
 // archive/tar.NewReader detects the magic on first record read.
 const helperTarfileIs = `func __gopy_tarfile_is(path string) bool {
