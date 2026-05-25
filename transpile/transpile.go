@@ -6913,6 +6913,20 @@ var taggedMethodRename = map[string]map[string]string{
 		"is_alive": "Is_alive",
 		"getName":  "GetName",
 	},
+	"__ThreadPool": {
+		"submit":   "Submit",
+		"map":      "Map",
+		"shutdown": "Shutdown",
+	},
+	"__Future": {
+		"result":            "Result",
+		"exception":         "Exception",
+		"done":              "Done",
+		"cancel":            "Cancel",
+		"cancelled":         "Cancelled",
+		"running":           "Running",
+		"add_done_callback": "Add_done_callback",
+	},
 	"__Timer": {
 		"start":  "Start",
 		"cancel": "Cancel",
@@ -7101,6 +7115,9 @@ var taggedMethodRename = map[string]map[string]string{
 // value so chained dispatch (e.g. `re.compile(p).match(s).group()`) keeps
 // resolving through exprTag.
 var taggedMethodRetTag = map[string]map[string]string{
+	"__ThreadPool": {
+		"submit": "__Future",
+	},
 	"__Pattern": {
 		"match":     "__Match",
 		"search":    "__Match",
@@ -7424,6 +7441,54 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	// `type=` references a builtin name (int / float / str / bool) — emit as
 	// a string literal because Go has no first-class equivalent of the
 	// Python type objects.
+	// ThreadPoolExecutor.submit(fn, *args) — wrap fn in a uniform
+	// `func(...any) any` shim so the helper can invoke it without
+	// knowing the original signature. Map(fn, items) wraps similarly.
+	if tag := g.exprTag(m.Recv); tag == "__ThreadPool" && (m.Method == "submit" || m.Method == "map") {
+		goName := "Submit"
+		if m.Method == "map" {
+			goName = "Map"
+		}
+		if err := g.expr(m.Recv); err != nil {
+			return err
+		}
+		g.writef(".%s(", goName)
+		if len(m.Args) >= 1 {
+			// Discover fn arity: if it's a Name we know is a free function
+			// with N params, emit a wrapper that calls fn(__a[0], ...).
+			paramCount := -1
+			if nm, ok := m.Args[0].(*ir.Name); ok {
+				if fn, found := g.funcs[nm.N]; found {
+					paramCount = len(fn.Params)
+				}
+			}
+			g.writef("func(__a ...any) any { ")
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("(")
+			if paramCount > 0 {
+				for j := 0; j < paramCount; j++ {
+					if j > 0 {
+						g.writef(", ")
+					}
+					g.writef("__a[%d]", j)
+				}
+			} else if paramCount < 0 {
+				// Unknown — assume variadic spread.
+				g.writef("__a...")
+			}
+			g.writef("); return nil }")
+		}
+		for i := 1; i < len(m.Args); i++ {
+			g.writef(", ")
+			if err := g.boxedExpr(m.Args[i]); err != nil {
+				return err
+			}
+		}
+		g.writef(")")
+		return nil
+	}
 	if tag := g.exprTag(m.Recv); tag == "__ArgParser" && (m.Method == "add_subparsers" || m.Method == "add_parser") {
 		goName := "Add_subparsers"
 		if m.Method == "add_parser" {

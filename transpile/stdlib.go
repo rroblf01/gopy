@@ -1968,10 +1968,10 @@ var stdlibModules = map[string]stdlibModule{
 					"ALL_COMPLETED":     {GoExpr: `"ALL_COMPLETED"`},
 				},
 				Funcs: map[string]stdlibFunc{
-					"ThreadPoolExecutor":  {GoFunc: "__gopy_cf_tpool_unused"},
-					"ProcessPoolExecutor": {GoFunc: "__gopy_cf_ppool_unused"},
+					"ThreadPoolExecutor":  {GoFunc: "__gopy_cf_tpool_new", Helper: helperCfThreadPoolNew, RetTag: "__ThreadPool", ExtraHelpers: map[string]string{"__ThreadPool": helperCfThreadPoolType, "__Future": helperCfFutureType}, HelperImports: []string{"sync", "fmt"}},
+					"ProcessPoolExecutor": {GoFunc: "__gopy_cf_tpool_new", Helper: helperCfThreadPoolNew, RetTag: "__ThreadPool", ExtraHelpers: map[string]string{"__ThreadPool": helperCfThreadPoolType, "__Future": helperCfFutureType}, HelperImports: []string{"sync", "fmt"}},
 					"Executor":            {GoFunc: "__gopy_cf_exec_unused"},
-					"Future":              {GoFunc: "__gopy_cf_future_unused"},
+					"Future":              {GoFunc: "__gopy_cf_future_new", Helper: helperCfFutureNew, RetTag: "__Future", ExtraHelpers: map[string]string{"__Future": helperCfFutureType}, HelperImports: []string{"sync"}},
 					"wait":                {GoFunc: "__gopy_cf_wait_unused"},
 					"as_completed":        {GoFunc: "__gopy_cf_as_completed_unused"},
 					"CancelledError":      {GoFunc: "__gopy_cf_cancel_err_unused"},
@@ -7943,6 +7943,147 @@ func (f *__SpooledTempFile) Rollover()        {}`
 
 const helperSpooledTempfileNew = `func __gopy_spooled_tempfile_new(args ...any) *__SpooledTempFile {
 	return &__SpooledTempFile{}
+}`
+
+// helperCfFutureType — concurrent.futures.Future analog. result()
+// blocks via WaitGroup; cancel() flags cancellation but the underlying
+// goroutine still runs to completion (Go can't preempt user code).
+const helperCfFutureType = `type __Future struct {
+	wg     sync.WaitGroup
+	mu     sync.Mutex
+	value  any
+	err    *Exception
+	done   bool
+	cancel bool
+}
+
+func (f *__Future) Result(args ...float64) any {
+	f.wg.Wait()
+	if f.err != nil {
+		panic(f.err)
+	}
+	return f.value
+}
+
+func (f *__Future) Exception(args ...float64) any {
+	f.wg.Wait()
+	if f.err != nil {
+		return f.err
+	}
+	return nil
+}
+
+func (f *__Future) Done() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.done
+}
+
+func (f *__Future) Cancel() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.done {
+		return false
+	}
+	f.cancel = true
+	return true
+}
+
+func (f *__Future) Cancelled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cancel && !f.done
+}
+
+func (f *__Future) Running() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.done && !f.cancel
+}
+
+func (f *__Future) Add_done_callback(cb func(any) any) {
+	go func() {
+		f.wg.Wait()
+		cb(f)
+	}()
+}`
+
+const helperCfFutureNew = `func __gopy_cf_future_new(args ...any) *__Future {
+	return &__Future{}
+}`
+
+// helperCfThreadPoolType — concurrent.futures.ThreadPoolExecutor analog.
+// submit() spawns a goroutine and returns a __Future. shutdown() waits
+// on every outstanding future. map() collects results via submitted
+// futures.
+const helperCfThreadPoolType = `type __ThreadPool struct {
+	mu      sync.Mutex
+	futures []*__Future
+	closed  bool
+}
+
+func (p *__ThreadPool) Submit(fn func(...any) any, args ...any) *__Future {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		panic(NewException("RuntimeError: submit after shutdown"))
+	}
+	f := &__Future{}
+	p.futures = append(p.futures, f)
+	p.mu.Unlock()
+	f.wg.Add(1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				f.mu.Lock()
+				if e, ok := r.(*Exception); ok {
+					f.err = e
+				} else {
+					f.err = NewException(fmt.Sprintf("%v", r))
+				}
+				f.done = true
+				f.mu.Unlock()
+				f.wg.Done()
+				return
+			}
+		}()
+		v := fn(args...)
+		f.mu.Lock()
+		f.value = v
+		f.done = true
+		f.mu.Unlock()
+		f.wg.Done()
+	}()
+	return f
+}
+
+func (p *__ThreadPool) Map(fn func(...any) any, items []any) []any {
+	futs := []*__Future{}
+	for _, it := range items {
+		futs = append(futs, p.Submit(fn, it))
+	}
+	out := []any{}
+	for _, f := range futs {
+		out = append(out, f.Result())
+	}
+	return out
+}
+
+func (p *__ThreadPool) Shutdown(args ...any) {
+	p.mu.Lock()
+	p.closed = true
+	futs := append([]*__Future{}, p.futures...)
+	p.mu.Unlock()
+	for _, f := range futs {
+		f.wg.Wait()
+	}
+}
+
+func (p *__ThreadPool) Enter() *__ThreadPool { return p }
+func (p *__ThreadPool) Exit() bool           { p.Shutdown(); return false }`
+
+const helperCfThreadPoolNew = `func __gopy_cf_tpool_new(args ...any) *__ThreadPool {
+	return &__ThreadPool{}
 }`
 
 // helperHmacType wraps a stdlib hash.Hash plus the key/algo so .hexdigest()
