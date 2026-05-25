@@ -6910,6 +6910,15 @@ var taggedMethodRename = map[string]map[string]string{
 		"get": "Get",
 		"set": "Set",
 	},
+	"__Selector": {
+		"register":   "Register",
+		"unregister": "Unregister",
+		"modify":     "Modify",
+		"select":     "Select",
+		"get_key":    "Get_key",
+		"get_map":    "Get_map",
+		"close":      "Close",
+	},
 	"__EmailMessage": {
 		"set_payload":    "Set_payload",
 		"get_payload":    "Get_payload",

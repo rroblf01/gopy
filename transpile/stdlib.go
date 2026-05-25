@@ -109,6 +109,9 @@ var stdlibModules = map[string]stdlibModule{
 			"system":    {GoFunc: "__gopy_os_system", Helper: helperOsSystem, HelperImports: []string{"os/exec", "os"}, RetKind: "int"},
 			"fspath":    {GoFunc: "__gopy_os_fspath", Helper: helperOsFspath, ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "fmt"}, RetKind: "str"},
 			"uname":     {GoFunc: "__gopy_os_uname", Helper: helperOsUname, HelperImports: []string{"os", "runtime"}},
+			"statvfs":   {GoFunc: "__gopy_os_statvfs", Helper: helperOsStatvfs, HelperImports: []string{"syscall"}},
+			"sync":      {GoFunc: "__gopy_os_sync", Helper: helperOsSync, HelperImports: []string{"syscall"}},
+			"sysconf":   {GoFunc: "__gopy_os_sysconf", Helper: helperOsSysconf, RetKind: "int"},
 		},
 		Subs: map[string]stdlibModule{
 			"path": {
@@ -839,13 +842,13 @@ var stdlibModules = map[string]stdlibModule{
 			"EVENT_WRITE": {GoExpr: "int64(2)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"BaseSelector":    {GoFunc: "__gopy_selectors_unused"},
-			"DefaultSelector": {GoFunc: "__gopy_selectors_unused"},
-			"SelectSelector":  {GoFunc: "__gopy_selectors_unused"},
-			"PollSelector":    {GoFunc: "__gopy_selectors_unused"},
-			"EpollSelector":   {GoFunc: "__gopy_selectors_unused"},
-			"DevpollSelector": {GoFunc: "__gopy_selectors_unused"},
-			"KqueueSelector":  {GoFunc: "__gopy_selectors_unused"},
+			"BaseSelector":    {GoFunc: "__gopy_selector_new", Helper: helperSelectorNew, RetTag: "__Selector", ExtraHelpers: map[string]string{"__Selector": helperSelectorType}},
+			"DefaultSelector": {GoFunc: "__gopy_selector_new", Helper: helperSelectorNew, RetTag: "__Selector", ExtraHelpers: map[string]string{"__Selector": helperSelectorType}},
+			"SelectSelector":  {GoFunc: "__gopy_selector_new", Helper: helperSelectorNew, RetTag: "__Selector", ExtraHelpers: map[string]string{"__Selector": helperSelectorType}},
+			"PollSelector":    {GoFunc: "__gopy_selector_new", Helper: helperSelectorNew, RetTag: "__Selector", ExtraHelpers: map[string]string{"__Selector": helperSelectorType}},
+			"EpollSelector":   {GoFunc: "__gopy_selector_new", Helper: helperSelectorNew, RetTag: "__Selector", ExtraHelpers: map[string]string{"__Selector": helperSelectorType}},
+			"DevpollSelector": {GoFunc: "__gopy_selector_new", Helper: helperSelectorNew, RetTag: "__Selector", ExtraHelpers: map[string]string{"__Selector": helperSelectorType}},
+			"KqueueSelector":  {GoFunc: "__gopy_selector_new", Helper: helperSelectorNew, RetTag: "__Selector", ExtraHelpers: map[string]string{"__Selector": helperSelectorType}},
 			"SelectorKey":     {GoFunc: "__gopy_selectors_unused"},
 		},
 	},
@@ -9027,6 +9030,155 @@ const helperOsGetcwd = `func __gopy_os_getcwd() string {
 const helperOsUname = `func __gopy_os_uname() []any {
 	host, _ := os.Hostname()
 	return []any{runtime.GOOS, host, "", "", runtime.GOARCH}
+}`
+
+// helperOsStatvfs surfaces filesystem stats via syscall.Statfs. CPython
+// returns an os.statvfs_result; gopy returns []any with the same field
+// order: (f_bsize, f_frsize, f_blocks, f_bfree, f_bavail, f_files,
+// f_ffree, f_favail, f_flag, f_namemax). flag / favail not portable so
+// they come back zero.
+// helperSelectorType — minimal selectors.DefaultSelector shim. Tracks
+// registered (fd, events, data) tuples; select() does a non-blocking
+// scan and returns ready items. gopy's single-goroutine model can't do
+// real epoll, so register/unregister bookkeep and select returns all
+// registered keys immediately.
+const helperSelectorType = `type __SelectorKey struct {
+	Fileobj any
+	Fd      int64
+	Events  int64
+	Data    any
+}
+
+type __Selector struct {
+	keys map[int64]*__SelectorKey
+}
+
+func (s *__Selector) ensure() {
+	if s.keys == nil {
+		s.keys = map[int64]*__SelectorKey{}
+	}
+}
+
+func (s *__Selector) Register(args ...any) *__SelectorKey {
+	s.ensure()
+	if len(args) < 2 {
+		return nil
+	}
+	var fd int64
+	switch v := args[0].(type) {
+	case int64:
+		fd = v
+	case int:
+		fd = int64(v)
+	}
+	var ev int64
+	switch v := args[1].(type) {
+	case int64:
+		ev = v
+	case int:
+		ev = int64(v)
+	}
+	var data any
+	if len(args) > 2 {
+		data = args[2]
+	}
+	k := &__SelectorKey{Fileobj: args[0], Fd: fd, Events: ev, Data: data}
+	s.keys[fd] = k
+	return k
+}
+
+func (s *__Selector) Unregister(arg any) {
+	var fd int64
+	switch v := arg.(type) {
+	case int64:
+		fd = v
+	case int:
+		fd = int64(v)
+	}
+	delete(s.keys, fd)
+}
+
+func (s *__Selector) Modify(args ...any) *__SelectorKey {
+	if len(args) == 0 {
+		return nil
+	}
+	s.Unregister(args[0])
+	return s.Register(args...)
+}
+
+func (s *__Selector) Select(args ...float64) [][]any {
+	out := [][]any{}
+	for _, k := range s.keys {
+		out = append(out, []any{k, k.Events})
+	}
+	return out
+}
+
+func (s *__Selector) Get_key(arg any) *__SelectorKey {
+	var fd int64
+	switch v := arg.(type) {
+	case int64:
+		fd = v
+	case int:
+		fd = int64(v)
+	}
+	return s.keys[fd]
+}
+
+func (s *__Selector) Get_map() map[int64]*__SelectorKey {
+	return s.keys
+}
+
+func (s *__Selector) Close() {
+	s.keys = nil
+}`
+
+const helperSelectorNew = `func __gopy_selector_new(args ...any) *__Selector {
+	return &__Selector{keys: map[int64]*__SelectorKey{}}
+}`
+
+const helperOsStatvfs = `func __gopy_os_statvfs(path string) []any {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return []any{
+		int64(st.Bsize),
+		int64(st.Bsize),
+		int64(st.Blocks),
+		int64(st.Bfree),
+		int64(st.Bavail),
+		int64(st.Files),
+		int64(st.Ffree),
+		int64(0),
+		int64(0),
+		int64(255),
+	}
+}`
+
+// helperOsSync flushes filesystem buffers. Linux exposes Sync via
+// syscall.Sync. Other platforms get a no-op since Go's syscall package
+// doesn't always cover it.
+const helperOsSync = `func __gopy_os_sync() {
+	syscall.Sync()
+}`
+
+// helperOsSysconf — accept the name string and return common defaults.
+// CPython surfaces _SC_* constants; gopy returns a sensible static
+// value or -1 for unknown names.
+const helperOsSysconf = `func __gopy_os_sysconf(name any) int64 {
+	switch v := name.(type) {
+	case string:
+		switch v {
+		case "SC_PAGESIZE", "SC_PAGE_SIZE":
+			return 4096
+		case "SC_NPROCESSORS_ONLN", "SC_NPROCESSORS_CONF":
+			return 1
+		case "SC_OPEN_MAX":
+			return 1024
+		}
+	}
+	return -1
 }`
 
 const helperOsEnviron = `func __gopy_os_environ() map[string]string {
