@@ -2353,18 +2353,113 @@ func (g *gen) emitTempDir(call *ir.Call, varName string, body []ir.Stmt) error {
 	return nil
 }
 
+// resolveStdlibPath maps a callable expression to its dotted stdlib
+// path. Handles all common shapes via stdlibPathOf (Name(alias),
+// Attribute chains, bare module names that resolve under
+// stdlibModules). Returns "" when the expression doesn't bind to a
+// known stdlib path.
+func (g *gen) resolveStdlibPath(e ir.Expr) string {
+	if p, hit := stdlibPathOf(e, g.aliases); hit {
+		return p
+	}
+	return ""
+}
+
+// emitNamedTempFile lowers `with tempfile.NamedTemporaryFile([mode=...,
+// prefix=..., suffix=..., delete=...]) as f:` to an IIFE that creates
+// an os.CreateTemp file, exposes .name + .write / .read inside the
+// block, and defers Close + Remove (unless delete=False). The `as`
+// binding is tagged __NamedTempFile so method dispatch picks up
+// Write / Read / Close / Name via the existing taggedMethodRename
+// table.
+func (g *gen) emitNamedTempFile(call *ir.Call, varName string, body []ir.Stmt) error {
+	g.addImport("os")
+	g.addImport("io")
+	g.helpers["__NamedTempFile"] = helperNamedTempFileType
+	prefix := ""
+	suffix := ""
+	delete := true
+	for _, kw := range call.Keywords {
+		switch kw.Name {
+		case "prefix":
+			if sl, ok := kw.Value.(*ir.StrLit); ok {
+				prefix = sl.V
+			}
+		case "suffix":
+			if sl, ok := kw.Value.(*ir.StrLit); ok {
+				suffix = sl.V
+			}
+		case "delete":
+			if bl, ok := kw.Value.(*ir.BoolLit); ok {
+				delete = bl.V
+			}
+		}
+	}
+	g.writeIndent()
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__nt, __err := __gopy_named_tempfile_new(%q, %q)\n", prefix, suffix)
+	g.writeIndent()
+	g.writef("if __err != nil { panic(__err) }\n")
+	if delete {
+		g.writeIndent()
+		g.writef("defer os.Remove(__nt.name)\n")
+	}
+	g.writeIndent()
+	g.writef("defer __nt.Close()\n")
+	if varName != "" {
+		g.writeIndent()
+		g.writef("%s := __nt\n", varName)
+		g.writeIndent()
+		g.writef("_ = %s\n", varName)
+		g.varTypes[varName] = "__NamedTempFile"
+	} else {
+		g.writeIndent()
+		g.writef("_ = __nt\n")
+	}
+	if err := g.stmts(body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	return nil
+}
+
 func (g *gen) withCM(w *ir.WithCM) error {
 	// contextlib.suppress(ExcA, ExcB, ...) — swallow panics whose
 	// Exception message prefix matches any of the listed classes.
 	// Builtin exceptions lower to NewException("ClassName: msg") so a
 	// prefix check is enough; user subclasses inherit the same shape.
+	// Stdlib context managers — match both bare-name (`from contextlib
+	// import suppress; with suppress(...):`) and dotted (`import
+	// tempfile; with tempfile.TemporaryDirectory():`) call shapes. The
+	// IR lowers the dotted form as MethodCall, not Call, so we
+	// synthesize a Call for the existing helpers.
 	if call, ok := w.Ctx.(*ir.Call); ok {
-		if n, ok2 := call.Func.(*ir.Name); ok2 {
-			if path, hit := g.aliases[n.N]; hit && path == "contextlib.suppress" {
+		if path := g.resolveStdlibPath(call.Func); path != "" {
+			switch path {
+			case "contextlib.suppress":
 				return g.emitSuppress(call, w.Body)
-			}
-			if path, hit := g.aliases[n.N]; hit && path == "tempfile.TemporaryDirectory" {
+			case "tempfile.TemporaryDirectory":
 				return g.emitTempDir(call, w.VarName, w.Body)
+			case "tempfile.NamedTemporaryFile":
+				return g.emitNamedTempFile(call, w.VarName, w.Body)
+			}
+		}
+	}
+	if mc, ok := w.Ctx.(*ir.MethodCall); ok {
+		if recvPath, ok2 := stdlibPathOf(mc.Recv, g.aliases); ok2 {
+			fullPath := recvPath + "." + mc.Method
+			synth := &ir.Call{Args: mc.Args, Keywords: mc.Keywords}
+			switch fullPath {
+			case "contextlib.suppress":
+				return g.emitSuppress(synth, w.Body)
+			case "tempfile.TemporaryDirectory":
+				return g.emitTempDir(synth, w.VarName, w.Body)
+			case "tempfile.NamedTemporaryFile":
+				return g.emitNamedTempFile(synth, w.VarName, w.Body)
 			}
 		}
 	}
@@ -5578,6 +5673,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinRandomShuffle(c)
 			case "random.sample":
 				return g.builtinRandomSample(c)
+			case "random.choices":
+				return g.builtinRandomChoices(c)
 			case "itertools.groupby":
 				return g.builtinGroupBy(c)
 			case "logging.basicConfig":
@@ -6538,6 +6635,10 @@ var taggedMethodRename = map[string]map[string]string{
 		"relative_to":     "Relative_to",
 		"symlink_to":      "Symlink_to",
 		"hardlink_to":     "Hardlink_to",
+		"rename":          "Rename",
+		"replace":         "Replace",
+		"chmod":           "Chmod",
+		"lchmod":          "Lchmod",
 	},
 	"__Datetime": {
 		"year":       "Year",
@@ -6561,6 +6662,13 @@ var taggedMethodRename = map[string]map[string]string{
 	"__Hmac": {
 		"hexdigest": "Hexdigest",
 		"update":    "Update",
+	},
+	"__NamedTempFile": {
+		"write": "Write",
+		"read":  "Read",
+		"seek":  "Seek",
+		"close": "Close",
+		"flush": "Flush",
 	},
 	"__Logger": {
 		"debug":              "Debug",
@@ -6724,6 +6832,8 @@ var taggedMethodRetTag = map[string]map[string]string{
 		"with_name":   "__Path",
 		"with_stem":   "__Path",
 		"relative_to": "__Path",
+		"rename":      "__Path",
+		"replace":     "__Path",
 	},
 	"__XMLElement": {
 		"find": "__XMLElement",
@@ -6761,6 +6871,9 @@ type taggedAttrInfo struct {
 // attribute access on the tagged receiver emits a *method* call rather
 // than a field load. Maps tag → python-name → {GoName, Ty}.
 var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
+	"__NamedTempFile": {
+		"name": {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
+	},
 	"__Path": {
 		"name":    {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
 		"parent":  {GoName: "Parent", Ty: nil},
@@ -7071,6 +7184,8 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinRandomShuffle(synth)
 		case "random.sample":
 			return g.builtinRandomSample(synth)
+		case "random.choices":
+			return g.builtinRandomChoices(synth)
 		case "heapq.heappush":
 			return g.builtinHeappush(synth)
 		case "heapq.heappop":
@@ -9839,6 +9954,91 @@ func (g *gen) builtinRandomSample(c *ir.Call) error {
 	g.writef("}\n")
 	g.writeIndent()
 	g.writef("return __cp[len(__cp)-__k:]\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinRandomChoices emits k random draws (with replacement) from
+// the population. Optional `weights=` list biases the draw via the
+// standard cumulative-distribution method; absent weights → uniform
+// over the population. `k` defaults to 1, matching CPython.
+func (g *gen) builtinRandomChoices(c *ir.Call) error {
+	if len(c.Args) != 1 {
+		return fmt.Errorf("random.choices() takes one positional argument (the population)")
+	}
+	elem, err := g.listElemTypeOfG(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("random.choices(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	var kExpr, weightsExpr ir.Expr
+	for _, kw := range c.Keywords {
+		switch kw.Name {
+		case "k":
+			kExpr = kw.Value
+		case "weights":
+			weightsExpr = kw.Value
+		}
+	}
+	g.addImport("math/rand")
+	g.needsException = true
+	g.writef("func() []%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__k := int64(1)\n")
+	if kExpr != nil {
+		g.writeIndent()
+		g.writef("__k = ")
+		if err := g.expr(kExpr); err != nil {
+			return err
+		}
+		g.writef("\n")
+	}
+	g.writeIndent()
+	g.writef("if len(__src) == 0 { panic(NewException(\"IndexError: cannot choose from empty sequence\")) }\n")
+	g.writeIndent()
+	g.writef("__out := make([]%s, 0, __k)\n", elemGo)
+	if weightsExpr != nil {
+		g.writeIndent()
+		g.writef("__w := ")
+		if err := g.expr(weightsExpr); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("__cum := make([]float64, len(__w))\n")
+		g.writeIndent()
+		g.writef("__total := 0.0\n")
+		g.writeIndent()
+		g.writef("for __i, __wi := range __w { __total += float64(__wi); __cum[__i] = __total }\n")
+		g.writeIndent()
+		g.writef("for __i := int64(0); __i < __k; __i++ {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("__r := rand.Float64() * __total\n")
+		g.writeIndent()
+		g.writef("__lo, __hi := 0, len(__cum)-1\n")
+		g.writeIndent()
+		g.writef("for __lo < __hi { __mid := (__lo + __hi) / 2; if __cum[__mid] < __r { __lo = __mid + 1 } else { __hi = __mid } }\n")
+		g.writeIndent()
+		g.writef("__out = append(__out, __src[__lo])\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	} else {
+		g.writeIndent()
+		g.writef("for __i := int64(0); __i < __k; __i++ { __out = append(__out, __src[rand.Intn(len(__src))]) }\n")
+	}
+	g.writeIndent()
+	g.writef("return __out\n")
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")

@@ -286,7 +286,7 @@ var stdlibModules = map[string]stdlibModule{
 		Subs: map[string]stdlibModule{
 			"request": {
 				Funcs: map[string]stdlibFunc{
-					"urlopen":     {GoFunc: "__gopy_url_urlopen", Helper: helperURLOpen, HelperImports: []string{"io", "net/http"}, RetTag: "__HTTPResponse", ExtraHelpers: map[string]string{"__HTTPResponse": helperHTTPResponseType}},
+					"urlopen":     {GoFunc: "__gopy_url_urlopen", Helper: helperURLOpen, HelperImports: []string{"io", "net/http", "strings"}, RetTag: "__HTTPResponse", ExtraHelpers: map[string]string{"__HTTPResponse": helperHTTPResponseType}},
 					"Request":     {GoFunc: "__gopy_url_request_new", Helper: helperURLRequestNew, RetTag: "__URLRequest", ExtraHelpers: map[string]string{"__URLRequest": helperURLRequestType}},
 					"urlretrieve": {GoFunc: "__gopy_url_urlretrieve", Helper: helperURLRetrieve, HelperImports: []string{"io", "net/http", "os"}},
 				},
@@ -411,7 +411,8 @@ var stdlibModules = map[string]stdlibModule{
 			// the alias; actual context-manager lowering lives in
 			// emitTempDir, which intercepts the With statement before any
 			// stdlib helper call would be emitted.
-			"TemporaryDirectory": {GoFunc: "__gopy_tempdir_unused"},
+			"TemporaryDirectory":  {GoFunc: "__gopy_tempdir_unused"},
+			"NamedTemporaryFile":  {GoFunc: "__gopy_namedtempfile_unused"},
 		},
 	},
 	"cmath": {
@@ -1449,6 +1450,7 @@ var stdlibModules = map[string]stdlibModule{
 			// choice / shuffle / sample dispatch per-element type from
 			// transpile.go's call() builders below.
 			"choice":  {GoFunc: "__gopy_random_choice_unused"},
+			"choices": {GoFunc: "__gopy_random_choices_unused"},
 			"shuffle": {GoFunc: "__gopy_random_shuffle_unused"},
 			"sample":  {GoFunc: "__gopy_random_sample_unused"},
 		},
@@ -3719,13 +3721,46 @@ const helperURLRetrieve = `func __gopy_url_urlretrieve(args ...any) []any {
 	return []any{dest, map[string]string{}}
 }`
 
-const helperURLOpen = `func __gopy_url_urlopen(url string) *__HTTPResponse {
-	resp, err := http.Get(url)
+const helperURLOpen = `func __gopy_url_urlopen(url string, opts ...any) *__HTTPResponse {
+	var resp *http.Response
+	var err error
+	method := "GET"
+	body := ""
+	for _, o := range opts {
+		switch v := o.(type) {
+		case string:
+			body = v
+			method = "POST"
+		case []byte:
+			body = string(v)
+			method = "POST"
+		case map[string]any:
+			if d, ok := v["data"]; ok && d != nil {
+				if s, ok := d.(string); ok {
+					body = s
+					method = "POST"
+				}
+			}
+			if m, ok := v["method"].(string); ok {
+				method = strings.ToUpper(m)
+			}
+		}
+	}
+	if method != "GET" {
+		req, rerr := http.NewRequest(method, url, strings.NewReader(body))
+		if rerr != nil {
+			panic(NewException("URLError: " + rerr.Error()))
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err = http.DefaultClient.Do(req)
+	} else {
+		resp, err = http.Get(url)
+	}
 	if err != nil {
 		panic(NewException("URLError: " + err.Error()))
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	rb, err := io.ReadAll(resp.Body)
 	if err != nil {
 		panic(NewException("URLError: " + err.Error()))
 	}
@@ -3735,7 +3770,7 @@ const helperURLOpen = `func __gopy_url_urlopen(url string) *__HTTPResponse {
 			headers[k] = v[0]
 		}
 	}
-	return &__HTTPResponse{body: string(body), Status: int64(resp.StatusCode), Headers: headers}
+	return &__HTTPResponse{body: string(rb), Status: int64(resp.StatusCode), Headers: headers}
 }`
 
 // helperURLQuote mirrors CPython's urllib.parse.quote default safe=/:
@@ -6228,6 +6263,52 @@ const helperTracebackPrintExc = `func __gopy_traceback_print_exc() {
 	fmt.Fprintln(os.Stderr, "  (gopy: full traceback unavailable)")
 }`
 
+const helperNamedTempFileType = `type __NamedTempFile struct {
+	name string
+	f    *os.File
+}
+
+func (n *__NamedTempFile) Name() string  { return n.name }
+func (n *__NamedTempFile) Write(s string) int64 {
+	n.f.Write([]byte(s))
+	return int64(len(s))
+}
+func (n *__NamedTempFile) Read(args ...int64) string {
+	b, err := io.ReadAll(n.f)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+func (n *__NamedTempFile) Seek(off int64, args ...int64) int64 {
+	whence := 0
+	if len(args) > 0 {
+		whence = int(args[0])
+	}
+	pos, _ := n.f.Seek(off, whence)
+	return pos
+}
+func (n *__NamedTempFile) Close() {
+	if n.f != nil {
+		n.f.Close()
+		n.f = nil
+	}
+}
+func (n *__NamedTempFile) Flush() {
+	if n.f != nil {
+		n.f.Sync()
+	}
+}
+
+func __gopy_named_tempfile_new(prefix, suffix string) (*__NamedTempFile, error) {
+	pat := prefix + "*" + suffix
+	f, err := os.CreateTemp("", pat)
+	if err != nil {
+		return nil, err
+	}
+	return &__NamedTempFile{name: f.Name(), f: f}, nil
+}`
+
 const helperTempfileMkdtemp = `func __gopy_tempfile_mkdtemp(args ...string) string {
 	prefix := ""
 	if len(args) > 0 {
@@ -7299,6 +7380,45 @@ func (p *__Path) Hardlink_to(target any) {
 	}
 	if err := os.Link(dst, p.p); err != nil {
 		panic(err)
+	}
+}
+
+func (p *__Path) Rename(target any) *__Path {
+	var dst string
+	switch v := target.(type) {
+	case string:
+		dst = v
+	case *__Path:
+		dst = v.p
+	default:
+		dst = fmt.Sprintf("%v", v)
+	}
+	if err := os.Rename(p.p, dst); err != nil {
+		panic(err)
+	}
+	return &__Path{p: dst}
+}
+
+func (p *__Path) Replace(target any) *__Path { return p.Rename(target) }
+
+func (p *__Path) Chmod(mode int64) {
+	if err := os.Chmod(p.p, os.FileMode(mode)); err != nil {
+		panic(err)
+	}
+}
+
+func (p *__Path) Lchmod(mode int64) { p.Chmod(mode) }
+
+func (p *__Path) Lstat() map[string]any {
+	st, err := os.Lstat(p.p)
+	if err != nil {
+		panic(err)
+	}
+	return map[string]any{
+		"st_size":  int64(st.Size()),
+		"st_mode":  int64(st.Mode()),
+		"st_mtime": float64(st.ModTime().Unix()),
+		"st_isdir": st.IsDir(),
 	}
 }
 
