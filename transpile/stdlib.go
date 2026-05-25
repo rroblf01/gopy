@@ -118,6 +118,13 @@ var stdlibModules = map[string]stdlibModule{
 			"close":     {GoFunc: "__gopy_os_close", Helper: helperOsClose, HelperImports: []string{"syscall"}},
 			"read":      {GoFunc: "__gopy_os_read_fd", Helper: helperOsReadFd, HelperImports: []string{"syscall"}, RetKind: "str"},
 			"write":     {GoFunc: "__gopy_os_write_fd", Helper: helperOsWriteFd, HelperImports: []string{"syscall"}, RetKind: "int"},
+			"getgroups": {GoFunc: "__gopy_os_getgroups", Helper: helperOsGetgroups, HelperImports: []string{"os"}},
+			"execvp":    {GoFunc: "__gopy_os_execvp", Helper: helperOsExecvp, HelperImports: []string{"syscall", "os/exec", "os"}},
+			"fork":      {GoFunc: "__gopy_os_fork", Helper: helperOsFork, RetKind: "int"},
+			"setsid":    {GoFunc: "__gopy_os_setsid", Helper: helperOsSetsid, HelperImports: []string{"syscall"}, RetKind: "int"},
+			"getsid":    {GoFunc: "__gopy_os_getsid", Helper: helperOsGetsid, HelperImports: []string{"syscall"}, RetKind: "int"},
+			"getpgid":   {GoFunc: "__gopy_os_getpgid", Helper: helperOsGetpgid, HelperImports: []string{"syscall"}, RetKind: "int"},
+			"getpgrp":   {GoFunc: "__gopy_os_getpgrp", Helper: helperOsGetpgrp, HelperImports: []string{"syscall"}, RetKind: "int"},
 		},
 		Subs: map[string]stdlibModule{
 			"path": {
@@ -9283,6 +9290,63 @@ const helperOsWriteFd = `func __gopy_os_write_fd(fd int64, data string) int64 {
 		panic(NewException("OSError: " + err.Error()))
 	}
 	return int64(n)
+}`
+
+const helperOsGetgroups = `func __gopy_os_getgroups() []any {
+	gs, err := os.Getgroups()
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	out := make([]any, len(gs))
+	for i, g := range gs {
+		out[i] = int64(g)
+	}
+	return out
+}`
+
+const helperOsExecvp = `func __gopy_os_execvp(file string, argv []string) {
+	path, err := exec.LookPath(file)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	if err := syscall.Exec(path, argv, os.Environ()); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+// helperOsFork — fork is not portable from Go (runtime guard against
+// duplicating goroutines). Raise OSError so transpiled callers handle
+// the missing capability.
+const helperOsFork = `func __gopy_os_fork() int64 {
+	panic(NewException("OSError: fork() not supported in gopy runtime"))
+}`
+
+const helperOsSetsid = `func __gopy_os_setsid() int64 {
+	sid, err := syscall.Setsid()
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return int64(sid)
+}`
+
+const helperOsGetsid = `func __gopy_os_getsid(pid int64) int64 {
+	sid, err := syscall.Getsid(int(pid))
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return int64(sid)
+}`
+
+const helperOsGetpgid = `func __gopy_os_getpgid(pid int64) int64 {
+	pgid, err := syscall.Getpgid(int(pid))
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return int64(pgid)
+}`
+
+const helperOsGetpgrp = `func __gopy_os_getpgrp() int64 {
+	return int64(syscall.Getpgrp())
 }`
 
 // helperOsSysconf — accept the name string and return common defaults.
