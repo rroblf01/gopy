@@ -633,6 +633,8 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"dumps":     {GoFunc: "__gopy_pickle_dumps", Helper: helperPickleDumps, HelperImports: []string{"encoding/json"}, RetKind: "str"},
 			"loads":     {GoFunc: "__gopy_pickle_loads", Helper: helperPickleLoads, HelperImports: []string{"encoding/json"}},
+			"dump":      {GoFunc: "__gopy_pickle_dump", Helper: helperPickleDump, ExtraHelpers: map[string]string{"__gopy_pickle_dumps": helperPickleDumps}, HelperImports: []string{"encoding/json", "io"}},
+			"load":      {GoFunc: "__gopy_pickle_load", Helper: helperPickleLoad, ExtraHelpers: map[string]string{"__gopy_pickle_loads": helperPickleLoads}, HelperImports: []string{"encoding/json", "io"}},
 			"Pickler":   {GoFunc: "__gopy_pickle_pickler_unused"},
 			"Unpickler": {GoFunc: "__gopy_pickle_unpickler_unused"},
 		},
@@ -7551,6 +7553,39 @@ const helperSysGetsizeof = `func __gopy_sys_getsizeof(args ...any) int64 {
 // helperSysIntern is a pure identity since Go interns string constants
 // at compile time and the runtime form isn't user-visible.
 const helperSysIntern = `func __gopy_sys_intern(s string) string { return s }`
+
+// helperPickleDump writes pickle bytes to a file-like object. Accepts
+// *os.File (from `with open(p, "wb") as fh`), *__NamedTempFile,
+// *__GzipFile or anything else exposing a `Write(string) int64` method.
+const helperPickleDump = `func __gopy_pickle_dump(v any, fh any, args ...any) {
+	s := __gopy_pickle_dumps(v)
+	switch f := fh.(type) {
+	case io.Writer:
+		f.Write([]byte(s))
+	case interface{ Write(string) int64 }:
+		f.Write(s)
+	}
+}`
+
+// helperPickleLoad reads pickle bytes from a file-like object. Same
+// callee shape as Dump: *os.File / *__NamedTempFile / *__GzipFile /
+// anything exposing a `Read(int64) string`.
+const helperPickleLoad = `func __gopy_pickle_load(fh any, args ...any) any {
+	var data []byte
+	switch f := fh.(type) {
+	case io.Reader:
+		b, err := io.ReadAll(f)
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		data = b
+	case interface{ Read(args ...int64) string }:
+		data = []byte(f.Read())
+	default:
+		panic(NewException("TypeError: pickle.load: unsupported file object"))
+	}
+	return __gopy_pickle_loads(string(data))
+}`
 
 const helperPickleDumps = `func __gopy_pickle_dumps(v any) string {
 	b, err := json.Marshal(v)

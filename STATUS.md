@@ -392,7 +392,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`complex.conjugate()`** routes through `math/cmplx.Conj`; `.real` / `.imag` already worked via `real()` / `imag()`
 - ~~**`re` flags** (`re.IGNORECASE`, `re.MULTILINE`, etc.) — flag args parse but compiled patterns ignore them~~ now applied: each Go regexp helper accepts trailing flag args and prefixes the pattern with `(?ims)` as appropriate. `IGNORECASE` / `MULTILINE` / `DOTALL` work; `VERBOSE` / `ASCII` / `UNICODE` accept-but-no-op (Go regexp syntax differs)
 - **`json.JSONEncoder` / `JSONDecoder` subclassing** — registered as stub
-- **`pickle` binary protocol** — JSON-backed; not wire-compatible with CPython
+- **`pickle` binary protocol** — JSON-backed; not wire-compatible with CPython. `pickle.dump(obj, fh)` / `pickle.load(fh)` now ride through the existing `dumps`/`loads` and route through any handle exposing either `io.Writer` (raw `*os.File`) or `Write(string) int64` (`__NamedTempFile`, `__GzipFile`). `Pickler` / `Unpickler` classes still stubs
 - **`socket` UDP** — `socket.socket(AF_INET, SOCK_DGRAM)` returns a `__Socket` flagged for `net.PacketConn`. `bind(("host", port))` opens a packet listener; `sendto(data, (host, port))` writes one datagram (allocating an outbound packet conn on first use); `recvfrom(n)` returns `[data, (host, port)]`. Unix-domain and raw sockets still unwired
 - **`http.server.BaseHTTPRequestHandler`** real request handling — registered as stub
 - **`http.client` POST/PUT bodies, redirects, cookies**
