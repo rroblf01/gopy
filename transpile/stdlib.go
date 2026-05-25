@@ -2532,7 +2532,7 @@ var stdlibModules = map[string]stdlibModule{
 			"open":      {GoFunc: "__gopy_tarfile_unused"},
 			"TarFile":   {GoFunc: "__gopy_tarfile_unused"},
 			"TarInfo":   {GoFunc: "__gopy_tarfile_unused"},
-			"is_tarfile": {GoFunc: "__gopy_tarfile_unused"},
+			"is_tarfile": {GoFunc: "__gopy_tarfile_is", Helper: helperTarfileIs, HelperImports: []string{"archive/tar", "os"}, RetKind: "bool"},
 			"TarError":  {GoFunc: "__gopy_tarfile_unused"},
 			"ReadError": {GoFunc: "__gopy_tarfile_unused"},
 			"CompressionError": {GoFunc: "__gopy_tarfile_unused"},
@@ -2551,7 +2551,7 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"ZipFile":      {GoFunc: "__gopy_zipfile_unused"},
 			"ZipInfo":      {GoFunc: "__gopy_zipfile_unused"},
-			"is_zipfile":   {GoFunc: "__gopy_zipfile_unused"},
+			"is_zipfile":   {GoFunc: "__gopy_zipfile_is", Helper: helperZipfileIs, HelperImports: []string{"archive/zip"}, RetKind: "bool"},
 			"Path":         {GoFunc: "__gopy_zipfile_unused"},
 			"PyZipFile":    {GoFunc: "__gopy_zipfile_unused"},
 			"BadZipFile":   {GoFunc: "__gopy_zipfile_unused"},
@@ -2741,7 +2741,7 @@ var stdlibModules = map[string]stdlibModule{
 	"zoneinfo": {
 		Funcs: map[string]stdlibFunc{
 			"ZoneInfo":     {GoFunc: "__gopy_zoneinfo_zone", Helper: helperZoneinfoZone, HelperImports: []string{"time"}, RetKind: "str"},
-			"available_timezones": {GoFunc: "__gopy_zoneinfo_unused"},
+			"available_timezones": {GoFunc: "__gopy_zoneinfo_available", Helper: helperZoneinfoAvailable, HelperImports: []string{"os", "path/filepath", "io/fs"}},
 			"reset_tzpath": {GoFunc: "__gopy_zoneinfo_unused"},
 			"TZPATH":       {GoFunc: "__gopy_zoneinfo_unused"},
 			"InvalidTZPathWarning": {GoFunc: "__gopy_zoneinfo_unused"},
@@ -11344,6 +11344,55 @@ const helperZoneinfoZone = `func __gopy_zoneinfo_zone(name string) string {
 		panic(NewException("ZoneInfoNotFoundError: " + name))
 	}
 	return name
+}`
+
+// helperZoneinfoAvailable — scan the IANA tzdata directory and return
+// every zone name found (e.g. "Europe/Madrid", "America/New_York"). Falls
+// back to a small built-in list when the system tzdata isn't present.
+// helperTarfileIs returns true when path points to a readable tar archive.
+// archive/tar.NewReader detects the magic on first record read.
+const helperTarfileIs = `func __gopy_tarfile_is(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	if _, err := tr.Next(); err != nil {
+		return false
+	}
+	return true
+}`
+
+// helperZipfileIs uses archive/zip.OpenReader to detect a valid ZIP
+// envelope at path.
+const helperZipfileIs = `func __gopy_zipfile_is(path string) bool {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return false
+	}
+	r.Close()
+	return true
+}`
+
+const helperZoneinfoAvailable = `func __gopy_zoneinfo_available(args ...any) []string {
+	root := "/usr/share/zoneinfo"
+	if _, err := os.Stat(root); err != nil {
+		return []string{"UTC", "GMT"}
+	}
+	out := []string{}
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		if rel == "" || rel == "." {
+			return nil
+		}
+		out = append(out, rel)
+		return nil
+	})
+	return out
 }`
 
 const helperWebbrowserOpen = `func __gopy_webbrowser_open(url string, args ...any) bool {
