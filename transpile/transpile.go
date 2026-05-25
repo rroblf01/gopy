@@ -1012,6 +1012,8 @@ func (g *gen) stmt(s ir.Stmt) error {
 		default:
 			if vt := x.Value.TypeOf(); vt != nil && vt.Kind != ir.TyUnknown {
 				g.localVarTypes[x.Target] = vt
+			} else if st := g.stdlibCallRetType(x.Value); st != nil && st.Kind != ir.TyUnknown {
+				g.localVarTypes[x.Target] = st
 			}
 		}
 		g.writeIndent()
@@ -2383,6 +2385,64 @@ func (g *gen) resolveStdlibPath(e ir.Expr) string {
 	return ""
 }
 
+// emitTaggedOpenCM lowers `with <stdlib>.open(path[, ...]) as v:` for
+// archive-style readers (tarfile, zipfile, wave). Evaluates the call
+// once, defers Close(), binds the var with the tag so method dispatch
+// finds the Go shim.
+func (g *gen) emitTaggedOpenCM(call *ir.Call, varName string, body []ir.Stmt, fnName, tag string) error {
+	switch tag {
+	case "__TarFile":
+		g.addImport("archive/tar")
+		g.addImport("io")
+		g.addImport("os")
+		g.addImport("path/filepath")
+		g.helpers["__TarFile"] = helperTarFileType
+	case "__ZipFile":
+		g.addImport("archive/zip")
+		g.addImport("io")
+		g.addImport("os")
+		g.addImport("path/filepath")
+		g.addImport("strings")
+		g.helpers["__ZipFile"] = helperZipFileType
+	case "__WaveRead":
+		g.addImport("os")
+		g.helpers["__WaveRead"] = helperWaveReadType
+	}
+	g.writeIndent()
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__ar := %s(", fnName)
+	for i, a := range call.Args {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if err := g.expr(a); err != nil {
+			return err
+		}
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("defer __ar.Close()\n")
+	if varName != "" {
+		g.writeIndent()
+		g.writef("%s := __ar\n", varName)
+		g.writeIndent()
+		g.writef("_ = %s\n", varName)
+		g.varTypes[varName] = tag
+	} else {
+		g.writeIndent()
+		g.writef("_ = __ar\n")
+	}
+	if err := g.stmts(body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	return nil
+}
+
 // emitScandirCM lowers `with os.scandir(path) as it:` to an IIFE that
 // materializes the entry list via the existing helper and runs the body
 // with the iterator var bound to the resulting `[]*__DirEntry`. CPython's
@@ -2563,6 +2623,12 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitGzipOpen(call, w.VarName, w.Body)
 			case "os.scandir":
 				return g.emitScandirCM(call, w.VarName, w.Body)
+			case "tarfile.open":
+				return g.emitTaggedOpenCM(call, w.VarName, w.Body, "__gopy_tarfile_open", "__TarFile")
+			case "zipfile.ZipFile":
+				return g.emitTaggedOpenCM(call, w.VarName, w.Body, "__gopy_zipfile_open", "__ZipFile")
+			case "wave.open":
+				return g.emitTaggedOpenCM(call, w.VarName, w.Body, "__gopy_wave_open", "__WaveRead")
 			}
 		}
 	}
@@ -2581,6 +2647,12 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitGzipOpen(synth, w.VarName, w.Body)
 			case "os.scandir":
 				return g.emitScandirCM(synth, w.VarName, w.Body)
+			case "tarfile.open":
+				return g.emitTaggedOpenCM(synth, w.VarName, w.Body, "__gopy_tarfile_open", "__TarFile")
+			case "zipfile.ZipFile":
+				return g.emitTaggedOpenCM(synth, w.VarName, w.Body, "__gopy_zipfile_open", "__ZipFile")
+			case "wave.open":
+				return g.emitTaggedOpenCM(synth, w.VarName, w.Body, "__gopy_wave_open", "__WaveRead")
 			}
 		}
 	}
@@ -3989,6 +4061,17 @@ func (g *gen) forEach(x *ir.ForEach) error {
 				}
 			}
 		}
+	}
+	// Typed-element propagation: when the iter is a stdlib call whose
+	// RetKind is a typed list (`list_str`, `list_int`), bind the loop var
+	// so `line.strip()` / `n.bit_length()` dispatch via the right path.
+	if x.Var != "_" && iterTy == nil {
+		if t := g.stdlibCallRetType(x.Iter); t != nil && t.Kind == ir.TyList && t.Elem != nil {
+			g.localVarTypes[x.Var] = t.Elem
+		}
+	}
+	if x.Var != "_" && iterTy != nil && iterTy.Kind == ir.TyList && iterTy.Elem != nil {
+		g.localVarTypes[x.Var] = iterTy.Elem
 	}
 	switch {
 	case x.Var == "_":
@@ -6940,6 +7023,34 @@ var taggedMethodRename = map[string]map[string]string{
 		"done":         "Done",
 		"is_active":    "Is_active",
 		"static_order": "Static_order",
+	},
+	"__TarFile": {
+		"getnames":   "Getnames",
+		"getmembers": "Getmembers",
+		"extractall": "Extractall",
+		"extract":    "Extract",
+		"close":      "Close",
+	},
+	"__ZipFile": {
+		"namelist":   "Namelist",
+		"read":       "Read",
+		"infolist":   "Infolist",
+		"extractall": "Extractall",
+		"close":      "Close",
+	},
+	"__WaveRead": {
+		"getnchannels": "Getnchannels",
+		"getsampwidth": "Getsampwidth",
+		"getframerate": "Getframerate",
+		"getnframes":   "Getnframes",
+		"getcomptype":  "Getcomptype",
+		"getcompname":  "Getcompname",
+		"getparams":    "Getparams",
+		"readframes":   "Readframes",
+		"rewind":       "Rewind",
+		"setpos":       "Setpos",
+		"tell":         "Tell",
+		"close":        "Close",
 	},
 	"__Timer": {
 		"start":  "Start",
@@ -15843,6 +15954,10 @@ func (g *gen) stdlibCallRetType(e ir.Expr) *ir.Type {
 		return &ir.Type{Kind: ir.TyFloat}
 	case "bool":
 		return &ir.Type{Kind: ir.TyBool}
+	case "list_str":
+		return &ir.Type{Kind: ir.TyList, Elem: &ir.Type{Kind: ir.TyStr}}
+	case "list_int":
+		return &ir.Type{Kind: ir.TyList, Elem: &ir.Type{Kind: ir.TyInt}}
 	}
 	return nil
 }

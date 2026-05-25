@@ -2395,7 +2395,7 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"fileinput": {
 		Funcs: map[string]stdlibFunc{
-			"input":      {GoFunc: "__gopy_fileinput_unused"},
+			"input":      {GoFunc: "__gopy_fileinput_input", Helper: helperFileinputInput, HelperImports: []string{"bufio", "os"}, RetKind: "list_str"},
 			"FileInput":  {GoFunc: "__gopy_fileinput_unused"},
 			"filename":   {GoFunc: "__gopy_fileinput_unused"},
 			"lineno":     {GoFunc: "__gopy_fileinput_unused"},
@@ -2530,8 +2530,8 @@ var stdlibModules = map[string]stdlibModule{
 			"PAX_FORMAT":     {GoExpr: "int64(2)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"open":      {GoFunc: "__gopy_tarfile_unused"},
-			"TarFile":   {GoFunc: "__gopy_tarfile_unused"},
+			"open":      {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
+			"TarFile":   {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
 			"TarInfo":   {GoFunc: "__gopy_tarfile_unused"},
 			"is_tarfile": {GoFunc: "__gopy_tarfile_is", Helper: helperTarfileIs, HelperImports: []string{"archive/tar", "os"}, RetKind: "bool"},
 			"TarError":  {GoFunc: "__gopy_tarfile_unused"},
@@ -2550,7 +2550,7 @@ var stdlibModules = map[string]stdlibModule{
 			"ZIP_LZMA":     {GoExpr: "int64(14)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"ZipFile":      {GoFunc: "__gopy_zipfile_unused"},
+			"ZipFile":      {GoFunc: "__gopy_zipfile_open", Helper: helperZipFileType, HelperImports: []string{"archive/zip", "io", "os", "path/filepath", "strings"}, RetTag: "__ZipFile"},
 			"ZipInfo":      {GoFunc: "__gopy_zipfile_unused"},
 			"is_zipfile":   {GoFunc: "__gopy_zipfile_is", Helper: helperZipfileIs, HelperImports: []string{"archive/zip"}, RetKind: "bool"},
 			"Path":         {GoFunc: "__gopy_zipfile_unused"},
@@ -2562,7 +2562,7 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"wave": {
 		Funcs: map[string]stdlibFunc{
-			"open":      {GoFunc: "__gopy_wave_unused"},
+			"open":      {GoFunc: "__gopy_wave_open", Helper: helperWaveReadType, HelperImports: []string{"os"}, RetTag: "__WaveRead"},
 			"Wave_read":  {GoFunc: "__gopy_wave_unused"},
 			"Wave_write": {GoFunc: "__gopy_wave_unused"},
 			"Error":      {GoFunc: "__gopy_wave_unused"},
@@ -2728,7 +2728,7 @@ var stdlibModules = map[string]stdlibModule{
 	"tomllib": {
 		Funcs: map[string]stdlibFunc{
 			"load":          {GoFunc: "__gopy_tomllib_unused"},
-			"loads":         {GoFunc: "__gopy_tomllib_unused"},
+			"loads":         {GoFunc: "__gopy_tomllib_loads", Helper: helperTomllibLoads, HelperImports: []string{"strconv", "strings"}},
 			"TOMLDecodeError": {GoFunc: "__gopy_tomllib_unused"},
 		},
 	},
@@ -11616,6 +11616,467 @@ const helperTextwrapShorten = `func __gopy_textwrap_shorten(s string, width int6
 			}
 			return out + placeholder
 		}
+	}
+	return out
+}`
+
+// helperTarFileType — tarfile.open()-like reader. Holds the materialized
+// entry list so Getnames / Extractall can answer without re-streaming.
+const helperTarFileType = `type __TarEntry struct {
+	Name string
+	Size int64
+	Mode int64
+	Body []byte
+	Hdr  *tar.Header
+}
+
+type __TarFile struct {
+	entries []*__TarEntry
+	closed  bool
+}
+
+func (t *__TarFile) Getnames() []string {
+	out := []string{}
+	for _, e := range t.entries {
+		out = append(out, e.Name)
+	}
+	return out
+}
+
+func (t *__TarFile) Getmembers() []any {
+	out := []any{}
+	for _, e := range t.entries {
+		out = append(out, map[string]any{
+			"name": e.Name,
+			"size": e.Size,
+			"mode": e.Mode,
+		})
+	}
+	return out
+}
+
+func (t *__TarFile) Extractall(args ...any) {
+	dest := "."
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok && s != "" {
+			dest = s
+		}
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	for _, e := range t.entries {
+		full := filepath.Join(dest, e.Name)
+		if e.Hdr != nil && e.Hdr.Typeflag == tar.TypeDir {
+			os.MkdirAll(full, os.FileMode(e.Mode))
+			continue
+		}
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		if err := os.WriteFile(full, e.Body, os.FileMode(e.Mode)); err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+	}
+}
+
+func (t *__TarFile) Extract(name string, args ...any) {
+	dest := "."
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok && s != "" {
+			dest = s
+		}
+	}
+	for _, e := range t.entries {
+		if e.Name == name {
+			full := filepath.Join(dest, e.Name)
+			os.MkdirAll(filepath.Dir(full), 0o755)
+			os.WriteFile(full, e.Body, os.FileMode(e.Mode))
+			return
+		}
+	}
+	panic(NewException("KeyError: " + name))
+}
+
+func (t *__TarFile) Close() {
+	t.closed = true
+}
+
+func __gopy_tarfile_open(path string, args ...string) *__TarFile {
+	f, err := os.Open(path)
+	if err != nil {
+		panic(NewException("FileNotFoundError: " + err.Error()))
+	}
+	defer f.Close()
+	var src io.Reader = f
+	// "r:gz" / "r:bz2" not auto-detected here; archive/tar reads raw.
+	tr := tar.NewReader(src)
+	tf := &__TarFile{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			panic(NewException("OSError: tarfile read: " + err.Error()))
+		}
+		body := []byte{}
+		if hdr.Typeflag == tar.TypeReg {
+			body, _ = io.ReadAll(tr)
+		}
+		mode := hdr.Mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		tf.entries = append(tf.entries, &__TarEntry{
+			Name: hdr.Name,
+			Size: hdr.Size,
+			Mode: mode,
+			Body: body,
+			Hdr:  hdr,
+		})
+	}
+	return tf
+}`
+
+// helperZipFileType — zipfile.ZipFile minimal real reader.
+const helperZipFileType = `type __ZipEntry struct {
+	Name string
+	Size int64
+	Data []byte
+}
+
+type __ZipFile struct {
+	entries []*__ZipEntry
+	closed  bool
+}
+
+func (z *__ZipFile) Namelist() []string {
+	out := []string{}
+	for _, e := range z.entries {
+		out = append(out, e.Name)
+	}
+	return out
+}
+
+func (z *__ZipFile) Read(name string) string {
+	for _, e := range z.entries {
+		if e.Name == name {
+			return string(e.Data)
+		}
+	}
+	panic(NewException("KeyError: " + name))
+}
+
+func (z *__ZipFile) Infolist() []any {
+	out := []any{}
+	for _, e := range z.entries {
+		out = append(out, map[string]any{
+			"filename":  e.Name,
+			"file_size": e.Size,
+		})
+	}
+	return out
+}
+
+func (z *__ZipFile) Extractall(args ...any) {
+	dest := "."
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok && s != "" {
+			dest = s
+		}
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	for _, e := range z.entries {
+		full := filepath.Join(dest, e.Name)
+		if strings.HasSuffix(e.Name, "/") {
+			os.MkdirAll(full, 0o755)
+			continue
+		}
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		if err := os.WriteFile(full, e.Data, 0o644); err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+	}
+}
+
+func (z *__ZipFile) Close() {
+	z.closed = true
+}
+
+func __gopy_zipfile_open(path string, args ...string) *__ZipFile {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	defer r.Close()
+	zf := &__ZipFile{}
+	for _, f := range r.File {
+		rc, err := f.Open()
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		data, _ := io.ReadAll(rc)
+		rc.Close()
+		zf.entries = append(zf.entries, &__ZipEntry{
+			Name: f.Name,
+			Size: int64(f.UncompressedSize64),
+			Data: data,
+		})
+	}
+	return zf
+}`
+
+// helperWaveReadType — minimal WAV (PCM) reader. Parses the canonical
+// RIFF/WAVE header and exposes accessors plus a frame slicer that hands
+// back raw bytes for [start, start+n*frameWidth).
+const helperWaveReadType = `type __WaveRead struct {
+	nchannels  int64
+	sampwidth  int64
+	framerate  int64
+	nframes    int64
+	frameWidth int64
+	data       []byte
+	pos        int64
+}
+
+func (w *__WaveRead) Getnchannels() int64 { return w.nchannels }
+func (w *__WaveRead) Getsampwidth() int64 { return w.sampwidth }
+func (w *__WaveRead) Getframerate() int64 { return w.framerate }
+func (w *__WaveRead) Getnframes() int64   { return w.nframes }
+func (w *__WaveRead) Getcomptype() string { return "NONE" }
+func (w *__WaveRead) Getcompname() string { return "not compressed" }
+func (w *__WaveRead) Getparams() []any {
+	return []any{w.nchannels, w.sampwidth, w.framerate, w.nframes, "NONE", "not compressed"}
+}
+func (w *__WaveRead) Tell() int64 {
+	if w.frameWidth == 0 {
+		return 0
+	}
+	return w.pos / w.frameWidth
+}
+func (w *__WaveRead) Rewind()                     { w.pos = 0 }
+func (w *__WaveRead) Setpos(p int64)              { w.pos = p * w.frameWidth }
+func (w *__WaveRead) Readframes(n int64) string {
+	if w.frameWidth == 0 {
+		return ""
+	}
+	want := n * w.frameWidth
+	if want < 0 || w.pos+want > int64(len(w.data)) {
+		want = int64(len(w.data)) - w.pos
+	}
+	if want <= 0 {
+		return ""
+	}
+	out := string(w.data[w.pos : w.pos+want])
+	w.pos += want
+	return out
+}
+func (w *__WaveRead) Close() {}
+
+func __gopy_wave_open(path string, args ...string) *__WaveRead {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		panic(NewException("FileNotFoundError: " + err.Error()))
+	}
+	if len(b) < 44 || string(b[0:4]) != "RIFF" || string(b[8:12]) != "WAVE" {
+		panic(NewException("Error: not a WAVE file"))
+	}
+	le16 := func(o int) int64 { return int64(b[o]) | int64(b[o+1])<<8 }
+	le32 := func(o int) int64 {
+		return int64(b[o]) | int64(b[o+1])<<8 | int64(b[o+2])<<16 | int64(b[o+3])<<24
+	}
+	off := 12
+	var fmtFound bool
+	var nch, sw, sr int64
+	var data []byte
+	for off+8 <= len(b) {
+		id := string(b[off : off+4])
+		sz := le32(off + 4)
+		body := off + 8
+		end := body + int(sz)
+		if end > len(b) {
+			break
+		}
+		switch id {
+		case "fmt ":
+			nch = le16(body + 2)
+			sr = le32(body + 4)
+			sw = le16(body + 14) / 8
+			fmtFound = true
+		case "data":
+			data = b[body:end]
+		}
+		off = end
+		if sz%2 == 1 {
+			off++
+		}
+	}
+	if !fmtFound {
+		panic(NewException("Error: missing fmt chunk"))
+	}
+	fw := nch * sw
+	var nf int64
+	if fw > 0 {
+		nf = int64(len(data)) / fw
+	}
+	return &__WaveRead{
+		nchannels:  nch,
+		sampwidth:  sw,
+		framerate:  sr,
+		nframes:    nf,
+		frameWidth: fw,
+		data:       data,
+	}
+}`
+
+// helperFileinputInput — eagerly reads every line from each given file
+// (no stdin fallback). Returns []string with newlines preserved.
+const helperFileinputInput = `func __gopy_fileinput_input(args ...any) []string {
+	out := []string{}
+	paths := []string{}
+	if len(args) > 0 {
+		switch v := args[0].(type) {
+		case string:
+			paths = []string{v}
+		case []string:
+			paths = v
+		case []any:
+			for _, x := range v {
+				if s, ok := x.(string); ok {
+					paths = append(paths, s)
+				}
+			}
+		}
+	}
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			out = append(out, sc.Text()+"\n")
+		}
+		f.Close()
+	}
+	return out
+}`
+
+// helperTomllibLoads — minimal TOML subset parser: comments, bare keys,
+// string / int / float / bool / array values, [table] headers. Returns
+// dict[str, any] (nested under tables).
+const helperTomllibLoads = `func __gopy_tomllib_loads(s string) map[string]any {
+	root := map[string]any{}
+	cur := root
+	lines := strings.Split(s, "\n")
+	for _, raw := range lines {
+		ln := strings.TrimSpace(raw)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		if i := strings.Index(ln, "#"); i >= 0 {
+			inStr := false
+			for j, c := range ln {
+				if c == '"' || c == '\'' {
+					inStr = !inStr
+				}
+				if c == '#' && !inStr {
+					ln = strings.TrimSpace(ln[:j])
+					break
+				}
+			}
+		}
+		if strings.HasPrefix(ln, "[") && strings.HasSuffix(ln, "]") {
+			name := strings.TrimSpace(ln[1 : len(ln)-1])
+			parts := strings.Split(name, ".")
+			cur = root
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				next, ok := cur[p].(map[string]any)
+				if !ok {
+					next = map[string]any{}
+					cur[p] = next
+				}
+				cur = next
+			}
+			continue
+		}
+		eq := strings.Index(ln, "=")
+		if eq < 0 {
+			continue
+		}
+		k := strings.TrimSpace(ln[:eq])
+		v := strings.TrimSpace(ln[eq+1:])
+		k = strings.Trim(k, "\"'")
+		cur[k] = __gopy_tomllib_value(v)
+	}
+	return root
+}
+
+func __gopy_tomllib_value(v string) any {
+	if v == "" {
+		return ""
+	}
+	if v == "true" {
+		return true
+	}
+	if v == "false" {
+		return false
+	}
+	if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
+		body := v[1 : len(v)-1]
+		body = strings.ReplaceAll(body, "\\n", "\n")
+		body = strings.ReplaceAll(body, "\\t", "\t")
+		body = strings.ReplaceAll(body, "\\\"", "\"")
+		return body
+	}
+	if strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]") {
+		inner := strings.TrimSpace(v[1 : len(v)-1])
+		out := []any{}
+		if inner == "" {
+			return out
+		}
+		parts := __gopy_tomllib_split(inner)
+		for _, p := range parts {
+			out = append(out, __gopy_tomllib_value(strings.TrimSpace(p)))
+		}
+		return out
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return n
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil {
+		return f
+	}
+	return v
+}
+
+func __gopy_tomllib_split(s string) []string {
+	out := []string{}
+	depth := 0
+	inStr := false
+	cur := ""
+	for _, c := range s {
+		if c == '"' || c == '\'' {
+			inStr = !inStr
+		}
+		if !inStr {
+			if c == '[' {
+				depth++
+			} else if c == ']' {
+				depth--
+			} else if c == ',' && depth == 0 {
+				out = append(out, cur)
+				cur = ""
+				continue
+			}
+		}
+		cur += string(c)
+	}
+	if strings.TrimSpace(cur) != "" {
+		out = append(out, cur)
 	}
 	return out
 }`
