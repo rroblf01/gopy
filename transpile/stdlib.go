@@ -112,6 +112,12 @@ var stdlibModules = map[string]stdlibModule{
 			"statvfs":   {GoFunc: "__gopy_os_statvfs", Helper: helperOsStatvfs, HelperImports: []string{"syscall"}},
 			"sync":      {GoFunc: "__gopy_os_sync", Helper: helperOsSync, HelperImports: []string{"syscall"}},
 			"sysconf":   {GoFunc: "__gopy_os_sysconf", Helper: helperOsSysconf, RetKind: "int"},
+			"pipe":      {GoFunc: "__gopy_os_pipe", Helper: helperOsPipe, HelperImports: []string{"os"}},
+			"dup":       {GoFunc: "__gopy_os_dup", Helper: helperOsDup, HelperImports: []string{"syscall"}, RetKind: "int"},
+			"dup2":      {GoFunc: "__gopy_os_dup2", Helper: helperOsDup2, HelperImports: []string{"syscall"}, RetKind: "int"},
+			"close":     {GoFunc: "__gopy_os_close", Helper: helperOsClose, HelperImports: []string{"syscall"}},
+			"read":      {GoFunc: "__gopy_os_read_fd", Helper: helperOsReadFd, HelperImports: []string{"syscall"}, RetKind: "str"},
+			"write":     {GoFunc: "__gopy_os_write_fd", Helper: helperOsWriteFd, HelperImports: []string{"syscall"}, RetKind: "int"},
 		},
 		Subs: map[string]stdlibModule{
 			"path": {
@@ -1272,6 +1278,7 @@ var stdlibModules = map[string]stdlibModule{
 			"ntohs":         {GoFunc: "__gopy_socket_htons", Helper: helperSocketHtons, RetKind: "int"},
 			"socket":        {GoFunc: "__gopy_socket_new", Helper: helperSocketNew, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 			"create_connection": {GoFunc: "__gopy_socket_create_conn", Helper: helperSocketCreateConn, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
+			"socketpair":     {GoFunc: "__gopy_socket_pair", Helper: helperSocketPair, ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 			"if_nameindex":     {GoFunc: "__gopy_socket_if_nameindex", Helper: helperSocketIfNameindex, HelperImports: []string{"net"}},
 			"if_indextoname":   {GoFunc: "__gopy_socket_if_indextoname", Helper: helperSocketIfIndextoname, HelperImports: []string{"net"}, RetKind: "str"},
 			"if_nametoindex":   {GoFunc: "__gopy_socket_if_nametoindex", Helper: helperSocketIfNametoindex, HelperImports: []string{"net"}, RetKind: "int"},
@@ -4915,6 +4922,37 @@ const helperSocketCreateConn = `func __gopy_socket_create_conn(addr []any, args 
 	s := &__Socket{}
 	s.Connect(addr)
 	return s
+}`
+
+// helperSocketPair — emulates socket.socketpair via a bound TCP listener
+// + connect on 127.0.0.1. Returns two connected __Socket instances so
+// callers can write to one and read from the other. Note: not a real
+// AF_UNIX pair; the loopback TCP shim is good enough for IPC-style use.
+const helperSocketPair = `func __gopy_socket_pair(args ...any) []any {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	defer l.Close()
+	addr := l.Addr().String()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		c, err := l.Accept()
+		ch <- result{conn: c, err: err}
+	}()
+	cli, err := net.Dial("tcp", addr)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	srvR := <-ch
+	if srvR.err != nil {
+		panic(NewException("OSError: " + srvR.err.Error()))
+	}
+	return []any{&__Socket{conn: cli}, &__Socket{conn: srvR.conn}}
 }`
 
 const helperPlatformSystem = `func __gopy_platform_system() string {
@@ -9161,6 +9199,55 @@ const helperOsStatvfs = `func __gopy_os_statvfs(path string) []any {
 // doesn't always cover it.
 const helperOsSync = `func __gopy_os_sync() {
 	syscall.Sync()
+}`
+
+// helperOsPipe — wrap os.Pipe so transpiled code gets two raw fds.
+// CPython returns (r, w) ints; gopy returns []any so unpacking via index
+// works (`p = os.pipe(); r = p[0]; w = p[1]`).
+const helperOsPipe = `func __gopy_os_pipe() []int64 {
+	r, w, err := os.Pipe()
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return []int64{int64(r.Fd()), int64(w.Fd())}
+}`
+
+const helperOsDup = `func __gopy_os_dup(fd int64) int64 {
+	nfd, err := syscall.Dup(int(fd))
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return int64(nfd)
+}`
+
+const helperOsDup2 = `func __gopy_os_dup2(oldfd, newfd int64) int64 {
+	if err := syscall.Dup2(int(oldfd), int(newfd)); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return newfd
+}`
+
+const helperOsClose = `func __gopy_os_close(fd int64) {
+	if err := syscall.Close(int(fd)); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperOsReadFd = `func __gopy_os_read_fd(fd, n int64) string {
+	buf := make([]byte, n)
+	cnt, err := syscall.Read(int(fd), buf)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return string(buf[:cnt])
+}`
+
+const helperOsWriteFd = `func __gopy_os_write_fd(fd int64, data string) int64 {
+	n, err := syscall.Write(int(fd), []byte(data))
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return int64(n)
 }`
 
 // helperOsSysconf — accept the name string and return common defaults.
