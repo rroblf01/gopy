@@ -6977,6 +6977,8 @@ var taggedMethodRename = map[string]map[string]string{
 		"send":       "Send",
 		"sendall":    "Sendall",
 		"recv":       "Recv",
+		"sendto":     "Sendto",
+		"recvfrom":   "Recvfrom",
 		"close":      "Close",
 		"setsockopt": "Setsockopt",
 		"settimeout": "Settimeout",
@@ -7329,7 +7331,16 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 							continue
 						}
 					}
-					return fmt.Errorf("argparse add_argument: type= must be int / float / str / bool")
+					// Anything else — assume callable (user function or
+					// a method reference). Wrap so the helper sees a
+					// uniform func(string) any signature regardless of
+					// the underlying return type.
+					g.writef("func(__s string) any { return ")
+					if err := g.expr(kw.Value); err != nil {
+						return err
+					}
+					g.writef("(__s) }")
+					continue
 				}
 				if err := g.boxedExpr(kw.Value); err != nil {
 					return err
@@ -14219,17 +14230,34 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		g.writef(")")
 		return true, nil
 	case "hex":
-		// bytes.hex() / str.hex() — emit hex.EncodeToString. gopy maps
-		// bytes to str so the same dispatch covers both.
-		if len(m.Args) != 0 {
-			return true, fmt.Errorf("bytes.hex() takes no arguments")
+		// bytes.hex(sep?, bytes_per_sep?) / str.hex() — emit hex encoding.
+		// gopy maps bytes to str so dispatch covers both. CPython accepts
+		// an optional 1-char separator that gets injected between each
+		// hex pair; the second arg controls grouping (default 1, but we
+		// only honor the separator for the common 1-byte case).
+		if len(m.Args) > 2 {
+			return true, fmt.Errorf("bytes.hex() takes at most 2 arguments")
+		}
+		if len(m.Args) == 0 {
+			g.addImport("encoding/hex")
+			g.writef("hex.EncodeToString([]byte(")
+			if err := g.expr(m.Recv); err != nil {
+				return true, err
+			}
+			g.writef("))")
+			return true, nil
 		}
 		g.addImport("encoding/hex")
-		g.writef("hex.EncodeToString([]byte(")
+		g.addImport("strings")
+		g.writef("func() string { __h := hex.EncodeToString([]byte(")
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
 		}
-		g.writef("))")
+		g.writef(")); __sep := ")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef("; if __sep == \"\" { return __h }; var __b strings.Builder; for __i := 0; __i < len(__h); __i += 2 { if __i > 0 { __b.WriteString(__sep) }; __b.WriteString(__h[__i:__i+2]) }; return __b.String() }()")
 		return true, nil
 	case "swapcase":
 		if len(m.Args) != 0 {

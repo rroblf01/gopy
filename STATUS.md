@@ -393,13 +393,13 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - ~~**`re` flags** (`re.IGNORECASE`, `re.MULTILINE`, etc.) — flag args parse but compiled patterns ignore them~~ now applied: each Go regexp helper accepts trailing flag args and prefixes the pattern with `(?ims)` as appropriate. `IGNORECASE` / `MULTILINE` / `DOTALL` work; `VERBOSE` / `ASCII` / `UNICODE` accept-but-no-op (Go regexp syntax differs)
 - **`json.JSONEncoder` / `JSONDecoder` subclassing** — registered as stub
 - **`pickle` binary protocol** — JSON-backed; not wire-compatible with CPython
-- **`socket` UDP / Unix-domain / raw sockets** — only TCP TCP-stream forms wired
+- **`socket` UDP** — `socket.socket(AF_INET, SOCK_DGRAM)` returns a `__Socket` flagged for `net.PacketConn`. `bind(("host", port))` opens a packet listener; `sendto(data, (host, port))` writes one datagram (allocating an outbound packet conn on first use); `recvfrom(n)` returns `[data, (host, port)]`. Unix-domain and raw sockets still unwired
 - **`http.server.BaseHTTPRequestHandler`** real request handling — registered as stub
 - **`http.client` POST/PUT bodies, redirects, cookies**
-- **`urllib.request.urlretrieve` headers / progress callback** — only the basic download form works
+- **`urllib.request.urlretrieve(url, dest, reporthook)`** progress callback now fires once per 8KB chunk with `(block_num, block_size, total_size)`. Headers from the response are still dropped on the floor (no `Content-Length` echoed back beyond the value the callback sees)
 - **`ssl.SSLContext` / certificate verification** — context constructors are stubs
 - **`logging.Logger` hierarchy, `Filter` chaining, custom `Handler`** — per-logger `setLevel` / `getEffectiveLevel` / `isEnabledFor` work and the module-level threshold gates emission, but propagation to parent loggers, custom handlers, and formatter pipelines aren't wired
-- **`argparse` subparsers / mutually exclusive groups / callable `type=` converters** — flat positional / optional args + `type=int|float|str|bool` + `default=` + `action=store_true|store_false` + `dest=` work; nested parsers / `type=MyClass` not yet
+- **`argparse` subparsers / mutually exclusive groups** — flat positional / optional args + `type=int|float|str|bool` + `default=` + `action=store_true|store_false` + `dest=` work. **Callable `type=` converters** now ride through too: passing a user function for `type=` wraps it as `func(string) any` and the helper calls it instead of the string-key fast path. Nested parsers / group APIs still not wired
 - ~~**`configparser` write-back to file (`.write(fp)`)** — read + `set()` work, no serializer yet~~ now wired: `cp.write(fh)` accepts any handle with a `Write(string) int64` method (or `*os.File` from `with open(...) as fh`) and emits one section per existing entry plus DEFAULT
 - **`mmap`, `select`, `selectors`** real wakeups — all registered as stubs
 - **`signal.signal(SIG, handler)`** registers a real Go `signal.Notify` channel and spawns a listener goroutine that calls back into the Python handler with `(signum, None)` on delivery. `signal.getsignal(SIG)` returns the last-registered callable. `SIG_DFL` / `SIG_IGN` reset the channel. Goroutine-driven, so cross-platform but skips CPython's reentrancy guarantees

@@ -3737,7 +3737,19 @@ const helperURLRetrieve = `func __gopy_url_urlretrieve(args ...any) []any {
 	url, _ := args[0].(string)
 	dest := ""
 	if len(args) > 1 {
-		dest, _ = args[1].(string)
+		if s, ok := args[1].(string); ok {
+			dest = s
+		}
+	}
+	// Third positional is the progress callback: hook(block_num, block_size, total_size).
+	var hook func(int64, int64, int64)
+	if len(args) > 2 {
+		switch fn := args[2].(type) {
+		case func(int64, int64, int64):
+			hook = fn
+		case func(int64, int64, int64) any:
+			hook = func(a, b, c int64) { fn(a, b, c) }
+		}
 	}
 	resp, err := http.Get(url)
 	if err != nil {
@@ -3757,7 +3769,26 @@ const helperURLRetrieve = `func __gopy_url_urlretrieve(args ...any) []any {
 		panic(NewException("URLError: " + err.Error()))
 	}
 	defer out.Close()
-	io.Copy(out, resp.Body)
+	if hook == nil {
+		io.Copy(out, resp.Body)
+		return []any{dest, map[string]string{}}
+	}
+	const block int64 = 8192
+	total := resp.ContentLength
+	buf := make([]byte, block)
+	var blockNum int64 = 0
+	hook(0, block, total)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			out.Write(buf[:n])
+			blockNum++
+			hook(blockNum, block, total)
+		}
+		if rerr != nil {
+			break
+		}
+	}
 	return []any{dest, map[string]string{}}
 }`
 
@@ -4255,7 +4286,9 @@ const helperSocketGethostbyaddr = `func __gopy_socket_gethostbyaddr(addr string)
 const helperSocketType = `type __Socket struct {
 	conn     net.Conn
 	listener net.Listener
+	pconn    net.PacketConn
 	bindAddr string
+	isUDP    bool
 }
 
 func (s *__Socket) Connect(addr []any) {
@@ -4278,6 +4311,61 @@ func (s *__Socket) Bind(addr []any) {
 	host := fmt.Sprintf("%v", addr[0])
 	port := fmt.Sprintf("%v", addr[1])
 	s.bindAddr = host + ":" + port
+	if s.isUDP {
+		pc, err := net.ListenPacket("udp", s.bindAddr)
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		s.pconn = pc
+	}
+}
+
+func (s *__Socket) Sendto(data string, addr []any) int64 {
+	if !s.isUDP {
+		panic(NewException("OSError: sendto requires SOCK_DGRAM"))
+	}
+	if len(addr) != 2 {
+		panic(NewException("socket.sendto: expected (host, port)"))
+	}
+	host := fmt.Sprintf("%v", addr[0])
+	port := fmt.Sprintf("%v", addr[1])
+	if s.pconn == nil {
+		pc, err := net.ListenPacket("udp", ":0")
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		s.pconn = pc
+	}
+	target, err := net.ResolveUDPAddr("udp", host+":"+port)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	n, err := s.pconn.WriteTo([]byte(data), target)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return int64(n)
+}
+
+func (s *__Socket) Recvfrom(n int64) []any {
+	if !s.isUDP {
+		panic(NewException("OSError: recvfrom requires SOCK_DGRAM"))
+	}
+	if s.pconn == nil {
+		panic(NewException("OSError: recvfrom: must bind() first"))
+	}
+	buf := make([]byte, n)
+	read, addr, err := s.pconn.ReadFrom(buf)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	host := addr.String()
+	port := int64(0)
+	if ua, ok := addr.(*net.UDPAddr); ok {
+		host = ua.IP.String()
+		port = int64(ua.Port)
+	}
+	return []any{string(buf[:read]), []any{host, port}}
 }
 
 func (s *__Socket) Listen(args ...int64) {
@@ -4340,6 +4428,10 @@ func (s *__Socket) Close() {
 		s.listener.Close()
 		s.listener = nil
 	}
+	if s.pconn != nil {
+		s.pconn.Close()
+		s.pconn = nil
+	}
 }
 
 func (s *__Socket) Setsockopt(args ...any) {}
@@ -4349,9 +4441,13 @@ func (s *__Socket) Enter() *__Socket { return s }
 func (s *__Socket) Exit(_, _, _ any) { s.Close() }`
 
 const helperSocketNew = `func __gopy_socket_new(args ...int64) *__Socket {
-	// Family / type are accepted but only TCP/INET combos do anything
-	// at Connect() time. Return a fresh, disconnected socket.
-	return &__Socket{}
+	// Second positional arg (type) decides TCP vs UDP. socket.SOCK_DGRAM
+	// is 2; anything else stays TCP. Family is accepted but ignored.
+	s := &__Socket{}
+	if len(args) >= 2 && args[1] == 2 {
+		s.isUDP = true
+	}
+	return s
 }`
 
 const helperSocketCreateConn = `func __gopy_socket_create_conn(addr []any, args ...int64) *__Socket {
@@ -4669,6 +4765,7 @@ const helperArgparseType = `type __ArgSpec struct {
 	Action  string
 	IsPos   bool
 	Type    string
+	Convert func(string) any
 }
 
 type __ArgParser struct {
@@ -4734,6 +4831,10 @@ func (p *__ArgParser) AddArgument(args ...any) {
 	if kwargs != nil {
 		if t, ok := kwargs["type"].(string); ok {
 			spec.Type = t
+		}
+		if t, ok := kwargs["type"].(func(string) any); ok {
+			spec.Convert = t
+			spec.Type = "__callable"
 		}
 		if d, ok := kwargs["default"]; ok {
 			spec.Default = d
@@ -4833,7 +4934,9 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 					i++
 				}
 			}
-			if known && spec.Type != "" {
+			if known && spec.Convert != nil {
+				ns.Values[name] = spec.Convert(val)
+			} else if known && spec.Type != "" {
 				ns.Values[name] = __gopy_argparse_convert(spec.Type, val)
 			} else if v, err := strconv.ParseInt(val, 10, 64); err == nil {
 				ns.Values[name] = v
@@ -4855,7 +4958,9 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 			if known {
 				if i+1 < len(argv) {
 					raw := argv[i+1]
-					if spec.Type != "" {
+					if spec.Convert != nil {
+						ns.Values[spec.Name] = spec.Convert(raw)
+					} else if spec.Type != "" {
 						ns.Values[spec.Name] = __gopy_argparse_convert(spec.Type, raw)
 					} else {
 						ns.Values[spec.Name] = raw
@@ -4865,7 +4970,9 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 			}
 		} else if posIdx < len(posSpecs) {
 			spec := posSpecs[posIdx]
-			if spec.Type != "" {
+			if spec.Convert != nil {
+				ns.Values[spec.Name] = spec.Convert(tok)
+			} else if spec.Type != "" {
 				ns.Values[spec.Name] = __gopy_argparse_convert(spec.Type, tok)
 			} else {
 				ns.Values[spec.Name] = tok
