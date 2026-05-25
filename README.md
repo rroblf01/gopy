@@ -206,13 +206,13 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] `re.split(pattern, s)`, `re.escape(s)`, `re.fullmatch(pattern, s)`, `re.subn(pattern, repl, s)` returns `[result, count]`
 - [x] `csv.writer(fh)` stateful writer with `.writerow(row)` / `.writerows(rows)` bound to a `with open(...)` handle; `csv.DictReader(lines)` returns `[]map[string]string`; `csv.DictWriter(fh, fields)` with `.writeheader()` / `.writerow(d)` / `.writerows(rows)`
 - [x] `pathlib.Path` arithmetic (`p / "sub"`), `.name`, `.parent`, `.suffix`, `.stem`
-- [x] `pathlib.Path.iterdir()` (returns `[]*Path`; loop var inherits the Path tag so `for child in p.iterdir(): print(child.name)` works), `.mkdir(parents, exist_ok)`, `.unlink()`, `.glob(pattern)` (shell-style glob via `filepath.Glob`)
+- [x] `pathlib.Path.iterdir()` (returns `[]*Path`; loop var inherits the Path tag so `for child in p.iterdir(): print(child.name)` works), `.mkdir(parents, exist_ok)`, `.unlink()`, `.glob(pattern)` (shell-style glob via `filepath.Glob`), `.rglob(pattern)` (recursive walk via `filepath.WalkDir`; basename-matched against the pattern), `.read_bytes()` / `.write_bytes(s)` (alias the text counterparts since gopy maps `bytes` to `string`), `.match(pattern)` (right-anchored fnmatch on basename; multi-segment patterns match the joined path), `Path.cwd()` / `Path.home()` classmethods returning a freshly-tagged Path from `os.Getwd` / `os.UserHomeDir`
 - [x] `json.dumps(v, indent=N)` pretty-prints with N-space indentation; default form keeps the existing Python-style separators
 - [x] `json.load(fh)` / `json.dump(v, fh)` for `with open(...) as fh:` handles
 - [x] File iteration line by line (`for line in fh:`)
 - [x] `datetime.timedelta` keyword constructor with full parameter set (`days`, `seconds`, `microseconds`, `milliseconds`, `minutes`, `hours`, `weeks`)
 - [x] `datetime.datetime.strptime(s, fmt)` and `.strftime(fmt)` / `date.strftime(fmt)` (Python format codes `%Y/%m/%d/%H/%M/%S/%y/%B/%b/%A/%a/%p/%j/%z` mapped to Go's reference-time layout)
-- [x] `datetime.datetime.fromtimestamp(ts)`, `.fromisoformat(s)`, `.utcnow()`, `.weekday()`, `.isoweekday()`, `.timestamp()`, `.replace(year=..., ...)`, `datetime.combine(date, time)`; `date.replace(year=..., month=..., day=...)`
+- [x] `datetime.datetime.fromtimestamp(ts)`, `.fromisoformat(s)` (accepts trailing `Z`, `+HHMM` or `+HH:MM` offset suffixes; the offset validates the form but the parsed datetime keeps the local clock components, matching CPython's `strftime` behavior on tz-aware values), `.utcnow()`, `.weekday()`, `.isoweekday()`, `.timestamp()`, `.replace(year=..., ...)`, `datetime.combine(date, time)`; `date.replace(year=..., month=..., day=...)`
 - [x] `timedelta.total_seconds()`, `.days`, `.seconds`, `abs(td)`, `td + td`, `td - td`, `td * int`, `int * td`, `td / int`
 - [x] `enum.auto()` (sequential integer assignment, mixes with explicit values). `Enum`, `IntEnum`, `Flag`, `IntFlag`, `StrEnum` bases all collapse to a typed `int64` alias + constants; bitwise ops on `IntFlag` work via Go's `& | ^` over the alias type
 - [x] `@dataclass` field defaults via `field(default=...)` / `field(default_factory=list/dict/set)` — fresh container per instance
@@ -221,8 +221,8 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] `sum(xs, start)` 2-arg form (int/float; promotes to float when either side is float)
 - [x] `datetime.date(y, m, d)` / `datetime.time(h, m, s)` with `.year/.month/.day` (`.hour/.minute/.second`), `.isoformat()`, `.weekday()`, `.isoweekday()`; `date.today()`, `date.fromisoformat(s)`
 - [x] `subprocess.run` returning a typed `CompletedProcess` (kwargs ignored)
-- [x] `argparse` minimal subset: `ArgumentParser()` + `parser.add_argument(...)` + `parser.parse_args([argv])` → `__ArgNamespace`. Reads `--key value` / `--key=value` / short `-k value` / positional args; auto-parses int-shaped values. Subparsers, mutually exclusive groups, custom `type=` converters, and CPython's attribute access (`ns.name`) are not wired — use `ns.Get("name")` in gopy code
-- [x] `logging` levels writing to stderr (no level filtering, no handlers); `logging.getLogger(name)` returns a `__Logger` with `.debug`/`.info`/`.warning`/`.error`/`.critical` prefixed by the logger name
+- [x] `argparse` minimal subset: `ArgumentParser()` + `parser.add_argument(...)` + `parser.parse_args([argv])` → `__ArgNamespace`. Reads `--key value` / `--key=value` / short `-k value` / positional args; auto-parses int-shaped values. Honored kwargs on `add_argument`: `type=int` / `type=float` / `type=str` / `type=bool` (drives runtime conversion via `strconv`), `default=...` (literal default), `action="store_true"` / `"store_false"` (boolean flag, no value follows), `dest="name"` (override the resolved name). Subparsers, mutually exclusive groups, custom callable `type=` converters, and CPython's attribute access (`ns.name`) are not wired — use `ns.Get("name")` in gopy code
+- [x] `logging` levels writing to stderr; the module-level threshold (default `WARNING` = 30) gates `logging.debug` / `info` / `warning` / `error` / `critical` and `logging.basicConfig(level=...)` lowers it. `logging.getLogger(name)` returns a `__Logger` with `.debug`/`.info`/`.warning`/`.error`/`.critical` plus `.setLevel(level)` / `.getEffectiveLevel()` / `.isEnabledFor(level)` for per-logger overrides. Handlers / formatters / filter chains aren't wired — every emit goes through the default `LEVEL:name:msg` stderr line
 - [x] `collections.Counter`
 - [x] `collections.defaultdict` (annotation-driven; factory ignored)
 - [x] `collections.deque` (list-backed; append/appendleft/pop/popleft)
@@ -308,7 +308,7 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [ ] LSP / editor diagnostics: report unsupported features at edit time
 - [x] Transpile errors prefix the offending module / filename in front of the existing `line N: ...` context, so multi-file builds point at the source instead of just a line number. Full caret-with-source-excerpt rendering is still a future improvement
 - [x] CI workflow in this repo (GitHub Actions) running the fixture suite on `ubuntu-latest` + `macos-latest`
-- [x] Continuous benchmarks dashboard so regressions surface in PRs — `.github/workflows/bench.yml` re-runs every `bench_*.py` fixture on every push / PR / `workflow_dispatch` against both `ubuntu-latest` and `macos-latest`. The summary table (CPython ms / gopy ms / speedup / RSS) lands in the job summary page (`$GITHUB_STEP_SUMMARY`) and as a downloadable per-OS artifact (`bench-report-<os>.md`)
+- [ ] Continuous benchmarks dashboard so regressions surface in PRs
 
 ### Codegen quality
 

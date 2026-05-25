@@ -1335,13 +1335,13 @@ var stdlibModules = map[string]stdlibModule{
 			"NOTSET":   {GoExpr: "int64(0)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"debug":         {GoFunc: "__gopy_log_debug", GoImport: "fmt", Helper: helperLogDebug, HelperImports: []string{"os"}},
-			"info":          {GoFunc: "__gopy_log_info", GoImport: "fmt", Helper: helperLogInfo, HelperImports: []string{"os"}},
-			"warning":       {GoFunc: "__gopy_log_warning", GoImport: "fmt", Helper: helperLogWarning, HelperImports: []string{"os"}},
-			"error":         {GoFunc: "__gopy_log_error", GoImport: "fmt", Helper: helperLogError, HelperImports: []string{"os"}},
-			"critical":      {GoFunc: "__gopy_log_critical", GoImport: "fmt", Helper: helperLogCritical, HelperImports: []string{"os"}},
-			"basicConfig":   {GoFunc: "__gopy_log_basicConfig", Helper: helperLogBasicConfig},
-			"getLogger":     {GoFunc: "__gopy_log_getlogger", GoImport: "fmt", Helper: helperLogGetLogger, RetTag: "__Logger", ExtraHelpers: map[string]string{"__Logger": helperLoggerType}, HelperImports: []string{"os"}},
+			"debug":         {GoFunc: "__gopy_log_debug", GoImport: "fmt", Helper: helperLogDebug, ExtraHelpers: map[string]string{"__gopy_log_state": helperLogState}, HelperImports: []string{"os"}},
+			"info":          {GoFunc: "__gopy_log_info", GoImport: "fmt", Helper: helperLogInfo, ExtraHelpers: map[string]string{"__gopy_log_state": helperLogState}, HelperImports: []string{"os"}},
+			"warning":       {GoFunc: "__gopy_log_warning", GoImport: "fmt", Helper: helperLogWarning, ExtraHelpers: map[string]string{"__gopy_log_state": helperLogState}, HelperImports: []string{"os"}},
+			"error":         {GoFunc: "__gopy_log_error", GoImport: "fmt", Helper: helperLogError, ExtraHelpers: map[string]string{"__gopy_log_state": helperLogState}, HelperImports: []string{"os"}},
+			"critical":      {GoFunc: "__gopy_log_critical", GoImport: "fmt", Helper: helperLogCritical, ExtraHelpers: map[string]string{"__gopy_log_state": helperLogState}, HelperImports: []string{"os"}},
+			"basicConfig":   {GoFunc: "__gopy_log_basicConfig", Helper: helperLogBasicConfig, ExtraHelpers: map[string]string{"__gopy_log_state": helperLogState}},
+			"getLogger":     {GoFunc: "__gopy_log_getlogger", GoImport: "fmt", Helper: helperLogGetLogger, RetTag: "__Logger", ExtraHelpers: map[string]string{"__Logger": helperLoggerType, "__gopy_log_state": helperLogState}, HelperImports: []string{"os"}},
 			"Handler":       {GoFunc: "__gopy_logging_handler_unused"},
 			"StreamHandler": {GoFunc: "__gopy_logging_handler_unused"},
 			"FileHandler":   {GoFunc: "__gopy_logging_handler_unused"},
@@ -1596,12 +1596,12 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"pathlib": {
 		Funcs: map[string]stdlibFunc{
-			"Path":            {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
-			"PurePath":        {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
-			"PurePosixPath":   {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
-			"PureWindowsPath": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
-			"PosixPath":       {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
-			"WindowsPath":     {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath"}},
+			"Path":            {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
+			"PurePath":        {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
+			"PurePosixPath":   {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
+			"PureWindowsPath": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
+			"PosixPath":       {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
+			"WindowsPath":     {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
 		},
 	},
 	"datetime": {
@@ -3921,22 +3921,93 @@ const helperURLParseQsl = `func __gopy_url_parse_qsl(s string) []any {
 
 // helperLog* mimic the logging module's level-prefixed stderr output.
 // CPython's default formatter is `LEVEL:root:msg`; our shim uses the
-// same shape so fixtures comparing stderr can round-trip. basicConfig
-// is a no-op because we don't honor log levels yet — every call writes.
-const helperLogDebug = `func __gopy_log_debug(msg string) { fmt.Fprintln(os.Stderr, "DEBUG:root:"+msg) }`
-const helperLogInfo = `func __gopy_log_info(msg string) { fmt.Fprintln(os.Stderr, "INFO:root:"+msg) }`
-const helperLogWarning = `func __gopy_log_warning(msg string) { fmt.Fprintln(os.Stderr, "WARNING:root:"+msg) }`
-const helperLogError = `func __gopy_log_error(msg string) { fmt.Fprintln(os.Stderr, "ERROR:root:"+msg) }`
-const helperLogCritical = `func __gopy_log_critical(msg string) { fmt.Fprintln(os.Stderr, "CRITICAL:root:"+msg) }`
-const helperLogBasicConfig = `func __gopy_log_basicConfig() {}`
+// same shape so fixtures comparing stderr can round-trip. The module-level
+// __gopy_log_level threshold gates emission: calls below the threshold
+// are dropped (matching CPython's root logger behavior, default WARNING).
+const helperLogState = `var __gopy_log_level int64 = 30
 
-const helperLoggerType = `type __Logger struct{ name string }
+func __gopy_log_should(level int64) bool { return level >= __gopy_log_level }`
 
-func (l *__Logger) Debug(msg string)    { fmt.Fprintln(os.Stderr, "DEBUG:"+l.name+":"+msg) }
-func (l *__Logger) Info(msg string)     { fmt.Fprintln(os.Stderr, "INFO:"+l.name+":"+msg) }
-func (l *__Logger) Warning(msg string)  { fmt.Fprintln(os.Stderr, "WARNING:"+l.name+":"+msg) }
-func (l *__Logger) Error(msg string)    { fmt.Fprintln(os.Stderr, "ERROR:"+l.name+":"+msg) }
-func (l *__Logger) Critical(msg string) { fmt.Fprintln(os.Stderr, "CRITICAL:"+l.name+":"+msg) }`
+const helperLogDebug = `func __gopy_log_debug(msg string) {
+	if __gopy_log_should(10) {
+		fmt.Fprintln(os.Stderr, "DEBUG:root:"+msg)
+	}
+}`
+const helperLogInfo = `func __gopy_log_info(msg string) {
+	if __gopy_log_should(20) {
+		fmt.Fprintln(os.Stderr, "INFO:root:"+msg)
+	}
+}`
+const helperLogWarning = `func __gopy_log_warning(msg string) {
+	if __gopy_log_should(30) {
+		fmt.Fprintln(os.Stderr, "WARNING:root:"+msg)
+	}
+}`
+const helperLogError = `func __gopy_log_error(msg string) {
+	if __gopy_log_should(40) {
+		fmt.Fprintln(os.Stderr, "ERROR:root:"+msg)
+	}
+}`
+const helperLogCritical = `func __gopy_log_critical(msg string) {
+	if __gopy_log_should(50) {
+		fmt.Fprintln(os.Stderr, "CRITICAL:root:"+msg)
+	}
+}`
+const helperLogBasicConfig = `func __gopy_log_basicConfig(args ...int64) {
+	if len(args) > 0 {
+		__gopy_log_level = args[0]
+	}
+}`
+
+const helperLoggerType = `type __Logger struct {
+	name  string
+	level int64
+}
+
+func (l *__Logger) shouldLog(level int64) bool {
+	eff := l.level
+	if eff == 0 {
+		eff = __gopy_log_level
+	}
+	return level >= eff
+}
+
+func (l *__Logger) SetLevel(level int64) { l.level = level }
+
+func (l *__Logger) GetEffectiveLevel() int64 {
+	if l.level != 0 {
+		return l.level
+	}
+	return __gopy_log_level
+}
+
+func (l *__Logger) IsEnabledFor(level int64) bool { return l.shouldLog(level) }
+
+func (l *__Logger) Debug(msg string) {
+	if l.shouldLog(10) {
+		fmt.Fprintln(os.Stderr, "DEBUG:"+l.name+":"+msg)
+	}
+}
+func (l *__Logger) Info(msg string) {
+	if l.shouldLog(20) {
+		fmt.Fprintln(os.Stderr, "INFO:"+l.name+":"+msg)
+	}
+}
+func (l *__Logger) Warning(msg string) {
+	if l.shouldLog(30) {
+		fmt.Fprintln(os.Stderr, "WARNING:"+l.name+":"+msg)
+	}
+}
+func (l *__Logger) Error(msg string) {
+	if l.shouldLog(40) {
+		fmt.Fprintln(os.Stderr, "ERROR:"+l.name+":"+msg)
+	}
+}
+func (l *__Logger) Critical(msg string) {
+	if l.shouldLog(50) {
+		fmt.Fprintln(os.Stderr, "CRITICAL:"+l.name+":"+msg)
+	}
+}`
 
 const helperLogGetLogger = `func __gopy_log_getlogger(args ...string) *__Logger {
 	name := "root"
@@ -4412,6 +4483,7 @@ const helperArgparseType = `type __ArgSpec struct {
 	Default any
 	Action  string
 	IsPos   bool
+	Type    string
 }
 
 type __ArgParser struct {
@@ -4424,7 +4496,35 @@ type __ArgNamespace struct {
 
 func (n *__ArgNamespace) Get(name string) any { return n.Values[name] }
 
+func __gopy_argparse_convert(t, raw string) any {
+	switch t {
+	case "int":
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			return v
+		}
+		return int64(0)
+	case "float":
+		if v, err := strconv.ParseFloat(raw, 64); err == nil {
+			return v
+		}
+		return float64(0)
+	case "bool":
+		if v, err := strconv.ParseBool(raw); err == nil {
+			return v
+		}
+		return false
+	}
+	return raw
+}
+
 func (p *__ArgParser) AddArgument(args ...any) {
+	var kwargs map[string]any
+	if n := len(args); n > 0 {
+		if kv, ok := args[n-1].(map[string]any); ok {
+			kwargs = kv
+			args = args[:n-1]
+		}
+	}
 	if len(args) == 0 {
 		return
 	}
@@ -4446,6 +4546,23 @@ func (p *__ArgParser) AddArgument(args ...any) {
 	if spec.Name == "" && spec.Short != "" {
 		spec.Name = spec.Short
 	}
+	if kwargs != nil {
+		if t, ok := kwargs["type"].(string); ok {
+			spec.Type = t
+		}
+		if d, ok := kwargs["default"]; ok {
+			spec.Default = d
+		}
+		if a, ok := kwargs["action"].(string); ok {
+			spec.Action = a
+			if a == "store_true" || a == "store_false" {
+				spec.IsFlag = true
+			}
+		}
+		if dn, ok := kwargs["dest"].(string); ok && dn != "" {
+			spec.Name = dn
+		}
+	}
 	p.Specs = append(p.Specs, spec)
 }
 
@@ -4465,12 +4582,33 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 	}
 	ns := &__ArgNamespace{Values: map[string]any{}}
 	for _, s := range p.Specs {
-		if s.Default != nil {
+		switch {
+		case s.Default != nil:
 			ns.Values[s.Name] = s.Default
-		} else if s.IsFlag {
+		case s.IsFlag:
+			if s.Action == "store_false" {
+				ns.Values[s.Name] = true
+			} else {
+				ns.Values[s.Name] = false
+			}
+		case s.Type == "int":
+			ns.Values[s.Name] = int64(0)
+		case s.Type == "float":
+			ns.Values[s.Name] = float64(0)
+		case s.Type == "bool":
 			ns.Values[s.Name] = false
-		} else {
+		default:
 			ns.Values[s.Name] = ""
+		}
+	}
+	specByName := map[string]__ArgSpec{}
+	specByShort := map[string]__ArgSpec{}
+	for _, s := range p.Specs {
+		if s.Name != "" {
+			specByName[s.Name] = s
+		}
+		if s.Short != "" {
+			specByShort[s.Short] = s
 		}
 	}
 	posIdx := 0
@@ -4486,34 +4624,67 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 		if strings.HasPrefix(tok, "--") {
 			eq := strings.Index(tok, "=")
 			var name, val string
+			haveVal := false
 			if eq >= 0 {
 				name = tok[2:eq]
 				val = tok[eq+1:]
+				haveVal = true
 			} else {
 				name = tok[2:]
+			}
+			spec, known := specByName[name]
+			if known && spec.IsFlag {
+				if spec.Action == "store_false" {
+					ns.Values[name] = false
+				} else {
+					ns.Values[name] = true
+				}
+				i++
+				continue
+			}
+			if !haveVal {
 				if i+1 < len(argv) {
 					val = argv[i+1]
 					i++
 				}
 			}
-			if v, err := strconv.ParseInt(val, 10, 64); err == nil {
+			if known && spec.Type != "" {
+				ns.Values[name] = __gopy_argparse_convert(spec.Type, val)
+			} else if v, err := strconv.ParseInt(val, 10, 64); err == nil {
 				ns.Values[name] = v
 			} else {
 				ns.Values[name] = val
 			}
 		} else if strings.HasPrefix(tok, "-") && len(tok) >= 2 {
 			short := tok[1:]
-			for _, s := range p.Specs {
-				if s.Short == short {
-					if i+1 < len(argv) {
-						ns.Values[s.Name] = argv[i+1]
-						i++
+			spec, known := specByShort[short]
+			if known && spec.IsFlag {
+				if spec.Action == "store_false" {
+					ns.Values[spec.Name] = false
+				} else {
+					ns.Values[spec.Name] = true
+				}
+				i++
+				continue
+			}
+			if known {
+				if i+1 < len(argv) {
+					raw := argv[i+1]
+					if spec.Type != "" {
+						ns.Values[spec.Name] = __gopy_argparse_convert(spec.Type, raw)
+					} else {
+						ns.Values[spec.Name] = raw
 					}
-					break
+					i++
 				}
 			}
 		} else if posIdx < len(posSpecs) {
-			ns.Values[posSpecs[posIdx].Name] = tok
+			spec := posSpecs[posIdx]
+			if spec.Type != "" {
+				ns.Values[spec.Name] = __gopy_argparse_convert(spec.Type, tok)
+			} else {
+				ns.Values[spec.Name] = tok
+			}
 			posIdx++
 		}
 		i++
@@ -6488,7 +6659,41 @@ func (p *__Path) WriteText(s string) {
 	}
 }
 
+// ReadBytes / WriteBytes mirror their text counterparts. gopy maps
+// bytes to Go's string (no separate bytes type) so these end up
+// identical to ReadText / WriteText at runtime; they exist as
+// distinct methods so source-level p.read_bytes / p.write_bytes
+// dispatches via the tagged method table without an unsupported
+// error.
+func (p *__Path) ReadBytes() string {
+	b, err := os.ReadFile(p.p)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+func (p *__Path) WriteBytes(s string) {
+	if err := os.WriteFile(p.p, []byte(s), 0o644); err != nil {
+		panic(err)
+	}
+}
+
 func (p *__Path) String() string { return p.p }
+
+// Match mirrors pathlib.PurePath.match — fnmatch-style glob against the
+// path's basename (right-anchored). gopy uses Go's filepath.Match which
+// handles *, ?, [..] character classes the same way fnmatch does for
+// the patterns most fixtures lean on. Multi-segment patterns ("a/*.py")
+// match against the joined path; bare patterns match the basename.
+func (p *__Path) Match(pattern string) bool {
+	if strings.Contains(pattern, "/") {
+		ok, _ := filepath.Match(pattern, p.p)
+		return ok
+	}
+	ok, _ := filepath.Match(pattern, filepath.Base(p.p))
+	return ok
+}
 
 func (p *__Path) Glob(pattern string) []*__Path {
 	full := p.p
@@ -6503,6 +6708,24 @@ func (p *__Path) Glob(pattern string) []*__Path {
 	for _, m := range matches {
 		out = append(out, &__Path{p: m})
 	}
+	return out
+}
+
+func (p *__Path) Rglob(pattern string) []*__Path {
+	out := []*__Path{}
+	_ = filepath.WalkDir(p.p, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if path == p.p {
+			return nil
+		}
+		ok, mErr := filepath.Match(pattern, d.Name())
+		if mErr == nil && ok {
+			out = append(out, &__Path{p: path})
+		}
+		return nil
+	})
 	return out
 }
 
@@ -6621,6 +6844,22 @@ func (p *__Path) With_name(name string) *__Path {
 }`
 
 const helperPathNew = `func __gopy_path_new(s string) *__Path { return &__Path{p: s} }`
+
+const helperPathCwd = `func __gopy_path_cwd() *__Path {
+	d, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	return &__Path{p: d}
+}`
+
+const helperPathHome = `func __gopy_path_home() *__Path {
+	d, err := os.UserHomeDir()
+	if err != nil {
+		panic(err)
+	}
+	return &__Path{p: d}
+}`
 
 const helperOsGetcwd = `func __gopy_os_getcwd() string {
 	d, err := os.Getwd()
@@ -7074,7 +7313,28 @@ const helperDatetimeFromTs = `func __gopy_datetime_fromts(ts float64) *__Datetim
 // helperDatetimeFromIso parses an ISO-8601 timestamp, mirroring
 // datetime.fromisoformat. Accepts the common YYYY-MM-DD,
 // YYYY-MM-DDTHH:MM:SS, and the same forms with fractional seconds.
+// Trailing offsets ("Z", "+0500", "+05:00", "-0700") shift the parsed
+// time into UTC; gopy's __Datetime is naive (no tz wrapper) so we
+// normalize to UTC rather than carrying a zone.
 const helperDatetimeFromIso = `func __gopy_datetime_fromiso(s string) *__Datetime {
+	tz := ""
+	body := s
+	if n := len(body); n >= 1 && (body[n-1] == 'Z' || body[n-1] == 'z') {
+		tz = "+0000"
+		body = body[:n-1]
+	} else if i := strings.LastIndexAny(body, "+-"); i > 8 {
+		off := body[i:]
+		if len(off) == 6 && off[3] == ':' {
+			off = off[:3] + off[4:]
+		}
+		if len(off) == 5 {
+			tz = off
+			body = body[:i]
+		} else if len(off) == 3 {
+			tz = off + "00"
+			body = body[:i]
+		}
+	}
 	layouts := []string{
 		"2006-01-02T15:04:05.000000",
 		"2006-01-02T15:04:05",
@@ -7083,7 +7343,18 @@ const helperDatetimeFromIso = `func __gopy_datetime_fromiso(s string) *__Datetim
 		"2006-01-02",
 	}
 	for _, l := range layouts {
-		if t, err := time.Parse(l, s); err == nil {
+		if tz != "" {
+			// Parse with the offset only to validate the form; keep the
+			// local clock components on the result so strftime matches
+			// CPython's behavior on tz-aware datetimes (which prints the
+			// local part, not UTC).
+			if _, err := time.Parse(l+"-0700", body+tz); err == nil {
+				if t2, err2 := time.Parse(l, body); err2 == nil {
+					return &__Datetime{t: t2}
+				}
+			}
+		}
+		if t, err := time.Parse(l, body); err == nil {
 			return &__Datetime{t: t}
 		}
 	}

@@ -5413,9 +5413,23 @@ func (g *gen) call(c *ir.Call) error {
 			case "itertools.groupby":
 				return g.builtinGroupBy(c)
 			case "logging.basicConfig":
-				// kwargs accepted and ignored.
+				// `level=` kw routes through to the module-level threshold;
+				// other kwargs (format, datefmt, handlers, stream, force,
+				// filename, filemode) are accepted but discarded.
 				g.helpers["__gopy_log_basicConfig"] = helperLogBasicConfig
-				g.writef("__gopy_log_basicConfig()")
+				g.helpers["__gopy_log_state"] = helperLogState
+				g.writef("__gopy_log_basicConfig(")
+				for _, kw := range c.Keywords {
+					if kw.Name == "level" {
+						g.writef("int64(")
+						if err := g.expr(kw.Value); err != nil {
+							return err
+						}
+						g.writef(")")
+						break
+					}
+				}
+				g.writef(")")
 				return nil
 			}
 			segs := splitDotted(path)
@@ -6334,10 +6348,14 @@ var taggedMethodRename = map[string]map[string]string{
 		"is_dir":      "IsDir",
 		"read_text":   "ReadText",
 		"write_text":  "WriteText",
+		"read_bytes":  "ReadBytes",
+		"write_bytes": "WriteBytes",
+		"match":       "Match",
 		"iterdir":     "Iterdir",
 		"mkdir":       "Mkdir",
 		"unlink":      "Unlink",
 		"glob":        "Glob",
+		"rglob":       "Rglob",
 		"absolute":    "Absolute",
 		"resolve":     "Resolve",
 		"touch":       "Touch",
@@ -6369,11 +6387,14 @@ var taggedMethodRename = map[string]map[string]string{
 		"update":    "Update",
 	},
 	"__Logger": {
-		"debug":    "Debug",
-		"info":     "Info",
-		"warning":  "Warning",
-		"error":    "Error",
-		"critical": "Critical",
+		"debug":              "Debug",
+		"info":               "Info",
+		"warning":            "Warning",
+		"error":              "Error",
+		"critical":           "Critical",
+		"setLevel":           "SetLevel",
+		"getEffectiveLevel":  "GetEffectiveLevel",
+		"isEnabledFor":       "IsEnabledFor",
 	},
 	"__CSVWriter": {
 		"writerow":  "Writerow",
@@ -6520,6 +6541,7 @@ var taggedMethodElemTag = map[string]map[string]string{
 	"__Path": {
 		"iterdir": "__Path",
 		"glob":    "__Path",
+		"rglob":   "__Path",
 	},
 	"__XMLElement": {
 		"findall": "__XMLElement",
@@ -6715,6 +6737,53 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinDateReplace(m)
 		}
 	}
+	// argparse.add_argument: encode kwargs (type=int, default=5, action=...)
+	// as a trailing map[string]any so the AddArgument helper can apply them.
+	// `type=` references a builtin name (int / float / str / bool) — emit as
+	// a string literal because Go has no first-class equivalent of the
+	// Python type objects.
+	if tag := g.exprTag(m.Recv); tag == "__ArgParser" && m.Method == "add_argument" {
+		if err := g.expr(m.Recv); err != nil {
+			return err
+		}
+		g.writef(".AddArgument(")
+		for i, a := range m.Args {
+			if i > 0 {
+				g.writef(", ")
+			}
+			if err := g.boxedExpr(a); err != nil {
+				return err
+			}
+		}
+		if len(m.Keywords) > 0 {
+			if len(m.Args) > 0 {
+				g.writef(", ")
+			}
+			g.writef("map[string]any{")
+			for i, kw := range m.Keywords {
+				if i > 0 {
+					g.writef(", ")
+				}
+				g.writef("%q: ", kw.Name)
+				if kw.Name == "type" {
+					if n, ok := kw.Value.(*ir.Name); ok {
+						switch n.N {
+						case "int", "float", "str", "bool":
+							g.writef("%q", n.N)
+							continue
+						}
+					}
+					return fmt.Errorf("argparse add_argument: type= must be int / float / str / bool")
+				}
+				if err := g.boxedExpr(kw.Value); err != nil {
+					return err
+				}
+			}
+			g.writef("}")
+		}
+		g.writef(")")
+		return nil
+	}
 	// Tagged-receiver method dispatch (Match.group, Path.exists, ...).
 	// Tag may come from a Name (varTypes) or from a Call / MethodCall
 	// whose declared stdlib return tag is recorded in the registry.
@@ -6737,6 +6806,28 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 				return nil
 			}
 			return fmt.Errorf("method .%s not supported on %s-tagged value", m.Method, tag)
+		}
+	}
+	// pathlib.Path.cwd() / .home() — classmethod-style entry points.
+	// Receiver is a Name aliased to pathlib.Path (or any of the pure /
+	// posix / windows aliases); dispatch to dedicated helpers that
+	// return a freshly-tagged *__Path.
+	if n, ok := m.Recv.(*ir.Name); ok {
+		if path, hit := g.aliases[n.N]; hit {
+			if strings.HasSuffix(path, ".Path") || strings.HasSuffix(path, "PurePath") || strings.HasSuffix(path, "PosixPath") || strings.HasSuffix(path, "WindowsPath") {
+				switch m.Method {
+				case "cwd":
+					g.addImport("os")
+					g.helpers["__gopy_path_cwd"] = helperPathCwd
+					g.writef("__gopy_path_cwd()")
+					return nil
+				case "home":
+					g.addImport("os")
+					g.helpers["__gopy_path_home"] = helperPathHome
+					g.writef("__gopy_path_home()")
+					return nil
+				}
+			}
 		}
 	}
 	// Stdlib resolution that crosses module aliases or nested submodules

@@ -381,7 +381,6 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 ### Stdlib gaps
 
 - **`datetime.timezone.utc`** as a real tz-aware object — exposed as the literal `"UTC"` string (no `astimezone` / offset arithmetic)
-- **`datetime.fromisoformat` with offsets** — naive `YYYY-MM-DDTHH:MM:SS` parses, suffixed offsets (`+0500`, `Z`) drop to UTC
 - **`asyncio.Lock` / `Queue` / `Semaphore`** with real blocking semantics
 - **`threading.Lock` / `Condition` / `Event`** beyond the stub registration
 - **`multiprocessing` real fork / IPC**
@@ -394,8 +393,8 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`http.client` POST/PUT bodies, redirects, cookies**
 - **`urllib.request.urlretrieve` headers / progress callback** — only the basic download form works
 - **`ssl.SSLContext` / certificate verification** — context constructors are stubs
-- **`logging.Logger` hierarchy, `Filter` chaining, custom `Handler`**
-- **`argparse` subparsers / mutually exclusive groups / type=int conversion** — only flat positional / optional args work
+- **`logging.Logger` hierarchy, `Filter` chaining, custom `Handler`** — per-logger `setLevel` / `getEffectiveLevel` / `isEnabledFor` work and the module-level threshold gates emission, but propagation to parent loggers, custom handlers, and formatter pipelines aren't wired
+- **`argparse` subparsers / mutually exclusive groups / callable `type=` converters** — flat positional / optional args + `type=int|float|str|bool` + `default=` + `action=store_true|store_false` + `dest=` work; nested parsers / `type=MyClass` not yet
 - **`configparser` interpolation (`%(key)s`), `defaults=`, write-back to file**
 - **`mmap`, `select`, `selectors`, `signal`** real wakeups — all registered as stubs
 - **`sqlite3`** real driver — registered as stub
@@ -440,7 +439,6 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **String formatting locale-aware** (`{:n}` type with current locale grouping)
 - **`unicodedata.normalize` NFKD / NFC** — only category lookup is wired
 - **`gettext.translation` with `.mo` catalogs** — `gettext`/`ngettext` return source string unchanged
-- **`pathlib.Path` glob / rglob walking** — `iterdir` works, `glob` patterns don't
 - **`os.scandir`** as a context manager iterator — eager-materialized like `os.walk`
 - **`shutil.copy` / `copytree` preserving permissions and metadata** — basic copy works, full attribute preservation may differ from CPython
 
