@@ -2139,7 +2139,7 @@ var stdlibModules = map[string]stdlibModule{
 			"ALLOCATIONGRANULARITY": {GoExpr: "int64(4096)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"mmap": {GoFunc: "__gopy_mmap_unused"},
+			"mmap": {GoFunc: "__gopy_mmap_new", Helper: helperMmapNew, RetTag: "__Mmap", ExtraHelpers: map[string]string{"__Mmap": helperMmapType}, HelperImports: []string{"os", "io"}},
 		},
 	},
 	"ast": {
@@ -3653,6 +3653,144 @@ const helperThreadingLocal = `func __gopy_threading_local_new(args ...any) *__Lo
 	return &__Local{vals: map[string]any{}}
 }`
 
+// helperMmapType — minimal mmap shim. Reads the whole file into a byte
+// slice; reads/writes act on that buffer. Flush writes the buffer back
+// out. Real OS-level memory mapping is skipped (gopy targets portability
+// over zero-copy paging); for typical Python use cases (random-access
+// reads + occasional writes) the semantics match.
+const helperMmapType = `type __Mmap struct {
+	buf  []byte
+	pos  int64
+	file *os.File
+	path string
+}
+
+func (m *__Mmap) Read(args ...int64) string {
+	n := int64(-1)
+	if len(args) > 0 {
+		n = args[0]
+	}
+	if n < 0 || m.pos+n > int64(len(m.buf)) {
+		out := string(m.buf[m.pos:])
+		m.pos = int64(len(m.buf))
+		return out
+	}
+	out := string(m.buf[m.pos : m.pos+n])
+	m.pos += n
+	return out
+}
+
+func (m *__Mmap) Read_byte() int64 {
+	if m.pos >= int64(len(m.buf)) {
+		panic(NewException("ValueError: read past end"))
+	}
+	b := m.buf[m.pos]
+	m.pos++
+	return int64(b)
+}
+
+func (m *__Mmap) Write(data string) int64 {
+	b := []byte(data)
+	end := m.pos + int64(len(b))
+	if end > int64(len(m.buf)) {
+		m.buf = append(m.buf, make([]byte, end-int64(len(m.buf)))...)
+	}
+	copy(m.buf[m.pos:end], b)
+	m.pos = end
+	return int64(len(b))
+}
+
+func (m *__Mmap) Write_byte(b int64) {
+	if m.pos >= int64(len(m.buf)) {
+		m.buf = append(m.buf, 0)
+	}
+	m.buf[m.pos] = byte(b)
+	m.pos++
+}
+
+func (m *__Mmap) Seek(off int64, args ...int64) int64 {
+	whence := int64(0)
+	if len(args) > 0 {
+		whence = args[0]
+	}
+	switch whence {
+	case 0:
+		m.pos = off
+	case 1:
+		m.pos += off
+	case 2:
+		m.pos = int64(len(m.buf)) + off
+	}
+	return m.pos
+}
+
+func (m *__Mmap) Tell() int64 { return m.pos }
+
+func (m *__Mmap) Size() int64 { return int64(len(m.buf)) }
+
+func (m *__Mmap) Find(needle string, args ...int64) int64 {
+	from := m.pos
+	if len(args) > 0 {
+		from = args[0]
+	}
+	if from < 0 {
+		from = 0
+	}
+	for i := from; i+int64(len(needle)) <= int64(len(m.buf)); i++ {
+		if string(m.buf[i:i+int64(len(needle))]) == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *__Mmap) Flush(args ...int64) int64 {
+	if m.file != nil {
+		if _, err := m.file.WriteAt(m.buf, 0); err == nil {
+			return 0
+		}
+	}
+	if m.path != "" {
+		os.WriteFile(m.path, m.buf, 0o644)
+	}
+	return 0
+}
+
+func (m *__Mmap) Close() {
+	m.Flush()
+	if m.file != nil {
+		m.file.Close()
+		m.file = nil
+	}
+}
+
+func (m *__Mmap) Enter() *__Mmap { return m }
+func (m *__Mmap) Exit() bool     { m.Close(); return false }`
+
+const helperMmapNew = `func __gopy_mmap_new(args ...any) *__Mmap {
+	if len(args) < 2 {
+		panic(NewException("TypeError: mmap.mmap requires (fd, length)"))
+	}
+	fd, _ := args[0].(int64)
+	if fd < 0 {
+		// Anonymous map: just allocate a buffer of the requested length.
+		length := int64(0)
+		if v, ok := args[1].(int64); ok {
+			length = v
+		}
+		return &__Mmap{buf: make([]byte, length)}
+	}
+	f := os.NewFile(uintptr(fd), "")
+	if f == nil {
+		panic(NewException("OSError: invalid fd"))
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return &__Mmap{buf: data, file: f}
+}`
+
 const helperThreadingSem = `func __gopy_threading_sem_new(args ...int64) *__Semaphore {
 	cap := int64(1)
 	if len(args) > 0 {
@@ -5082,7 +5220,32 @@ const helperArgparseType = `type __ArgSpec struct {
 }
 
 type __ArgParser struct {
-	Specs []__ArgSpec
+	Specs   []__ArgSpec
+	Subs    map[string]*__ArgParser
+	SubDest string
+}
+
+func (p *__ArgParser) Add_subparsers(args ...any) *__ArgParser {
+	if p.Subs == nil {
+		p.Subs = map[string]*__ArgParser{}
+	}
+	for _, a := range args {
+		if m, ok := a.(map[string]any); ok {
+			if d, ok := m["dest"].(string); ok {
+				p.SubDest = d
+			}
+		}
+	}
+	return p
+}
+
+func (p *__ArgParser) Add_parser(name string, args ...any) *__ArgParser {
+	if p.Subs == nil {
+		p.Subs = map[string]*__ArgParser{}
+	}
+	child := &__ArgParser{}
+	p.Subs[name] = child
+	return child
 }
 
 type __ArgNamespace struct {
@@ -5178,6 +5341,36 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 		}
 	} else {
 		argv = os.Args[1:]
+	}
+	// Subparser dispatch: when the parent registered subs, the first
+	// non-flag arg selects the subcommand; the rest goes to the child
+	// parser. The selected name lands in the parent ns under SubDest.
+	if len(p.Subs) > 0 {
+		split := -1
+		for i, tok := range argv {
+			if !strings.HasPrefix(tok, "-") {
+				if _, ok := p.Subs[tok]; ok {
+					split = i
+					break
+				}
+			}
+		}
+		if split >= 0 {
+			head := argv[:split]
+			cmd := argv[split]
+			tail := argv[split+1:]
+			parent := *p
+			parent.Subs = nil
+			ns := parent.ParseArgs(head)
+			child := p.Subs[cmd].ParseArgs(tail)
+			for k, v := range child.Values {
+				ns.Values[k] = v
+			}
+			if p.SubDest != "" {
+				ns.Values[p.SubDest] = cmd
+			}
+			return ns
+		}
 	}
 	ns := &__ArgNamespace{Values: map[string]any{}}
 	for _, s := range p.Specs {

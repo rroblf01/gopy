@@ -6903,6 +6903,18 @@ var taggedMethodRename = map[string]map[string]string{
 		"get": "Get",
 		"set": "Set",
 	},
+	"__Mmap": {
+		"read":       "Read",
+		"read_byte":  "Read_byte",
+		"write":      "Write",
+		"write_byte": "Write_byte",
+		"seek":       "Seek",
+		"tell":       "Tell",
+		"size":       "Size",
+		"find":       "Find",
+		"flush":      "Flush",
+		"close":      "Close",
+	},
 	"__Deque": {
 		"append":     "Append",
 		"appendleft": "Appendleft",
@@ -6978,8 +6990,10 @@ var taggedMethodRename = map[string]map[string]string{
 		"lt":      "Lt",
 	},
 	"__ArgParser": {
-		"add_argument": "AddArgument",
-		"parse_args":   "ParseArgs",
+		"add_argument":    "AddArgument",
+		"parse_args":      "ParseArgs",
+		"add_subparsers":  "Add_subparsers",
+		"add_parser":      "Add_parser",
 	},
 	"__ConfigParser": {
 		"read":        "Read",
@@ -7038,6 +7052,10 @@ var taggedMethodRetTag = map[string]map[string]string{
 	},
 	"__Date": {
 		"replace": "__Date",
+	},
+	"__ArgParser": {
+		"add_subparsers": "__ArgParser",
+		"add_parser":     "__ArgParser",
 	},
 	"__Path": {
 		"absolute":    "__Path",
@@ -7343,6 +7361,42 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	// `type=` references a builtin name (int / float / str / bool) — emit as
 	// a string literal because Go has no first-class equivalent of the
 	// Python type objects.
+	if tag := g.exprTag(m.Recv); tag == "__ArgParser" && (m.Method == "add_subparsers" || m.Method == "add_parser") {
+		goName := "Add_subparsers"
+		if m.Method == "add_parser" {
+			goName = "Add_parser"
+		}
+		if err := g.expr(m.Recv); err != nil {
+			return err
+		}
+		g.writef(".%s(", goName)
+		for i, a := range m.Args {
+			if i > 0 {
+				g.writef(", ")
+			}
+			if err := g.expr(a); err != nil {
+				return err
+			}
+		}
+		if len(m.Keywords) > 0 {
+			if len(m.Args) > 0 {
+				g.writef(", ")
+			}
+			g.writef("map[string]any{")
+			for i, kw := range m.Keywords {
+				if i > 0 {
+					g.writef(", ")
+				}
+				g.writef("%q: ", kw.Name)
+				if err := g.boxedExpr(kw.Value); err != nil {
+					return err
+				}
+			}
+			g.writef("}")
+		}
+		g.writef(")")
+		return nil
+	}
 	if tag := g.exprTag(m.Recv); tag == "__ArgParser" && m.Method == "add_argument" {
 		if err := g.expr(m.Recv); err != nil {
 			return err
