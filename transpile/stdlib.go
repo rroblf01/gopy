@@ -654,8 +654,8 @@ var stdlibModules = map[string]stdlibModule{
 			},
 			"message": {
 				Funcs: map[string]stdlibFunc{
-					"EmailMessage": {GoFunc: "__gopy_email_message_unused"},
-					"Message":      {GoFunc: "__gopy_email_message_unused"},
+					"EmailMessage": {GoFunc: "__gopy_email_message_new", Helper: helperEmailMessageNew, RetTag: "__EmailMessage", ExtraHelpers: map[string]string{"__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings"}},
+					"Message":      {GoFunc: "__gopy_email_message_new", Helper: helperEmailMessageNew, RetTag: "__EmailMessage", ExtraHelpers: map[string]string{"__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings"}},
 				},
 			},
 			"mime": {
@@ -6593,6 +6593,94 @@ const helperGettextIdentity = `func __gopy_gettext_identity(s string) string { r
 // helperGettextTranslationType — translation object returned by
 // gettext.translation(). .gettext / .ngettext echo the source string;
 // .install() registers _ as a global lookup (no-op in gopy).
+// helperEmailMessageType — minimal email.message.Message. Headers stored
+// as ordered list + lookup map. set_payload / get_payload move the body
+// text; as_string concatenates headers + blank line + payload.
+const helperEmailMessageType = `type __EmailMessage struct {
+	headerKeys []string
+	headers    map[string]string
+	payload    string
+}
+
+func (m *__EmailMessage) ensure() {
+	if m.headers == nil {
+		m.headers = map[string]string{}
+	}
+}
+
+func (m *__EmailMessage) Set_payload(s string, args ...any) { m.payload = s }
+func (m *__EmailMessage) Get_payload(args ...any) string    { return m.payload }
+func (m *__EmailMessage) Get(name string, args ...any) any {
+	if v, ok := m.headers[strings.ToLower(name)]; ok {
+		return v
+	}
+	if len(args) > 0 {
+		return args[0]
+	}
+	return nil
+}
+func (m *__EmailMessage) Get_all(name string, args ...any) []string {
+	if v, ok := m.headers[strings.ToLower(name)]; ok {
+		return []string{v}
+	}
+	return []string{}
+}
+func (m *__EmailMessage) Add_header(name, value string, args ...any) {
+	m.ensure()
+	k := strings.ToLower(name)
+	if _, ok := m.headers[k]; !ok {
+		m.headerKeys = append(m.headerKeys, name)
+	}
+	m.headers[k] = value
+}
+func (m *__EmailMessage) Replace_header(name, value string) {
+	m.ensure()
+	m.headers[strings.ToLower(name)] = value
+}
+func (m *__EmailMessage) Del_item(name string) {
+	if m.headers == nil {
+		return
+	}
+	k := strings.ToLower(name)
+	delete(m.headers, k)
+	for i, hk := range m.headerKeys {
+		if strings.ToLower(hk) == k {
+			m.headerKeys = append(m.headerKeys[:i], m.headerKeys[i+1:]...)
+			break
+		}
+	}
+}
+func (m *__EmailMessage) Keys() []string {
+	out := []string{}
+	for _, k := range m.headerKeys {
+		out = append(out, k)
+	}
+	return out
+}
+func (m *__EmailMessage) Items() [][]string {
+	out := [][]string{}
+	for _, k := range m.headerKeys {
+		out = append(out, []string{k, m.headers[strings.ToLower(k)]})
+	}
+	return out
+}
+func (m *__EmailMessage) As_string(args ...any) string {
+	var b strings.Builder
+	for _, k := range m.headerKeys {
+		b.WriteString(k)
+		b.WriteString(": ")
+		b.WriteString(m.headers[strings.ToLower(k)])
+		b.WriteString("\r\n")
+	}
+	b.WriteString("\r\n")
+	b.WriteString(m.payload)
+	return b.String()
+}`
+
+const helperEmailMessageNew = `func __gopy_email_message_new(args ...any) *__EmailMessage {
+	return &__EmailMessage{headers: map[string]string{}}
+}`
+
 const helperGettextTranslationType = `type __GettextTranslation struct{}
 
 func (t *__GettextTranslation) Gettext(s string) string  { return s }

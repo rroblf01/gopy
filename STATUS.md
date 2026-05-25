@@ -333,7 +333,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`__init_subclass__`** body — name is recognized as a no-op method, hook isn't invoked
 - **`__slots__`** enforcement (accepted as a no-op; attribute creation is already constrained by Go's struct)
 - **`@dataclass(frozen=True)` hash/equality plus `set[Point]` / dict-key use** — gopy's set is a slice, frozen dataclasses aren't hashable through Go's map machinery
-- **`@dataclass(slots=True)` / `eq=False`** variants — kwargs accepted, behavior unchanged. **`order=True`** is now detected at lower time and stored on the `Class` IR node (`DataclassOrder`); the synthesized `__lt__` / `__le__` / `__gt__` / `__ge__` lexicographic methods are queued for codegen but not emitted yet
+- **`@dataclass(slots=True)` / `eq=False`** variants — kwargs accepted, behavior unchanged. **`@dataclass(order=True)`** now synthesizes `__lt__` / `__le__` / `__gt__` / `__ge__` as IR `Func` decls that walk the field list lexicographically: the first inequality picks the strict-comparison result, equal field lists fall through to `False` (strict) or `True` (non-strict). Comparison operators on the resulting instances dispatch through the regular user-class dunder path
 - ~~**Property setters on inherited classes**~~ now resolve via base-chain lookup, so a subclass instance writes `c.size = v` through the parent class's `SetSize` setter (parent property registrations are inherited just like methods)
 - **Nested class definitions inside a function body**
 - ~~**Recursive nested functions**~~ supported now. `def f(): ... f(...)` inside an outer function emits a forward `var f func(...) ret` plus a `f = func(...) ret { ... }` body so the closure can call itself
@@ -409,7 +409,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`xml.dom.minidom.parseString(s)` / `parse(path)`** now return a `__DomDocument` wrapping the existing `__XMLElement` tree (so `.documentElement` / `.getElementsByTagName(tag)` / `.toxml()` work). Note: gopy element nodes use `.tag` rather than CPython's `.tagName`. `xml.sax` still stub
 - **`os.fspath(p)`** now accepts both `string` and `*__Path` (CPython's PathLike protocol approximation)
 - **`html.parser.HTMLParser`** — stub
-- **`email.parser` / `email.message`** — stubs
+- **`email.message.EmailMessage` / `email.message.Message`** — `__EmailMessage` shim with `add_header` / `replace_header` / `del_item` / `get(name[, default])` / `get_all` / `set_payload` / `get_payload` / `keys` / `items` / `as_string`. Header lookup is case-insensitive; insertion order is preserved. `email.parser` still stubs (no source-side parsing yet)
 - **`turtle`, `tkinter`, `curses`, `readline`** — UI / terminal modules not wired
 - **`ctypes`, `cffi`** — no FFI bridge
 - **`__future__` non-`annotations` features** — accepted as no-op but the feature isn't toggled

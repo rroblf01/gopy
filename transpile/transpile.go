@@ -6910,6 +6910,18 @@ var taggedMethodRename = map[string]map[string]string{
 		"get": "Get",
 		"set": "Set",
 	},
+	"__EmailMessage": {
+		"set_payload":    "Set_payload",
+		"get_payload":    "Get_payload",
+		"get":            "Get",
+		"get_all":        "Get_all",
+		"add_header":     "Add_header",
+		"replace_header": "Replace_header",
+		"del_item":       "Del_item",
+		"keys":           "Keys",
+		"items":          "Items",
+		"as_string":      "As_string",
+	},
 	"__GettextTranslation": {
 		"gettext":   "Gettext",
 		"lgettext":  "Lgettext",

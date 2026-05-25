@@ -1125,6 +1125,45 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 		}
 	}
 
+	// @dataclass(order=True) synthesizes __lt__ / __le__ / __gt__ / __ge__
+	// comparing the field tuple lexicographically. Each method walks the
+	// declared fields, returning the first strict-comparison result; if all
+	// fields are equal the final return follows the operator (False for
+	// strict <, True for non-strict <=).
+	if class.DataclassOrder {
+		mkOrderMethod := func(methName, primaryOp string, eqResult bool) *Func {
+			fn := &Func{Name: methName, Line: n.Lineno()}
+			fn.Receiver = &Param{Name: "self", Ty: &Type{Kind: TyNamed, Name: name}}
+			fn.Params = []Param{{Name: "other", Ty: &Type{Kind: TyNamed, Name: name}}}
+			fn.Ret = &Type{Kind: TyBool}
+			selfRef := func() Expr { return &Name{N: "self", Ty: &Type{Kind: TyNamed, Name: name}} }
+			otherRef := func() Expr { return &Name{N: "other", Ty: &Type{Kind: TyNamed, Name: name}} }
+			var body []Stmt
+			for _, f := range class.Fields {
+				selfAttr := &Attribute{Recv: selfRef(), Name: f.Name, Ty: f.Ty}
+				otherAttr := &Attribute{Recv: otherRef(), Name: f.Name, Ty: f.Ty}
+				selfAttr2 := &Attribute{Recv: selfRef(), Name: f.Name, Ty: f.Ty}
+				otherAttr2 := &Attribute{Recv: otherRef(), Name: f.Name, Ty: f.Ty}
+				neq := &CmpOp{Op: "!=", L: selfAttr, R: otherAttr, Ty: &Type{Kind: TyBool}}
+				lt := &CmpOp{Op: primaryOp, L: selfAttr2, R: otherAttr2, Ty: &Type{Kind: TyBool}}
+				body = append(body, &If{
+					Cond: neq,
+					Then: []Stmt{&Return{X: lt}},
+				})
+			}
+			body = append(body, &Return{X: &BoolLit{V: eqResult, Ty: &Type{Kind: TyBool}}})
+			fn.Body = body
+			return fn
+		}
+		decls = append(decls,
+			mkOrderMethod("__lt__", "<", false),
+			mkOrderMethod("__le__", "<", true),
+			mkOrderMethod("__gt__", ">", false),
+			mkOrderMethod("__ge__", ">", true),
+		)
+		class.MethodNames = append(class.MethodNames, "__lt__", "__le__", "__gt__", "__ge__")
+	}
+
 	// Class first, then methods, so codegen order is type → methods.
 	return append([]Decl{class}, decls...), nil
 }
