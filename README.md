@@ -213,8 +213,8 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] `datetime.timedelta` keyword constructor with full parameter set (`days`, `seconds`, `microseconds`, `milliseconds`, `minutes`, `hours`, `weeks`)
 - [x] `datetime.datetime.strptime(s, fmt)` and `.strftime(fmt)` / `date.strftime(fmt)` (Python format codes `%Y/%m/%d/%H/%M/%S/%y/%B/%b/%A/%a/%p/%j/%z` mapped to Go's reference-time layout)
 - [x] `datetime.datetime.fromtimestamp(ts)`, `.fromisoformat(s)` (accepts trailing `Z`, `+HHMM` or `+HH:MM` offset suffixes; the offset validates the form but the parsed datetime keeps the local clock components, matching CPython's `strftime` behavior on tz-aware values), `.utcnow()`, `.weekday()`, `.isoweekday()`, `.timestamp()`, `.replace(year=..., ...)`, `datetime.combine(date, time)`; `date.replace(year=..., month=..., day=...)`
-- [x] `timedelta.total_seconds()`, `.days`, `.seconds`, `abs(td)`, `td + td`, `td - td`, `td * int`, `int * td`, `td / int`
-- [x] `enum.auto()` (sequential integer assignment, mixes with explicit values). `Enum`, `IntEnum`, `Flag`, `IntFlag`, `StrEnum` bases all collapse to a typed `int64` alias + constants; bitwise ops on `IntFlag` work via Go's `& | ^` over the alias type
+- [x] `timedelta.total_seconds()`, `.days`, `.seconds`, `abs(td)`, `td + td`, `td - td`, `td * int`, `int * td`, `td / int`, `td < td2` / `<= / > / >= / == / !=` (route through per-type `Lt/Le/Gt/Ge/Eq/Ne` methods over `time.Duration`)
+- [x] `enum.auto()` (sequential integer assignment, mixes with explicit values). `Enum`, `IntEnum`, `Flag`, `IntFlag`, `StrEnum` bases all collapse to a typed `int64` alias + constants; bitwise ops on `IntFlag` work via Go's `& | ^` over the alias type. `Color.RED.value` (int) and `Color.RED.name` (str) accessors work on both class-chained access and variable receivers (latter emits a runtime switch over the declared members)
 - [x] `@dataclass` field defaults via `field(default=...)` / `field(default_factory=list/dict/set)` — fresh container per instance
 - [x] `dataclasses.asdict(obj)` (returns `map[string]any`), `dataclasses.astuple(obj)` (returns `[]any`), `dataclasses.replace(obj, **kwargs)` (fresh instance via constructor), `dataclasses.fields(cls_or_obj)` (returns `[]string` of field names), `dataclasses.is_dataclass(cls_or_obj)` (true when the receiver resolves to a `@dataclass`-decorated class; accepts class name or instance)
 - [x] `dict.items()` standalone (returns `[]struct{Key, Value}`); for-loop tuple-unpack form unchanged
@@ -282,7 +282,7 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] `callable(x)` (static for known function/class names, reflect-based fallback for runtime values)
 - [x] `vars(obj)` (field map; same shape as `dataclasses.asdict`), `dir(obj_or_cls)` (typed `[]string` of field + method names)
 - [x] `eval` / `exec` / `compile` rejected at transpile time with a clear error (no runtime interpreter)
-- [x] `string.Template("$name")` with `.substitute(d)` (KeyError on missing) / `.safe_substitute(d)`, `string.capwords(s[, sep])`
+- [x] `string.Template("$name")` with `.substitute(d)` (KeyError on missing) / `.safe_substitute(d)` / `.get_identifiers()` (returns deduplicated `[]string` in source order) / `.is_valid()` (checks every `$ident` / `${ident}` is well-formed), `string.capwords(s[, sep])`
 - [x] `set(iter)` / `frozenset(iter)` — return a deduplicated typed slice (insertion-order preserved; not a true hash-set)
 - [x] `list.count(x)`, `list.index(x)` (raises ValueError when missing), `list.extend(ys)`, `list.insert(i, v)`, `list.remove(v)`, `list.clear()`, `list.sort([reverse=True, key=lambda])`, `list.reverse()`, `list.copy()`, `list.pop([i])` (IndexError on empty / out-of-range; negative indices supported)
 - [x] `str.isdigit()`, `.isalpha()`, `.isalnum()`, `.isspace()`, `.isupper()`, `.islower()`, `.isnumeric()`, `.isdecimal()`, `.isidentifier()`, `.isprintable()`, `.isascii()`

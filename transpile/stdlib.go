@@ -746,6 +746,7 @@ var stdlibModules = map[string]stdlibModule{
 			"print_exc":         {GoFunc: "__gopy_traceback_print_exc", Helper: helperTracebackPrintExc, HelperImports: []string{"fmt", "os"}},
 			"print_exception":   {GoFunc: "__gopy_traceback_print_exception", Helper: helperTracebackPrintException, HelperImports: []string{"fmt", "os"}},
 			"format_exception":  {GoFunc: "__gopy_traceback_format_exception", Helper: helperTracebackFormatException, HelperImports: []string{"fmt"}},
+			"format_exception_only": {GoFunc: "__gopy_traceback_format_exception_only", Helper: helperTracebackFormatExceptionOnly, HelperImports: []string{"fmt"}},
 			"format_stack":      {GoFunc: "__gopy_traceback_format_stack", Helper: helperTracebackFormatStack},
 			"print_stack":       {GoFunc: "__gopy_traceback_print_stack", Helper: helperTracebackPrintStack},
 			"extract_stack":     {GoFunc: "__gopy_traceback_extract_stack", Helper: helperTracebackExtractStack},
@@ -6977,6 +6978,91 @@ func (t *__Template) Substitute(mapping any) string {
 
 func (t *__Template) SafeSubstitute(mapping any) string {
 	return t.substExpand(mapping, true)
+}
+
+func (t *__Template) Get_identifiers() []string {
+	seen := map[string]bool{}
+	out := []string{}
+	s := t.tmpl
+	i := 0
+	for i < len(s) {
+		if s[i] != '$' || i+1 >= len(s) {
+			i++
+			continue
+		}
+		if s[i+1] == '$' {
+			i += 2
+			continue
+		}
+		start := i + 1
+		braced := false
+		if s[start] == '{' {
+			braced = true
+			start++
+		}
+		j := start
+		for j < len(s) {
+			c := s[j]
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+				break
+			}
+			j++
+		}
+		name := s[start:j]
+		if name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+		if braced && j < len(s) && s[j] == '}' {
+			i = j + 1
+		} else {
+			i = j
+		}
+	}
+	return out
+}
+
+func (t *__Template) Is_valid() bool {
+	s := t.tmpl
+	i := 0
+	for i < len(s) {
+		if s[i] != '$' {
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			return false
+		}
+		if s[i+1] == '$' {
+			i += 2
+			continue
+		}
+		start := i + 1
+		braced := false
+		if s[start] == '{' {
+			braced = true
+			start++
+		}
+		j := start
+		for j < len(s) {
+			c := s[j]
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+				break
+			}
+			j++
+		}
+		if start == j {
+			return false
+		}
+		if braced {
+			if j >= len(s) || s[j] != '}' {
+				return false
+			}
+			j++
+		}
+		i = j
+	}
+	return true
 }`
 
 const helperStringTemplateNew = `func __gopy_string_template_new(s string) *__Template {
@@ -7086,7 +7172,10 @@ func (p *__Path) IsDir() bool {
 	return err == nil && i.IsDir()
 }
 
-func (p *__Path) ReadText() string {
+// ReadText / WriteText accept optional trailing string args
+// (encoding, errors) for CPython API parity; gopy uses UTF-8 strings
+// natively so the encoding hint is informational only.
+func (p *__Path) ReadText(args ...string) string {
 	b, err := os.ReadFile(p.p)
 	if err != nil {
 		panic(err)
@@ -7094,10 +7183,11 @@ func (p *__Path) ReadText() string {
 	return string(b)
 }
 
-func (p *__Path) WriteText(s string) {
+func (p *__Path) WriteText(s string, args ...string) int64 {
 	if err := os.WriteFile(p.p, []byte(s), 0o644); err != nil {
 		panic(err)
 	}
+	return int64(len(s))
 }
 
 // ReadBytes / WriteBytes mirror their text counterparts. gopy maps
@@ -7890,7 +7980,14 @@ func (t *__Timedelta) Days() int64 {
 func (t *__Timedelta) Seconds() int64 {
 	rem := t.d - time.Duration(t.Days())*24*time.Hour
 	return int64(rem / time.Second)
-}`
+}
+
+func (t *__Timedelta) Lt(o *__Timedelta) bool { return t.d < o.d }
+func (t *__Timedelta) Le(o *__Timedelta) bool { return t.d <= o.d }
+func (t *__Timedelta) Gt(o *__Timedelta) bool { return t.d > o.d }
+func (t *__Timedelta) Ge(o *__Timedelta) bool { return t.d >= o.d }
+func (t *__Timedelta) Eq(o *__Timedelta) bool { return t.d == o.d }
+func (t *__Timedelta) Ne(o *__Timedelta) bool { return t.d != o.d }`
 
 // helperTimedeltaNew accepts the full Python parameter order:
 // (days, seconds, microseconds, milliseconds, minutes, hours, weeks).
@@ -9129,6 +9226,22 @@ const helperTracebackFormatException = `func __gopy_traceback_format_exception(a
 	out := make([]string, len(args))
 	for i, a := range args { out[i] = fmt.Sprint(a) }
 	return out
+}`
+
+// format_exception_only(exc) returns a single-element list with the
+// "ClassName: message\n" rendering. gopy exceptions carry a "Prefix:
+// msg" string; we split on the colon to keep CPython parity. Falls
+// back to a generic Exception label when the receiver lacks the
+// prefix.
+const helperTracebackFormatExceptionOnly = `func __gopy_traceback_format_exception_only(args ...any) []string {
+	if len(args) == 0 {
+		return []string{}
+	}
+	last := args[len(args)-1]
+	if e, ok := last.(*Exception); ok {
+		return []string{e.Msg + "\n"}
+	}
+	return []string{fmt.Sprintf("Exception: %v\n", last)}
 }`
 
 const helperTracebackFormatStack = `func __gopy_traceback_format_stack() []string { return []string{} }`

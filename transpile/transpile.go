@@ -130,7 +130,7 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	// Get, ...).
 	if !g.needsException {
 		for _, src := range g.helpers {
-			if strings.Contains(src, "NewException(") {
+			if strings.Contains(src, "NewException(") || strings.Contains(src, "*Exception") {
 				g.needsException = true
 				break
 			}
@@ -4349,8 +4349,8 @@ func (g *gen) expr(e ir.Expr) error {
 				}
 			}
 		}
-		// Fraction / Decimal tagged-type comparison dispatch.
-		if lTag := g.exprTag(x.L); lTag != "" && (lTag == "__Fraction" || lTag == "__Decimal") {
+		// Fraction / Decimal / Timedelta tagged-type comparison dispatch.
+		if lTag := g.exprTag(x.L); lTag != "" && (lTag == "__Fraction" || lTag == "__Decimal" || lTag == "__Timedelta") {
 			rTag := g.exprTag(x.R)
 			if rTag == lTag {
 				var m string
@@ -4613,6 +4613,37 @@ func (g *gen) expr(e ir.Expr) error {
 							}
 						}
 					}
+				}
+			}
+		}
+		// `enum_var.name` / `EnumClass.MEMBER.name` — emit the literal
+		// member identifier. For a variable typed as the enum, walk the
+		// declared members and emit a switch over the int64 value.
+		if x.Name == "name" {
+			if inner, ok := x.Recv.(*ir.Attribute); ok {
+				if cn, ok := inner.Recv.(*ir.Name); ok {
+					if cls, ok := g.classes[cn.N]; ok && cls.IsEnum {
+						for _, em := range cls.EnumMembers {
+							if em.Name == inner.Name {
+								g.writef("%q", em.Name)
+								return nil
+							}
+						}
+					}
+				}
+			}
+			if recvTy := g.effectiveType(x.Recv); recvTy != nil && recvTy.Kind == ir.TyNamed {
+				if cls, ok := g.classes[recvTy.Name]; ok && cls.IsEnum {
+					g.writef("func() string { switch int64(")
+					if err := g.expr(x.Recv); err != nil {
+						return err
+					}
+					g.writef(") {")
+					for _, em := range cls.EnumMembers {
+						g.writef(" case int64(%s%s): return %q;", cls.Name, em.Name, em.Name)
+					}
+					g.writef(" }; return \"\" }()")
+					return nil
 				}
 			}
 		}
@@ -6731,6 +6762,8 @@ var taggedMethodRename = map[string]map[string]string{
 	"__Template": {
 		"substitute":      "Substitute",
 		"safe_substitute": "SafeSubstitute",
+		"get_identifiers": "Get_identifiers",
+		"is_valid":        "Is_valid",
 	},
 	"__HTTPResponse": {
 		"read":    "Read",
@@ -7120,6 +7153,18 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	if tag := g.exprTag(m.Recv); tag != "" {
 		if rename, ok := taggedMethodRename[tag]; ok {
 			if goName, ok := rename[m.Method]; ok {
+				// Accept-and-drop kwargs for tagged methods whose CPython
+				// signature carries informational-only options gopy can't
+				// honor (e.g. `Path.read_text(encoding="utf-8")` —
+				// gopy strings are always UTF-8).
+				dropKwargs := false
+				switch {
+				case tag == "__Path" && (m.Method == "read_text" || m.Method == "write_text" || m.Method == "read_bytes" || m.Method == "write_bytes"):
+					dropKwargs = true
+				}
+				if !dropKwargs && len(m.Keywords) > 0 {
+					return fmt.Errorf("method .%s on %s-tagged value does not accept keyword arguments", m.Method, tag)
+				}
 				if err := g.expr(m.Recv); err != nil {
 					return err
 				}
