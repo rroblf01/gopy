@@ -6836,6 +6836,17 @@ var taggedMethodRename = map[string]map[string]string{
 		"close": "Close",
 		"flush": "Flush",
 	},
+	"__SpooledTempFile": {
+		"write":    "Write",
+		"read":     "Read",
+		"seek":     "Seek",
+		"tell":     "Tell",
+		"truncate": "Truncate",
+		"getvalue": "Getvalue",
+		"close":    "Close",
+		"flush":    "Flush",
+		"rollover": "Rollover",
+	},
 	"__GzipFile": {
 		"read":      "Read",
 		"readline":  "Readline",

@@ -432,6 +432,7 @@ var stdlibModules = map[string]stdlibModule{
 			// stdlib helper call would be emitted.
 			"TemporaryDirectory":  {GoFunc: "__gopy_tempdir_unused"},
 			"NamedTemporaryFile":  {GoFunc: "__gopy_namedtempfile_unused"},
+			"SpooledTemporaryFile": {GoFunc: "__gopy_spooled_tempfile_new", Helper: helperSpooledTempfileNew, RetTag: "__SpooledTempFile", ExtraHelpers: map[string]string{"__SpooledTempFile": helperSpooledTempfileType}, HelperImports: []string{"strings"}},
 		},
 	},
 	"cmath": {
@@ -1287,6 +1288,8 @@ var stdlibModules = map[string]stdlibModule{
 			"ntohs":         {GoFunc: "__gopy_socket_htons", Helper: helperSocketHtons, RetKind: "int"},
 			"socket":        {GoFunc: "__gopy_socket_new", Helper: helperSocketNew, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 			"create_connection": {GoFunc: "__gopy_socket_create_conn", Helper: helperSocketCreateConn, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
+			"create_server":  {GoFunc: "__gopy_socket_create_server", Helper: helperSocketCreateServer, RetTag: "__Socket", ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
+			"getaddrinfo":    {GoFunc: "__gopy_socket_getaddrinfo", Helper: helperSocketGetaddrinfo, HelperImports: []string{"net"}},
 			"socketpair":     {GoFunc: "__gopy_socket_pair", Helper: helperSocketPair, ExtraHelpers: map[string]string{"__Socket": helperSocketType}, HelperImports: []string{"net", "fmt", "io"}},
 			"if_nameindex":     {GoFunc: "__gopy_socket_if_nameindex", Helper: helperSocketIfNameindex, HelperImports: []string{"net"}},
 			"if_indextoname":   {GoFunc: "__gopy_socket_if_indextoname", Helper: helperSocketIfIndextoname, HelperImports: []string{"net"}, RetKind: "str"},
@@ -4933,6 +4936,49 @@ const helperSocketCreateConn = `func __gopy_socket_create_conn(addr []any, args 
 	return s
 }`
 
+// helperSocketCreateServer — bind + listen on the addr tuple, return a
+// __Socket ready for Accept(). Matches socket.create_server((host, port))
+// for the TCP/IPv4 case (gopy doesn't expose family/backlog).
+const helperSocketCreateServer = `func __gopy_socket_create_server(addr []any, args ...any) *__Socket {
+	s := &__Socket{}
+	s.Bind(addr)
+	s.Listen()
+	return s
+}`
+
+// helperSocketGetaddrinfo — return a list of (family, type, proto,
+// canonname, (host, port)) tuples for the given host/port. gopy uses
+// Go's net.LookupHost; family/proto come back as best-effort defaults.
+const helperSocketGetaddrinfo = `func __gopy_socket_getaddrinfo(args ...any) []any {
+	if len(args) < 2 {
+		return []any{}
+	}
+	host, _ := args[0].(string)
+	var port int64
+	switch v := args[1].(type) {
+	case int64:
+		port = v
+	case int:
+		port = int64(v)
+	case string:
+		fmt.Sscanf(v, "%d", &port)
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return []any{}
+	}
+	out := []any{}
+	for _, a := range addrs {
+		family := int64(2)
+		ip := net.ParseIP(a)
+		if ip != nil && ip.To4() == nil {
+			family = int64(10)
+		}
+		out = append(out, []any{family, int64(1), int64(6), "", []any{a, port}})
+	}
+	return out
+}`
+
 // helperSocketPair — emulates socket.socketpair via a bound TCP listener
 // + connect on 127.0.0.1. Returns two connected __Socket instances so
 // callers can write to one and read from the other. Note: not a real
@@ -7817,6 +7863,86 @@ const helperTempfileMkstemp = `func __gopy_tempfile_mkstemp(args ...string) []an
 	fd := int64(f.Fd())
 	f.Close()
 	return []any{fd, name}
+}`
+
+// helperSpooledTempfileType — in-memory buffer that mimics
+// tempfile.SpooledTemporaryFile. CPython rolls over to disk past
+// max_size; gopy skips the rollover (memory is fine for the typical
+// use cases of small buffered writes) and keeps everything in a
+// strings.Builder.
+const helperSpooledTempfileType = `type __SpooledTempFile struct {
+	buf  strings.Builder
+	pos  int64
+	data string
+}
+
+func (f *__SpooledTempFile) sync() {
+	if int64(len(f.data)) < int64(f.buf.Len()) {
+		f.data = f.buf.String()
+	}
+}
+
+func (f *__SpooledTempFile) Write(s string) int64 {
+	n, _ := f.buf.WriteString(s)
+	f.pos += int64(n)
+	f.sync()
+	return int64(n)
+}
+
+func (f *__SpooledTempFile) Read(args ...int64) string {
+	f.sync()
+	n := int64(-1)
+	if len(args) > 0 {
+		n = args[0]
+	}
+	if n < 0 || f.pos+n > int64(len(f.data)) {
+		out := f.data[f.pos:]
+		f.pos = int64(len(f.data))
+		return out
+	}
+	out := f.data[f.pos : f.pos+n]
+	f.pos += n
+	return out
+}
+
+func (f *__SpooledTempFile) Seek(off int64, args ...int64) int64 {
+	f.sync()
+	whence := int64(0)
+	if len(args) > 0 {
+		whence = args[0]
+	}
+	switch whence {
+	case 0:
+		f.pos = off
+	case 1:
+		f.pos += off
+	case 2:
+		f.pos = int64(len(f.data)) + off
+	}
+	return f.pos
+}
+
+func (f *__SpooledTempFile) Tell() int64 { return f.pos }
+func (f *__SpooledTempFile) Truncate(args ...int64) int64 {
+	f.sync()
+	to := f.pos
+	if len(args) > 0 {
+		to = args[0]
+	}
+	if to < int64(len(f.data)) {
+		f.data = f.data[:to]
+		f.buf.Reset()
+		f.buf.WriteString(f.data)
+	}
+	return to
+}
+func (f *__SpooledTempFile) Getvalue() string { f.sync(); return f.data }
+func (f *__SpooledTempFile) Close()           {}
+func (f *__SpooledTempFile) Flush()           {}
+func (f *__SpooledTempFile) Rollover()        {}`
+
+const helperSpooledTempfileNew = `func __gopy_spooled_tempfile_new(args ...any) *__SpooledTempFile {
+	return &__SpooledTempFile{}
 }`
 
 // helperHmacType wraps a stdlib hash.Hash plus the key/algo so .hexdigest()
