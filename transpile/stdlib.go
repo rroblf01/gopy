@@ -465,7 +465,10 @@ var stdlibModules = map[string]stdlibModule{
 				Subs: map[string]stdlibModule{
 					"ElementTree": {
 						Funcs: map[string]stdlibFunc{
-							"fromstring": {GoFunc: "__gopy_xml_fromstring", Helper: helperXMLFromstring, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType}, HelperImports: []string{"encoding/xml", "strings"}},
+							"fromstring": {GoFunc: "__gopy_xml_fromstring", Helper: helperXMLFromstring, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"encoding/xml", "strings", "sort"}},
+							"tostring":   {GoFunc: "__gopy_xml_tostring", Helper: helperXMLTostring, ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"strings", "sort"}, RetKind: "str"},
+							"Element":    {GoFunc: "__gopy_xml_element", Helper: helperXMLElement, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"strings", "sort", "fmt"}},
+							"SubElement": {GoFunc: "__gopy_xml_subelement", Helper: helperXMLSubElement, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize, "__gopy_xml_element": helperXMLElement}, HelperImports: []string{"strings", "sort", "fmt"}},
 						},
 					},
 				},
@@ -613,7 +616,7 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"configparser": {
 		Funcs: map[string]stdlibFunc{
-			"ConfigParser": {GoFunc: "__gopy_configparser_new", Helper: helperConfigParserNew, RetTag: "__ConfigParser", ExtraHelpers: map[string]string{"__ConfigParser": helperConfigParserType}, HelperImports: []string{"bufio", "os", "strings"}},
+			"ConfigParser": {GoFunc: "__gopy_configparser_new", Helper: helperConfigParserNew, RetTag: "__ConfigParser", ExtraHelpers: map[string]string{"__ConfigParser": helperConfigParserType}, HelperImports: []string{"bufio", "os", "strings", "strconv"}},
 		},
 	},
 	"email": {
@@ -1596,12 +1599,12 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"pathlib": {
 		Funcs: map[string]stdlibFunc{
-			"Path":            {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
-			"PurePath":        {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
-			"PurePosixPath":   {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
-			"PureWindowsPath": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
-			"PosixPath":       {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
-			"WindowsPath":     {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings"}},
+			"Path":            {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings", "fmt"}},
+			"PurePath":        {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings", "fmt"}},
+			"PurePosixPath":   {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings", "fmt"}},
+			"PureWindowsPath": {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings", "fmt"}},
+			"PosixPath":       {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings", "fmt"}},
+			"WindowsPath":     {GoFunc: "__gopy_path_new", GoImport: "os", Helper: helperPathNew, RetTag: "__Path", ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "strings", "fmt"}},
 		},
 	},
 	"datetime": {
@@ -4742,11 +4745,120 @@ func (p *__ConfigParser) Read(path string) []string {
 	return []string{path}
 }
 
+// interpolate resolves CPython-style %(key)s placeholders. Lookup
+// walks the value's home section first, falls back to DEFAULT. Max
+// 10 expansion passes guards against accidental cycles.
+func (p *__ConfigParser) interpolate(section, raw string) string {
+	cur := raw
+	for pass := 0; pass < 10; pass++ {
+		next := cur
+		i := 0
+		for i < len(next) {
+			if next[i] != '%' || i+1 >= len(next) {
+				i++
+				continue
+			}
+			if next[i+1] == '(' {
+				end := strings.Index(next[i+2:], ")s")
+				if end < 0 {
+					i++
+					continue
+				}
+				key := next[i+2 : i+2+end]
+				var val string
+				if s, ok := p.data[section]; ok {
+					if v, ok2 := s[key]; ok2 {
+						val = v
+					}
+				}
+				if val == "" {
+					if s, ok := p.data["DEFAULT"]; ok {
+						if v, ok2 := s[key]; ok2 {
+							val = v
+						}
+					}
+				}
+				next = next[:i] + val + next[i+2+end+2:]
+				continue
+			}
+			if next[i+1] == '%' {
+				next = next[:i] + "%" + next[i+2:]
+				i++
+				continue
+			}
+			i++
+		}
+		if next == cur {
+			return cur
+		}
+		cur = next
+	}
+	return cur
+}
+
 func (p *__ConfigParser) Get(section, key string) string {
 	if s, ok := p.data[section]; ok {
-		return s[key]
+		if v, ok2 := s[key]; ok2 {
+			return p.interpolate(section, v)
+		}
+	}
+	if s, ok := p.data["DEFAULT"]; ok {
+		if v, ok2 := s[key]; ok2 {
+			return p.interpolate(section, v)
+		}
 	}
 	return ""
+}
+
+func (p *__ConfigParser) Getint(section, key string) int64 {
+	v := p.Get(section, key)
+	n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	return n
+}
+
+func (p *__ConfigParser) Getfloat(section, key string) float64 {
+	v := p.Get(section, key)
+	f, _ := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	return f
+}
+
+func (p *__ConfigParser) Getboolean(section, key string) bool {
+	v := strings.ToLower(strings.TrimSpace(p.Get(section, key)))
+	switch v {
+	case "1", "yes", "true", "on":
+		return true
+	}
+	return false
+}
+
+func (p *__ConfigParser) Options(section string) []string {
+	out := []string{}
+	if s, ok := p.data[section]; ok {
+		for k := range s {
+			out = append(out, k)
+		}
+	}
+	if s, ok := p.data["DEFAULT"]; ok && section != "DEFAULT" {
+		for k := range s {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func (p *__ConfigParser) Set(section, key, value string) {
+	p.ensure()
+	if _, ok := p.data[section]; !ok {
+		p.data[section] = map[string]string{}
+	}
+	p.data[section][key] = value
+}
+
+func (p *__ConfigParser) Add_section(name string) {
+	p.ensure()
+	if _, ok := p.data[name]; !ok {
+		p.data[name] = map[string]string{}
+	}
 }
 
 func (p *__ConfigParser) Sections() []string {
@@ -4802,10 +4914,21 @@ const helperEmailFormatDatetime = `func __gopy_email_format_datetime(args ...any
 // Attrib (attr map), and Children. .find(tag) / .findall(tag) walk
 // direct children; .iter(tag) walks the whole subtree.
 const helperXMLElementType = `type __XMLElement struct {
-	Tag      string
-	Text     string
-	Attrib   map[string]string
-	Children []*__XMLElement
+	Tag         string
+	Text        string
+	Attrib      map[string]string
+	attribOrder []string
+	Children    []*__XMLElement
+}
+
+func (e *__XMLElement) attribSet(k, v string) {
+	if e.Attrib == nil {
+		e.Attrib = map[string]string{}
+	}
+	if _, ok := e.Attrib[k]; !ok {
+		e.attribOrder = append(e.attribOrder, k)
+	}
+	e.Attrib[k] = v
 }
 
 func (e *__XMLElement) Find(tag string) *__XMLElement {
@@ -4856,10 +4979,55 @@ func (e *__XMLElement) Get(key string, args ...string) string {
 	return ""
 }
 
+func (e *__XMLElement) Set(key, value string) { e.attribSet(key, value) }
+
+func (e *__XMLElement) Append(child *__XMLElement) {
+	e.Children = append(e.Children, child)
+}
+
+func (e *__XMLElement) Remove(child *__XMLElement) {
+	for i, c := range e.Children {
+		if c == child {
+			e.Children = append(e.Children[:i], e.Children[i+1:]...)
+			return
+		}
+	}
+}
+
+func (e *__XMLElement) Insert(idx int64, child *__XMLElement) {
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= int64(len(e.Children)) {
+		e.Children = append(e.Children, child)
+		return
+	}
+	e.Children = append(e.Children, nil)
+	copy(e.Children[idx+1:], e.Children[idx:])
+	e.Children[idx] = child
+}
+
+func (e *__XMLElement) Keys() []string {
+	out := []string{}
+	for k := range e.Attrib {
+		out = append(out, k)
+	}
+	return out
+}
+
+func (e *__XMLElement) Items() [][]string {
+	out := [][]string{}
+	for k, v := range e.Attrib {
+		out = append(out, []string{k, v})
+	}
+	return out
+}
+
+
 func __gopy_xml_build(d *xml.Decoder, start *xml.StartElement) *__XMLElement {
 	el := &__XMLElement{Tag: start.Name.Local, Attrib: map[string]string{}}
 	for _, a := range start.Attr {
-		el.Attrib[a.Name.Local] = a.Value
+		el.attribSet(a.Name.Local, a.Value)
 	}
 	for {
 		tok, err := d.Token()
@@ -4875,6 +5043,79 @@ func __gopy_xml_build(d *xml.Decoder, start *xml.StartElement) *__XMLElement {
 			el.Text += string(t)
 		}
 	}
+}`
+
+const helperXMLSerialize = `func __gopy_xml_serialize(e *__XMLElement, b *strings.Builder) {
+	b.WriteByte('<')
+	b.WriteString(e.Tag)
+	if len(e.Attrib) > 0 {
+		keys := e.attribOrder
+		if len(keys) != len(e.Attrib) {
+			keys = make([]string, 0, len(e.Attrib))
+			for k := range e.Attrib {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+		}
+		for _, k := range keys {
+			b.WriteByte(' ')
+			b.WriteString(k)
+			b.WriteString("=\"")
+			b.WriteString(__gopy_xml_escape(e.Attrib[k]))
+			b.WriteByte('"')
+		}
+	}
+	if len(e.Children) == 0 && e.Text == "" {
+		b.WriteString(" />")
+		return
+	}
+	b.WriteByte('>')
+	if e.Text != "" {
+		b.WriteString(__gopy_xml_escape(e.Text))
+	}
+	for _, c := range e.Children {
+		__gopy_xml_serialize(c, b)
+	}
+	b.WriteString("</")
+	b.WriteString(e.Tag)
+	b.WriteByte('>')
+}
+
+func __gopy_xml_escape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;")
+	return r.Replace(s)
+}`
+
+const helperXMLTostring = `func __gopy_xml_tostring(e *__XMLElement, args ...string) string {
+	if e == nil {
+		return ""
+	}
+	var b strings.Builder
+	__gopy_xml_serialize(e, &b)
+	return b.String()
+}`
+
+const helperXMLElement = `func __gopy_xml_element(tag string, args ...any) *__XMLElement {
+	el := &__XMLElement{Tag: tag, Attrib: map[string]string{}}
+	for _, a := range args {
+		if m, ok := a.(map[string]string); ok {
+			for k, v := range m {
+				el.attribSet(k, v)
+			}
+		}
+		if m, ok := a.(map[string]any); ok {
+			for k, v := range m {
+				el.attribSet(k, fmt.Sprintf("%v", v))
+			}
+		}
+	}
+	return el
+}`
+
+const helperXMLSubElement = `func __gopy_xml_subelement(parent *__XMLElement, tag string, args ...any) *__XMLElement {
+	child := __gopy_xml_element(tag, args...)
+	parent.Children = append(parent.Children, child)
+	return child
 }`
 
 const helperXMLFromstring = `func __gopy_xml_fromstring(src string) *__XMLElement {
@@ -5966,11 +6207,25 @@ const helperCompletedProcessType = `type __CompletedProcess struct {
 	Stderr     string
 }`
 
-const helperSubprocessRun = `func __gopy_subprocess_run(args []string) *__CompletedProcess {
+const helperSubprocessRun = `func __gopy_subprocess_run(args []string, opts ...any) *__CompletedProcess {
 	if len(args) == 0 {
 		return &__CompletedProcess{Returncode: -1}
 	}
 	cmd := exec.Command(args[0], args[1:]...)
+	for _, o := range opts {
+		if kv, ok := o.(map[string]any); ok {
+			if v, ok := kv["input"]; ok && v != nil {
+				if s, ok := v.(string); ok {
+					cmd.Stdin = strings.NewReader(s)
+				}
+			}
+			if v, ok := kv["cwd"]; ok && v != nil {
+				if s, ok := v.(string); ok {
+					cmd.Dir = s
+				}
+			}
+		}
+	}
 	out, err := cmd.Output()
 	r := &__CompletedProcess{Stdout: string(out)}
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -6821,6 +7076,81 @@ func (p *__Path) Touch() {
 }
 
 func (p *__Path) Is_absolute() bool { return filepath.IsAbs(p.p) }
+
+func (p *__Path) Is_symlink() bool {
+	st, err := os.Lstat(p.p)
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeSymlink != 0
+}
+
+func (p *__Path) Samefile(other any) bool {
+	var rhs string
+	switch v := other.(type) {
+	case string:
+		rhs = v
+	case *__Path:
+		rhs = v.p
+	default:
+		rhs = fmt.Sprintf("%v", v)
+	}
+	a, e1 := os.Stat(p.p)
+	b, e2 := os.Stat(rhs)
+	if e1 != nil || e2 != nil {
+		return false
+	}
+	return os.SameFile(a, b)
+}
+
+func (p *__Path) As_posix() string { return filepath.ToSlash(p.p) }
+
+func (p *__Path) With_stem(stem string) *__Path {
+	ext := filepath.Ext(p.p)
+	dir := filepath.Dir(p.p)
+	if dir == "." {
+		return &__Path{p: stem + ext}
+	}
+	return &__Path{p: dir + "/" + stem + ext}
+}
+
+func (p *__Path) Parts() []string {
+	clean := filepath.ToSlash(p.p)
+	if clean == "" {
+		return []string{}
+	}
+	if clean == "/" {
+		return []string{"/"}
+	}
+	abs := strings.HasPrefix(clean, "/")
+	parts := strings.Split(strings.Trim(clean, "/"), "/")
+	out := []string{}
+	if abs {
+		out = append(out, "/")
+	}
+	for _, s := range parts {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (p *__Path) Parents() []*__Path {
+	out := []*__Path{}
+	cur := p.p
+	for {
+		next := filepath.Dir(cur)
+		if next == cur {
+			return out
+		}
+		out = append(out, &__Path{p: next})
+		cur = next
+		if next == "/" || next == "." {
+			return out
+		}
+	}
+}
 
 func (p *__Path) With_suffix(suffix string) *__Path {
 	stem := p.p

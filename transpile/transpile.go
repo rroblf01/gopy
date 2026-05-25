@@ -2201,7 +2201,127 @@ func (g *gen) emitTruthy(e ir.Expr) error {
 	return g.boolExpr(e)
 }
 
+// emitSuppress lowers `with contextlib.suppress(A, B, ...):` to an IIFE
+// that wraps the body in a defer-recover. The recover handler matches
+// the panicked *Exception's "ClassName:" prefix against each listed
+// class name; matches are swallowed, non-matches re-panic. The bound
+// `as e` form is rejected — suppress has no value to bind.
+func (g *gen) emitSuppress(call *ir.Call, body []ir.Stmt) error {
+	if len(call.Args) == 0 {
+		return fmt.Errorf("contextlib.suppress() requires at least one exception class")
+	}
+	var classes []string
+	for _, a := range call.Args {
+		n, ok := a.(*ir.Name)
+		if !ok {
+			return fmt.Errorf("contextlib.suppress(): each argument must be an exception class name")
+		}
+		classes = append(classes, n.N)
+	}
+	g.needsException = true
+	g.addImport("strings")
+	g.writeIndent()
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("defer func() {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("if __r := recover(); __r != nil {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__msg := \"\"\n")
+	g.writeIndent()
+	g.writef("switch __v := __r.(type) {\n")
+	g.writeIndent()
+	g.writef("case *Exception:\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__msg = __v.Msg\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("case error:\n")
+	g.indent++
+	g.writeIndent()
+	// Map Go's native runtime error strings to Python-style prefixes so
+	// users can suppress IndexError on a bare list[100] or KeyError on
+	// a missing map key.
+	g.writef("__es := __v.Error()\n")
+	g.writeIndent()
+	g.writef("switch {\n")
+	g.writeIndent()
+	g.writef("case strings.Contains(__es, \"index out of range\"):\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__msg = \"IndexError: \" + __es\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("case strings.Contains(__es, \"integer divide by zero\"), strings.Contains(__es, \"division by zero\"):\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__msg = \"ZeroDivisionError: \" + __es\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("default:\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__msg = __es\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("if __msg != \"\" {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("for _, __p := range []string{")
+	for i, c := range classes {
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("%q", c+":")
+	}
+	g.writef("} {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("if strings.HasPrefix(__msg, __p) { return }\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.writeIndent()
+	g.writef("panic(__r)\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	if err := g.stmts(body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	return nil
+}
+
 func (g *gen) withCM(w *ir.WithCM) error {
+	// contextlib.suppress(ExcA, ExcB, ...) — swallow panics whose
+	// Exception message prefix matches any of the listed classes.
+	// Builtin exceptions lower to NewException("ClassName: msg") so a
+	// prefix check is enough; user subclasses inherit the same shape.
+	if call, ok := w.Ctx.(*ir.Call); ok {
+		if n, ok2 := call.Func.(*ir.Name); ok2 {
+			if path, hit := g.aliases[n.N]; hit && path == "contextlib.suppress" {
+				return g.emitSuppress(call, w.Body)
+			}
+		}
+	}
 	t := g.effectiveType(w.Ctx)
 	if t == nil || t.Kind != ir.TyNamed {
 		t = g.userCallRetType(w.Ctx)
@@ -6360,8 +6480,12 @@ var taggedMethodRename = map[string]map[string]string{
 		"resolve":     "Resolve",
 		"touch":       "Touch",
 		"is_absolute": "Is_absolute",
+		"is_symlink":  "Is_symlink",
+		"samefile":    "Samefile",
+		"as_posix":    "As_posix",
 		"with_suffix": "With_suffix",
 		"with_name":   "With_name",
+		"with_stem":   "With_stem",
 	},
 	"__Datetime": {
 		"year":       "Year",
@@ -6453,6 +6577,12 @@ var taggedMethodRename = map[string]map[string]string{
 		"findall": "Findall",
 		"iter":    "Iter",
 		"get":     "Get",
+		"set":     "Set",
+		"append":  "Append",
+		"remove":  "Remove",
+		"insert":  "Insert",
+		"keys":    "Keys",
+		"items":   "Items",
 	},
 	"__URLRequest": {
 		"add_header": "Add_header",
@@ -6479,6 +6609,12 @@ var taggedMethodRename = map[string]map[string]string{
 	"__ConfigParser": {
 		"read":        "Read",
 		"get":         "Get",
+		"getint":      "Getint",
+		"getfloat":    "Getfloat",
+		"getboolean":  "Getboolean",
+		"options":     "Options",
+		"set":         "Set",
+		"add_section": "Add_section",
 		"sections":    "Sections",
 		"has_section": "Has_section",
 		"has_option":  "Has_option",
@@ -6530,6 +6666,10 @@ var taggedMethodRetTag = map[string]map[string]string{
 		"resolve":     "__Path",
 		"with_suffix": "__Path",
 		"with_name":   "__Path",
+		"with_stem":   "__Path",
+	},
+	"__XMLElement": {
+		"find": "__XMLElement",
 	},
 }
 
@@ -6562,10 +6702,12 @@ type taggedAttrInfo struct {
 // than a field load. Maps tag → python-name → {GoName, Ty}.
 var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 	"__Path": {
-		"name":   {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
-		"parent": {GoName: "Parent", Ty: nil},
-		"suffix": {GoName: "Suffix", Ty: &ir.Type{Kind: ir.TyStr}},
-		"stem":   {GoName: "Stem", Ty: &ir.Type{Kind: ir.TyStr}},
+		"name":    {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
+		"parent":  {GoName: "Parent", Ty: nil},
+		"suffix":  {GoName: "Suffix", Ty: &ir.Type{Kind: ir.TyStr}},
+		"stem":    {GoName: "Stem", Ty: &ir.Type{Kind: ir.TyStr}},
+		"parts":   {GoName: "Parts", Ty: &ir.Type{Kind: ir.TyList, Elem: &ir.Type{Kind: ir.TyStr}}},
+		"parents": {GoName: "Parents", Ty: &ir.Type{Kind: ir.TyList}},
 	},
 	"__Date": {
 		"year":  {GoName: "Year", Ty: &ir.Type{Kind: ir.TyInt}},
@@ -11887,11 +12029,36 @@ func (g *gen) builtinSubprocessRun(c *ir.Call) error {
 		return fmt.Errorf("subprocess.run() needs the command list as the first positional argument")
 	}
 	g.addImport("os/exec")
+	g.addImport("strings")
 	g.helpers["__gopy_subprocess_run"] = helperSubprocessRun
 	g.helpers["__CompletedProcess"] = helperCompletedProcessType
+	// `input=` / `cwd=` kwargs need to reach the helper. Other kwargs
+	// (capture_output, text, check, ...) are accepted at the call site
+	// and silently dropped — Go's exec semantics already capture stdout
+	// / stderr unconditionally.
 	g.writef("__gopy_subprocess_run(")
 	if err := g.expr(c.Args[0]); err != nil {
 		return err
+	}
+	var honored []ir.Keyword
+	for _, kw := range c.Keywords {
+		if kw.Name == "input" || kw.Name == "cwd" {
+			honored = append(honored, kw)
+		}
+	}
+	if len(honored) > 0 {
+		g.addImport("strings")
+		g.writef(", map[string]any{")
+		for i, kw := range honored {
+			if i > 0 {
+				g.writef(", ")
+			}
+			g.writef("%q: ", kw.Name)
+			if err := g.boxedExpr(kw.Value); err != nil {
+				return err
+			}
+		}
+		g.writef("}")
 	}
 	g.writef(")")
 	return nil

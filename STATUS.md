@@ -88,7 +88,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - `io.StringIO([initial])` / `io.BytesIO([initial])` — backed by `[]byte` with a cursor; methods `.write(s)`, `.read([n])`, `.getvalue()`, `.seek(pos)`, `.tell()`, `.truncate([n])`, `.close()` (no-op). Writes happen at the cursor position (CPython semantics — overlay, not append). Also usable as a context manager. Both forms share the same backing type since gopy maps `bytes` to `str`
 - `typing.get_type_hints(obj)` / `typing.get_args(t)` / `typing.get_origin(t)` — reflection stubs that return empty dict / empty list / `None`. gopy doesn't carry runtime type info; shape-compatible for libraries that probe and fall back
 - `argparse.ArgumentParser()` minimal: `parser.add_argument("--flag", ...)` registers a spec; `parser.parse_args([argv])` returns a `__ArgNamespace`. Values accessed via `ns.Get(name)` in gopy (CPython's `ns.name` attribute access not bridged — use `getattr` / `vars()` in cross-compat code). Supports `--key value`, `--key=value`, short `-k value`, and positional args; auto-parses int-shaped values
-- `configparser.ConfigParser()` minimal INI parser: `.read(path)`, `.get(section, key)`, `.sections()`, `.has_section(s)`, `.has_option(section, key)`. Comments (`#` / `;`), `[section]` headers, `key = value` lines
+- `configparser.ConfigParser()` minimal INI parser: `.read(path)`, `.get(section, key)` (with `%(key)s` interpolation walking the section then `DEFAULT`, max 10 expansion passes), `.getint` / `.getfloat` / `.getboolean` (parsed via `strconv`; `getboolean` matches `1` / `yes` / `true` / `on`), `.options(section)`, `.set(section, key, value)`, `.add_section(name)`, `.sections()`, `.has_section(s)`, `.has_option(section, key)`. Comments (`#` / `;`), `[section]` headers, `key = value` lines
 - `email.utils.formatdate([timestamp])` and `email.utils.format_datetime(...)` emit RFC-2822 date strings; `email.utils.parsedate(s)` returns a 9-tuple analog (always `[]any` of int components)
 - `heapq.merge(a, b)` — two-input merge of pre-sorted slices into an eagerly materialized `[]any`. CPython's N-input + key= forms aren't supported
 - `pickle.dumps(v)` / `pickle.loads(s)` — JSON-backed (same caveats as `copy.deepcopy`: int → float64, class instances need manual serialization). Wire format incompatible with CPython's binary protocol but functional within gopy programs
@@ -106,7 +106,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - `hashlib.new(name[, data])` — dispatches by algorithm name (`sha256`, `md5`, `sha1`, `sha512`) to existing `__Hasher`
 - Compat no-ops: `signal.signal` / `signal.getsignal` / `signal.set_wakeup_fd` accept any handler and discard. Constants `SIGINT` / `SIGTERM` / `SIGHUP` / `SIGQUIT` / `SIGKILL` / `SIGUSR1` / `SIGUSR2` / `SIG_DFL` / `SIG_IGN` exposed. `atexit.register` / `unregister` accept but don't run callbacks at process exit. `gc.collect()` forwards to `runtime.GC()` and returns 0; `gc.disable` / `enable` no-op; `gc.isenabled` always true
 - `sys.getsizeof(x)` returns approximate bytes (Go value size + container length for slices/maps); `sys.intern(s)` is identity (Go interns at compile time)
-- `contextlib.contextmanager` / `contextlib.suppress` accepted as no-op imports (use plain class-based `__enter__` / `__exit__` for real context managers)
+- `contextlib.suppress(Exc1, Exc2, ...)` real context manager: lowers `with suppress(Exc, ...):` to an IIFE with `defer recover` that swallows panics whose `*Exception.Msg` carries one of the listed class prefixes, plus Go's native runtime errors mapped to `IndexError:` / `ZeroDivisionError:` so a bare `xs[100]` or `n // 0` inside `with suppress(IndexError):` is caught. Non-matching panics re-panic so outer try/except still catches them. `contextlib.contextmanager` is still accepted as a no-op import (use class-based `__enter__` / `__exit__` for real context managers)
 - `subprocess.check_output(argv)` / `check_call(argv)` / `call(argv)` / `getoutput(s)` — wrappers over `os/exec`. Returns stdout (str) for check_output/getoutput, exit code for call. Raises `CalledProcessError`-tagged Exception on non-zero exit
 - `selectors.EVENT_READ` / `EVENT_WRITE` constants exposed (selectors core not implemented — gopy programs use goroutines for concurrency)
 - `inspect.signature` / `getsource` / `getmembers` / `isfunction` / `isclass` / `ismethod` / `currentframe` / `stack` — stubs returning empty / false / `"(...)"` since gopy doesn't carry runtime source / frame info
@@ -384,7 +384,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`asyncio.Lock` / `Queue` / `Semaphore`** with real blocking semantics
 - **`threading.Lock` / `Condition` / `Event`** beyond the stub registration
 - **`multiprocessing` real fork / IPC**
-- **`subprocess.Popen` streaming stdin/stdout** — `run` / `check_output` are synchronous-only
+- **`subprocess.Popen` streaming stdin/stdout** — `run(..., input=, cwd=)` and `check_output` are synchronous-only; persistent `Popen` objects with `.communicate(...)` / `.stdin.write(...)` aren't wired
 - ~~**`re` flags** (`re.IGNORECASE`, `re.MULTILINE`, etc.) — flag args parse but compiled patterns ignore them~~ now applied: each Go regexp helper accepts trailing flag args and prefixes the pattern with `(?ims)` as appropriate. `IGNORECASE` / `MULTILINE` / `DOTALL` work; `VERBOSE` / `ASCII` / `UNICODE` accept-but-no-op (Go regexp syntax differs)
 - **`json.JSONEncoder` / `JSONDecoder` subclassing** — registered as stub
 - **`pickle` binary protocol** — JSON-backed; not wire-compatible with CPython
@@ -395,10 +395,10 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`ssl.SSLContext` / certificate verification** — context constructors are stubs
 - **`logging.Logger` hierarchy, `Filter` chaining, custom `Handler`** — per-logger `setLevel` / `getEffectiveLevel` / `isEnabledFor` work and the module-level threshold gates emission, but propagation to parent loggers, custom handlers, and formatter pipelines aren't wired
 - **`argparse` subparsers / mutually exclusive groups / callable `type=` converters** — flat positional / optional args + `type=int|float|str|bool` + `default=` + `action=store_true|store_false` + `dest=` work; nested parsers / `type=MyClass` not yet
-- **`configparser` interpolation (`%(key)s`), `defaults=`, write-back to file**
+- **`configparser` write-back to file (`.write(fp)`)** — read + `set()` work, no serializer yet
 - **`mmap`, `select`, `selectors`, `signal`** real wakeups — all registered as stubs
 - **`sqlite3`** real driver — registered as stub
-- **`xml.etree.ElementTree` mutation / write** — only parse + read works
+- **`xml.etree.ElementTree.tree-level write` (write to file, XML declaration)** — `Element.set` / `.append` / `.remove` / `.insert` / `.keys` / `.items` + module-level `Element` / `SubElement` constructors + `tostring(el)` work; full `ElementTree.write(path)` with prolog / pretty-printing not yet
 - **`xml.dom.minidom`, `xml.sax`** parsers — registered as stubs
 - **`html.parser.HTMLParser`** — stub
 - **`email.parser` / `email.message`** — stubs
