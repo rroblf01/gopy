@@ -385,6 +385,9 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`threading.Lock` / `Condition` / `Event`** beyond the stub registration
 - **`multiprocessing` real fork / IPC**
 - **`subprocess.Popen` streaming stdin/stdout** — `run(..., input=, cwd=)` and `check_output` are synchronous-only; persistent `Popen` objects with `.communicate(...)` / `.stdin.write(...)` aren't wired
+- **`gzip.open(path, mode)` as context manager** — `with gzip.open(path, "wt") as f: f.write(...)` and `with gzip.open(path, "rt") as f: f.read() / f.readline() / f.readlines()` route through a `__GzipFile` shim that wraps `compress/gzip`. Read mode decompresses the whole file eagerly (no streaming) and write mode flushes on context exit
+- **`urllib.request.Request(url, data=, headers=, method=)`** — kwargs ride through a special-case builder so the resulting `*__URLRequest` carries the method override, headers map, and POST body when supplied; `urlopen(req)` now respects both the `Method` and any `Headers` on the request
+- **`bytes.fromhex(s)`** — strips spaces, decodes via `encoding/hex`, returns the result as a gopy-string. Bad hex raises `ValueError` through the standard `NewException` channel
 - ~~**`re` flags** (`re.IGNORECASE`, `re.MULTILINE`, etc.) — flag args parse but compiled patterns ignore them~~ now applied: each Go regexp helper accepts trailing flag args and prefixes the pattern with `(?ims)` as appropriate. `IGNORECASE` / `MULTILINE` / `DOTALL` work; `VERBOSE` / `ASCII` / `UNICODE` accept-but-no-op (Go regexp syntax differs)
 - **`json.JSONEncoder` / `JSONDecoder` subclassing** — registered as stub
 - **`pickle` binary protocol** — JSON-backed; not wire-compatible with CPython
@@ -395,10 +398,10 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`ssl.SSLContext` / certificate verification** — context constructors are stubs
 - **`logging.Logger` hierarchy, `Filter` chaining, custom `Handler`** — per-logger `setLevel` / `getEffectiveLevel` / `isEnabledFor` work and the module-level threshold gates emission, but propagation to parent loggers, custom handlers, and formatter pipelines aren't wired
 - **`argparse` subparsers / mutually exclusive groups / callable `type=` converters** — flat positional / optional args + `type=int|float|str|bool` + `default=` + `action=store_true|store_false` + `dest=` work; nested parsers / `type=MyClass` not yet
-- **`configparser` write-back to file (`.write(fp)`)** — read + `set()` work, no serializer yet
+- ~~**`configparser` write-back to file (`.write(fp)`)** — read + `set()` work, no serializer yet~~ now wired: `cp.write(fh)` accepts any handle with a `Write(string) int64` method (or `*os.File` from `with open(...) as fh`) and emits one section per existing entry plus DEFAULT
 - **`mmap`, `select`, `selectors`, `signal`** real wakeups — all registered as stubs
 - **`sqlite3`** real driver — registered as stub
-- **`xml.etree.ElementTree` pretty-printing on write** — `ElementTree.parse(path)` / `tree.getroot()` / `tree.write(path)` work (UTF-8 prolog included), plus `Element.set` / `.append` / `.remove` / `.insert` / `.keys` / `.items` and module-level `Element` / `SubElement` / `tostring` / `fromstring`. CPython's `ET.indent(tree)` pretty-printer and namespace-aware (Clark notation) tags aren't wired
+- **`xml.etree.ElementTree`** — `ElementTree.parse(path)` / `tree.getroot()` / `tree.write(path)` work (UTF-8 prolog included), plus `Element.set` / `.append` / `.remove` / `.insert` / `.keys` / `.items` and module-level `Element` / `SubElement` / `tostring` / `fromstring`. `ET.indent(tree, space="  ", level=0)` walks the tree in place and fills in Text/Tail strings so the serializer emits a pretty-printed shape; namespace-aware (Clark notation) tags aren't wired
 - **`xml.dom.minidom`, `xml.sax`** parsers — registered as stubs
 - **`html.parser.HTMLParser`** — stub
 - **`email.parser` / `email.message`** — stubs
@@ -410,7 +413,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 
 - **`math.frexp` / `math.modf` returning `(float, int)`** — wired as `(float, float)` analog
 - **`math.nan` / `math.inf` comparisons** match Go's IEEE-754; some Python edge cases (NaN-as-dict-key) differ
-- **`int.from_bytes(b, "big"|"little")` / `n.to_bytes(length, "big"|"little")`** now lower as inline byte-shift loops. Other endianness strings are rejected at transpile time; `signed=True` not handled (results are uint64 cast to int64)
+- **`int.from_bytes(b, "big"|"little"[, signed=True])` / `n.to_bytes(length, "big"|"little"[, signed=True])`** now lower as inline byte-shift loops. Other endianness strings are rejected at transpile time; `signed=True` selects two's-complement encoding/decoding (sign-extends short slices on the way back to int64)
 - **`(5).bit_length()` on parenthesized int literals** — `n.bit_length()` / `n.bit_count()` on any int-typed receiver now lower to `math/bits.Len64` / `math/bits.OnesCount64` of the unsigned magnitude; bare-literal-with-parens form remains a parser limitation
 - **Float `__format__` edge cases**: `g` type with very small numbers, special values (`-0.0`, `nan`, `inf`) — Go's `%g` differs slightly from Python's repr
 

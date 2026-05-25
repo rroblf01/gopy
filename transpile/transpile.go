@@ -1218,6 +1218,24 @@ func (g *gen) stmt(s ir.Stmt) error {
 				}
 			}
 		}
+		// Tagged-attribute write (e.g. el.text = "x" on __XMLElement
+		// renames to .Text). Mirror the read-side dispatch so attribute
+		// assignment lands on the Go exported field name.
+		if tag := g.exprTag(x.Target); tag != "" {
+			if attrs, ok := taggedAttrs[tag]; ok {
+				if info, ok := attrs[x.Name]; ok {
+					if err := g.expr(x.Target); err != nil {
+						return err
+					}
+					g.writef(".%s = ", info.GoName)
+					if err := g.expr(x.Value); err != nil {
+						return err
+					}
+					g.writef("\n")
+					return nil
+				}
+			}
+		}
 		if err := g.expr(x.Target); err != nil {
 			return err
 		}
@@ -2365,6 +2383,61 @@ func (g *gen) resolveStdlibPath(e ir.Expr) string {
 	return ""
 }
 
+// emitGzipOpen lowers `with gzip.open(path, mode) as fh:` to an IIFE that
+// opens (and on read, fully decompresses) the file. fh dispatches via the
+// __GzipFile tagged-method table, so fh.read(), fh.write(), fh.readline()
+// land on the right helper methods. Mode "rb" / "rt" / default → read,
+// "wb" / "wt" → write.
+func (g *gen) emitGzipOpen(call *ir.Call, varName string, body []ir.Stmt) error {
+	g.addImport("os")
+	g.addImport("io")
+	g.addImport("compress/gzip")
+	g.helpers["__GzipFile"] = helperGzipFileType
+	mode := "rb"
+	if len(call.Args) >= 2 {
+		if sl, ok := call.Args[1].(*ir.StrLit); ok {
+			mode = sl.V
+		}
+	}
+	writeMode := strings.ContainsRune(mode, 'w') || strings.ContainsRune(mode, 'a') || strings.ContainsRune(mode, 'x')
+	g.writeIndent()
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	if writeMode {
+		g.writef("__gz := __gopy_gzip_open_write(")
+	} else {
+		g.writef("__gz := __gopy_gzip_open_read(")
+	}
+	if len(call.Args) >= 1 {
+		if err := g.expr(call.Args[0]); err != nil {
+			return err
+		}
+	} else {
+		g.writef("\"\"")
+	}
+	g.writef(")\n")
+	g.writeIndent()
+	g.writef("defer __gz.Close()\n")
+	if varName != "" {
+		g.writeIndent()
+		g.writef("%s := __gz\n", varName)
+		g.writeIndent()
+		g.writef("_ = %s\n", varName)
+		g.varTypes[varName] = "__GzipFile"
+	} else {
+		g.writeIndent()
+		g.writef("_ = __gz\n")
+	}
+	if err := g.stmts(body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	return nil
+}
+
 // emitNamedTempFile lowers `with tempfile.NamedTemporaryFile([mode=...,
 // prefix=..., suffix=..., delete=...]) as f:` to an IIFE that creates
 // an os.CreateTemp file, exposes .name + .write / .read inside the
@@ -2446,6 +2519,8 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitTempDir(call, w.VarName, w.Body)
 			case "tempfile.NamedTemporaryFile":
 				return g.emitNamedTempFile(call, w.VarName, w.Body)
+			case "gzip.open":
+				return g.emitGzipOpen(call, w.VarName, w.Body)
 			}
 		}
 	}
@@ -2460,6 +2535,8 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitTempDir(synth, w.VarName, w.Body)
 			case "tempfile.NamedTemporaryFile":
 				return g.emitNamedTempFile(synth, w.VarName, w.Body)
+			case "gzip.open":
+				return g.emitGzipOpen(synth, w.VarName, w.Body)
 			}
 		}
 	}
@@ -6706,6 +6783,13 @@ var taggedMethodRename = map[string]map[string]string{
 		"close": "Close",
 		"flush": "Flush",
 	},
+	"__GzipFile": {
+		"read":      "Read",
+		"readline":  "Readline",
+		"readlines": "Readlines",
+		"write":     "Write",
+		"close":     "Close",
+	},
 	"__DirEntry": {
 		"is_file":    "Is_file",
 		"is_dir":     "Is_dir",
@@ -6825,6 +6909,7 @@ var taggedMethodRename = map[string]map[string]string{
 		"sections":    "Sections",
 		"has_section": "Has_section",
 		"has_option":  "Has_option",
+		"write":       "Write",
 	},
 	"__ArgNamespace": {
 		"get": "Get",
@@ -7013,10 +7098,9 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			g.writef("; if v < 0 { v = -v }; return int64(bits.OnesCount64(uint64(v))) }()")
 			return nil
 		case "to_bytes":
-			// n.to_bytes(length, byteorder) — CPython returns a bytes
-			// object; gopy maps bytes to str, so we emit a string of
-			// the raw bytes. byteorder is a literal `"big"` or `"little"`
-			// (other forms fall through unimplemented).
+			// n.to_bytes(length, byteorder, *, signed=False). Result is a
+			// gopy-string holding raw bytes. byteorder must be a literal
+			// "big"/"little"; signed=True selects two's-complement encoding.
 			if len(m.Args) != 2 {
 				return fmt.Errorf("int.to_bytes(length, byteorder) requires two args")
 			}
@@ -7028,11 +7112,27 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			if !big && boLit.V != "little" {
 				return fmt.Errorf("int.to_bytes: byteorder must be \"big\" or \"little\"")
 			}
-			g.writef("func() string { __n := uint64(")
-			if err := g.expr(m.Recv); err != nil {
-				return err
+			signed := false
+			for _, kw := range m.Keywords {
+				if kw.Name == "signed" {
+					if b, ok := kw.Value.(*ir.BoolLit); ok {
+						signed = b.V
+					}
+				}
 			}
-			g.writef("); __l := int(")
+			if signed {
+				g.writef("func() string { __sv := int64(")
+				if err := g.expr(m.Recv); err != nil {
+					return err
+				}
+				g.writef("); __n := uint64(__sv); __l := int(")
+			} else {
+				g.writef("func() string { __n := uint64(")
+				if err := g.expr(m.Recv); err != nil {
+					return err
+				}
+				g.writef("); __l := int(")
+			}
 			if err := g.expr(m.Args[0]); err != nil {
 				return err
 			}
@@ -7070,7 +7170,39 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		} else {
 			g.writef("for __i := len(__s) - 1; __i >= 0; __i-- { __n = (__n << 8) | uint64(byte(__s[__i])) }; ")
 		}
+		signed := false
+		for _, kw := range m.Keywords {
+			if kw.Name == "signed" {
+				if b, ok := kw.Value.(*ir.BoolLit); ok {
+					signed = b.V
+				}
+			}
+		}
+		if signed {
+			// sign-extend: if top bit of the consumed range is set, fill the
+			// upper bits with 1s so the int64 cast reflects the negative value.
+			g.writef("if len(__s) > 0 && len(__s) < 8 && (__n & (uint64(1) << (uint(len(__s)) * 8 - 1))) != 0 { __n |= ^uint64(0) << (uint(len(__s)) * 8) }; ")
+		}
 		g.writef("return int64(__n) }()")
+		return nil
+	}
+	// `bytes.fromhex("aabbcc")` — classmethod-like. gopy stores bytes as
+	// string, so we decode through encoding/hex and surface the resulting
+	// byte buffer as a Go string. Whitespace inside the literal is stripped
+	// to match CPython (which tolerates separators like spaces / underscores
+	// are not allowed by bytes.fromhex but spaces are).
+	if n, ok := m.Recv.(*ir.Name); ok && n.N == "bytes" && m.Method == "fromhex" {
+		if len(m.Args) != 1 {
+			return fmt.Errorf("bytes.fromhex(s) requires one arg")
+		}
+		g.addImport("encoding/hex")
+		g.addImport("strings")
+		g.writef("func() string { __s := strings.ReplaceAll(")
+		if err := g.expr(m.Args[0]); err != nil {
+			return err
+		}
+		g.writef(", \" \", \"\"); __b, __err := hex.DecodeString(__s); if __err != nil { panic(NewException(\"ValueError: \" + __err.Error())) }; return string(__b) }()")
+		g.needsException = true
 		return nil
 	}
 	// `dict.fromkeys(iter, value)` — classmethod-like; build a typed map
@@ -7274,6 +7406,8 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinPairwise(synth)
 		case "itertools.batched":
 			return g.builtinBatched(synth)
+		case "urllib.request.Request":
+			return g.builtinURLRequest(synth)
 		}
 		// User-class numeric dunder dispatch for math.ceil / math.floor /
 		// math.trunc: when the lone argument is a user class instance with
@@ -12447,6 +12581,41 @@ func (g *gen) builtinGlob(c *ir.Call) error {
 	if len(honored) > 0 {
 		g.writef(", map[string]any{")
 		for i, kw := range honored {
+			if i > 0 {
+				g.writef(", ")
+			}
+			g.writef("%q: ", kw.Name)
+			if err := g.boxedExpr(kw.Value); err != nil {
+				return err
+			}
+		}
+		g.writef("}")
+	}
+	g.writef(")")
+	return nil
+}
+
+// builtinURLRequest emits urllib.request.Request(url, data=, headers=, method=)
+// as __gopy_url_request_new(url, opts) where opts is a map[string]any
+// carrying the kwargs the helper recognizes.
+func (g *gen) builtinURLRequest(c *ir.Call) error {
+	g.helpers["__gopy_url_request_new"] = helperURLRequestNew
+	g.helpers["__URLRequest"] = helperURLRequestType
+	g.writef("__gopy_url_request_new(")
+	for i, a := range c.Args {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if err := g.boxedExpr(a); err != nil {
+			return err
+		}
+	}
+	if len(c.Keywords) > 0 {
+		if len(c.Args) > 0 {
+			g.writef(", ")
+		}
+		g.writef("map[string]any{")
+		for i, kw := range c.Keywords {
 			if i > 0 {
 				g.writef(", ")
 			}

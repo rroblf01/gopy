@@ -289,7 +289,7 @@ var stdlibModules = map[string]stdlibModule{
 			"request": {
 				Funcs: map[string]stdlibFunc{
 					"urlopen":     {GoFunc: "__gopy_url_urlopen", Helper: helperURLOpen, HelperImports: []string{"io", "net/http", "strings"}, RetTag: "__HTTPResponse", ExtraHelpers: map[string]string{"__HTTPResponse": helperHTTPResponseType}},
-					"Request":     {GoFunc: "__gopy_url_request_new", Helper: helperURLRequestNew, RetTag: "__URLRequest", ExtraHelpers: map[string]string{"__URLRequest": helperURLRequestType}},
+					"Request":     {GoFunc: "__gopy_url_request_new", Helper: helperURLRequestNew, RetTag: "__URLRequest", ExtraHelpers: map[string]string{"__URLRequest": helperURLRequestType}, HelperImports: []string{"fmt"}},
 					"urlretrieve": {GoFunc: "__gopy_url_urlretrieve", Helper: helperURLRetrieve, HelperImports: []string{"io", "net/http", "os"}},
 				},
 			},
@@ -477,10 +477,11 @@ var stdlibModules = map[string]stdlibModule{
 					"ElementTree": {
 						Funcs: map[string]stdlibFunc{
 							"fromstring": {GoFunc: "__gopy_xml_fromstring", Helper: helperXMLFromstring, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"encoding/xml", "strings", "sort"}},
-							"tostring":   {GoFunc: "__gopy_xml_tostring", Helper: helperXMLTostring, ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"strings", "sort"}, RetKind: "str"},
-							"Element":    {GoFunc: "__gopy_xml_element", Helper: helperXMLElement, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"strings", "sort", "fmt"}},
-							"SubElement": {GoFunc: "__gopy_xml_subelement", Helper: helperXMLSubElement, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize, "__gopy_xml_element": helperXMLElement}, HelperImports: []string{"strings", "sort", "fmt"}},
+							"tostring":   {GoFunc: "__gopy_xml_tostring", Helper: helperXMLTostring, ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"encoding/xml", "strings", "sort"}, RetKind: "str"},
+							"Element":    {GoFunc: "__gopy_xml_element", Helper: helperXMLElement, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"encoding/xml", "strings", "sort", "fmt"}},
+							"SubElement": {GoFunc: "__gopy_xml_subelement", Helper: helperXMLSubElement, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize, "__gopy_xml_element": helperXMLElement}, HelperImports: []string{"encoding/xml", "strings", "sort", "fmt"}},
 							"parse":      {GoFunc: "__gopy_xml_parse", Helper: helperXMLParse, RetTag: "__XMLTree", ExtraHelpers: map[string]string{"__XMLTree": helperXMLTreeType, "__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize, "__gopy_xml_fromstring": helperXMLFromstring}, HelperImports: []string{"encoding/xml", "os", "strings", "sort"}},
+							"indent":     {GoFunc: "__gopy_xml_indent", Helper: helperXMLIndent, ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__XMLTree": helperXMLTreeType}, HelperImports: []string{"encoding/xml", "os", "strings", "sort"}},
 						},
 					},
 				},
@@ -3681,14 +3682,50 @@ func (r *__URLRequest) Add_header(k, v string) {
 
 const helperURLRequestNew = `func __gopy_url_request_new(args ...any) *__URLRequest {
 	r := &__URLRequest{Method: "GET", Headers: map[string]string{}}
-	if len(args) > 0 {
-		r.URL, _ = args[0].(string)
-	}
-	if len(args) > 1 {
-		r.Data, _ = args[1].(string)
-		if r.Data != "" {
-			r.Method = "POST"
+	pos := 0
+	for _, a := range args {
+		if m, ok := a.(map[string]any); ok {
+			if d, ok := m["data"]; ok && d != nil {
+				if s, ok := d.(string); ok {
+					r.Data = s
+					if r.Data != "" {
+						r.Method = "POST"
+					}
+				}
+			}
+			if hv, ok := m["headers"]; ok && hv != nil {
+				if hm, ok := hv.(map[string]any); ok {
+					for k, v := range hm {
+						r.Headers[k] = fmt.Sprintf("%v", v)
+					}
+				}
+				if hm, ok := hv.(map[string]string); ok {
+					for k, v := range hm {
+						r.Headers[k] = v
+					}
+				}
+			}
+			if mv, ok := m["method"]; ok && mv != nil {
+				if s, ok := mv.(string); ok && s != "" {
+					r.Method = s
+				}
+			}
+			continue
 		}
+		switch pos {
+		case 0:
+			if s, ok := a.(string); ok {
+				r.URL = s
+			}
+		case 1:
+			if s, ok := a.(string); ok {
+				r.Data = s
+				if r.Data != "" {
+					r.Method = "POST"
+				}
+			}
+		}
+		pos++
 	}
 	return r
 }`
@@ -3724,11 +3761,26 @@ const helperURLRetrieve = `func __gopy_url_urlretrieve(args ...any) []any {
 	return []any{dest, map[string]string{}}
 }`
 
-const helperURLOpen = `func __gopy_url_urlopen(url string, opts ...any) *__HTTPResponse {
+const helperURLOpen = `func __gopy_url_urlopen(target any, opts ...any) *__HTTPResponse {
 	var resp *http.Response
 	var err error
 	method := "GET"
 	body := ""
+	url := ""
+	headers := map[string]string{}
+	switch t := target.(type) {
+	case string:
+		url = t
+	case *__URLRequest:
+		url = t.URL
+		body = t.Data
+		if t.Method != "" {
+			method = t.Method
+		}
+		for k, v := range t.Headers {
+			headers[k] = v
+		}
+	}
 	for _, o := range opts {
 		switch v := o.(type) {
 		case string:
@@ -3741,7 +3793,9 @@ const helperURLOpen = `func __gopy_url_urlopen(url string, opts ...any) *__HTTPR
 			if d, ok := v["data"]; ok && d != nil {
 				if s, ok := d.(string); ok {
 					body = s
-					method = "POST"
+					if method == "GET" {
+						method = "POST"
+					}
 				}
 			}
 			if m, ok := v["method"].(string); ok {
@@ -3754,7 +3808,21 @@ const helperURLOpen = `func __gopy_url_urlopen(url string, opts ...any) *__HTTPR
 		if rerr != nil {
 			panic(NewException("URLError: " + rerr.Error()))
 		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if _, ok := headers["Content-Type"]; !ok {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err = http.DefaultClient.Do(req)
+	} else if len(headers) > 0 {
+		req, rerr := http.NewRequest("GET", url, nil)
+		if rerr != nil {
+			panic(NewException("URLError: " + rerr.Error()))
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
 		resp, err = http.DefaultClient.Do(req)
 	} else {
 		resp, err = http.Get(url)
@@ -4996,6 +5064,46 @@ func (p *__ConfigParser) Has_option(section, key string) bool {
 		return k
 	}
 	return false
+}
+
+// Write serializes the parser back to INI form and pushes it through
+// the provided file handle. Accepts *os.File (from with open(...)),
+// *__NamedTempFile, *__GzipFile, or anything else that exposes a
+// Write(string) method.
+func (p *__ConfigParser) Write(fh any) {
+	var b strings.Builder
+	if d, ok := p.data["DEFAULT"]; ok && len(d) > 0 {
+		b.WriteString("[DEFAULT]\n")
+		for k, v := range d {
+			b.WriteString(k)
+			b.WriteString(" = ")
+			b.WriteString(v)
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+	for sec, kv := range p.data {
+		if sec == "DEFAULT" {
+			continue
+		}
+		b.WriteByte('[')
+		b.WriteString(sec)
+		b.WriteString("]\n")
+		for k, v := range kv {
+			b.WriteString(k)
+			b.WriteString(" = ")
+			b.WriteString(v)
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+	out := b.String()
+	switch f := fh.(type) {
+	case *os.File:
+		f.WriteString(out)
+	case interface{ Write(string) int64 }:
+		f.Write(out)
+	}
 }`
 
 const helperConfigParserNew = `func __gopy_configparser_new(args ...any) *__ConfigParser {
@@ -5027,9 +5135,75 @@ const helperEmailFormatDatetime = `func __gopy_email_format_datetime(args ...any
 // helperXMLElementType — minimal Element tree node. Holds Tag, Text,
 // Attrib (attr map), and Children. .find(tag) / .findall(tag) walk
 // direct children; .iter(tag) walks the whole subtree.
+// helperXMLIndent matches xml.etree.ElementTree.indent: walks the tree
+// in place, writing newline+indent strings into each parent's Text /
+// each child's Tail so the serializer renders a pretty-printed shape.
+// space is the per-level indent (default "  "); level is the starting
+// depth (default 0). Leaves with no children get no Text mutation.
+const helperXMLIndent = `func __gopy_xml_indent(tree any, args ...any) {
+	var root *__XMLElement
+	switch t := tree.(type) {
+	case *__XMLElement:
+		root = t
+	case *__XMLTree:
+		root = t.root
+	default:
+		return
+	}
+	if root == nil {
+		return
+	}
+	space := "  "
+	level := 0
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok {
+			space = s
+		}
+	}
+	if len(args) > 1 {
+		switch v := args[1].(type) {
+		case int:
+			level = v
+		case int64:
+			level = int(v)
+		}
+	}
+	var walk func(n *__XMLElement, lvl int)
+	walk = func(n *__XMLElement, lvl int) {
+		if len(n.Children) == 0 {
+			return
+		}
+		childIndent := "\n"
+		for i := 0; i <= lvl; i++ {
+			childIndent += space
+		}
+		closeIndent := "\n"
+		for i := 0; i < lvl; i++ {
+			closeIndent += space
+		}
+		if n.Text == "" {
+			n.Text = childIndent
+		}
+		for i, c := range n.Children {
+			walk(c, lvl+1)
+			if i == len(n.Children)-1 {
+				if c.Tail == "" {
+					c.Tail = closeIndent
+				}
+			} else {
+				if c.Tail == "" {
+					c.Tail = childIndent
+				}
+			}
+		}
+	}
+	walk(root, level)
+}`
+
 const helperXMLElementType = `type __XMLElement struct {
 	Tag         string
 	Text        string
+	Tail        string
 	Attrib      map[string]string
 	attribOrder []string
 	Children    []*__XMLElement
@@ -5181,6 +5355,9 @@ const helperXMLSerialize = `func __gopy_xml_serialize(e *__XMLElement, b *string
 	}
 	if len(e.Children) == 0 && e.Text == "" {
 		b.WriteString(" />")
+		if e.Tail != "" {
+			b.WriteString(__gopy_xml_escape(e.Tail))
+		}
 		return
 	}
 	b.WriteByte('>')
@@ -5193,6 +5370,9 @@ const helperXMLSerialize = `func __gopy_xml_serialize(e *__XMLElement, b *string
 	b.WriteString("</")
 	b.WriteString(e.Tag)
 	b.WriteByte('>')
+	if e.Tail != "" {
+		b.WriteString(__gopy_xml_escape(e.Tail))
+	}
 }
 
 func __gopy_xml_escape(s string) string {
@@ -6310,6 +6490,108 @@ func __gopy_named_tempfile_new(prefix, suffix string) (*__NamedTempFile, error) 
 		return nil, err
 	}
 	return &__NamedTempFile{name: f.Name(), f: f}, nil
+}`
+
+const helperGzipFileType = `type __GzipFile struct {
+	buf  []byte
+	pos  int
+	wf   *os.File
+	gw   *gzip.Writer
+	mode string
+}
+
+func (g *__GzipFile) Read(args ...int64) string {
+	n := int64(-1)
+	if len(args) > 0 {
+		n = args[0]
+	}
+	if n < 0 || g.pos+int(n) > len(g.buf) {
+		out := string(g.buf[g.pos:])
+		g.pos = len(g.buf)
+		return out
+	}
+	out := string(g.buf[g.pos : g.pos+int(n)])
+	g.pos += int(n)
+	return out
+}
+
+func (g *__GzipFile) Readline(args ...int64) string {
+	if g.pos >= len(g.buf) {
+		return ""
+	}
+	start := g.pos
+	for g.pos < len(g.buf) && g.buf[g.pos] != '\n' {
+		g.pos++
+	}
+	if g.pos < len(g.buf) {
+		g.pos++
+	}
+	return string(g.buf[start:g.pos])
+}
+
+func (g *__GzipFile) Readlines() []string {
+	rest := g.Read()
+	if rest == "" {
+		return []string{}
+	}
+	var out []string
+	cur := ""
+	for _, ch := range rest {
+		cur += string(ch)
+		if ch == '\n' {
+			out = append(out, cur)
+			cur = ""
+		}
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
+
+func (g *__GzipFile) Write(s string) int64 {
+	if g.gw == nil {
+		return 0
+	}
+	n, _ := g.gw.Write([]byte(s))
+	return int64(n)
+}
+
+func (g *__GzipFile) Close() {
+	if g.gw != nil {
+		g.gw.Close()
+		g.gw = nil
+	}
+	if g.wf != nil {
+		g.wf.Close()
+		g.wf = nil
+	}
+}
+
+func __gopy_gzip_open_read(path string) *__GzipFile {
+	f, err := os.Open(path)
+	if err != nil {
+		panic(NewException("FileNotFoundError: " + err.Error()))
+	}
+	defer f.Close()
+	r, err := gzip.NewReader(f)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	defer r.Close()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return &__GzipFile{buf: b, mode: "r"}
+}
+
+func __gopy_gzip_open_write(path string) *__GzipFile {
+	f, err := os.Create(path)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return &__GzipFile{wf: f, gw: gzip.NewWriter(f), mode: "w"}
 }`
 
 const helperTempfileMkdtemp = `func __gopy_tempfile_mkdtemp(args ...string) string {
