@@ -333,7 +333,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`__init_subclass__`** body — name is recognized as a no-op method, hook isn't invoked
 - **`__slots__`** enforcement (accepted as a no-op; attribute creation is already constrained by Go's struct)
 - **`@dataclass(frozen=True)` hash/equality plus `set[Point]` / dict-key use** — gopy's set is a slice, frozen dataclasses aren't hashable through Go's map machinery
-- **`@dataclass(slots=True)` / `eq=False` / `order=True`** variants — kwargs accepted, behavior unchanged
+- **`@dataclass(slots=True)` / `eq=False`** variants — kwargs accepted, behavior unchanged. **`order=True`** is now detected at lower time and stored on the `Class` IR node (`DataclassOrder`); the synthesized `__lt__` / `__le__` / `__gt__` / `__ge__` lexicographic methods are queued for codegen but not emitted yet
 - ~~**Property setters on inherited classes**~~ now resolve via base-chain lookup, so a subclass instance writes `c.size = v` through the parent class's `SetSize` setter (parent property registrations are inherited just like methods)
 - **Nested class definitions inside a function body**
 - ~~**Recursive nested functions**~~ supported now. `def f(): ... f(...)` inside an outer function emits a forward `var f func(...) ret` plus a `f = func(...) ret { ... }` body so the closure can call itself
@@ -406,7 +406,8 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`signal.signal(SIG, handler)`** registers a real Go `signal.Notify` channel and spawns a listener goroutine that calls back into the Python handler with `(signum, None)` on delivery. `signal.getsignal(SIG)` returns the last-registered callable. `SIG_DFL` / `SIG_IGN` reset the channel. Goroutine-driven, so cross-platform but skips CPython's reentrancy guarantees
 - **`sqlite3`** real driver — registered as stub
 - **`xml.etree.ElementTree`** — `ElementTree.parse(path)` / `tree.getroot()` / `tree.write(path)` work (UTF-8 prolog included), plus `Element.set` / `.append` / `.remove` / `.insert` / `.keys` / `.items` and module-level `Element` / `SubElement` / `tostring` / `fromstring`. `ET.indent(tree, space="  ", level=0)` walks the tree in place and fills in Text/Tail strings so the serializer emits a pretty-printed shape; namespace-aware (Clark notation) tags aren't wired
-- **`xml.dom.minidom`, `xml.sax`** parsers — registered as stubs
+- **`xml.dom.minidom.parseString(s)` / `parse(path)`** now return a `__DomDocument` wrapping the existing `__XMLElement` tree (so `.documentElement` / `.getElementsByTagName(tag)` / `.toxml()` work). Note: gopy element nodes use `.tag` rather than CPython's `.tagName`. `xml.sax` still stub
+- **`os.fspath(p)`** now accepts both `string` and `*__Path` (CPython's PathLike protocol approximation)
 - **`html.parser.HTMLParser`** — stub
 - **`email.parser` / `email.message`** — stubs
 - **`turtle`, `tkinter`, `curses`, `readline`** — UI / terminal modules not wired

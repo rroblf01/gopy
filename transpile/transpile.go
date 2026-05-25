@@ -6962,6 +6962,10 @@ var taggedMethodRename = map[string]map[string]string{
 		"getresponse": "Getresponse",
 		"close":       "Close",
 	},
+	"__DomDocument": {
+		"toxml":                "Toxml",
+		"getElementsByTagName": "GetElementsByTagName",
+	},
 	"__XMLElement": {
 		"find":    "Find",
 		"findall": "Findall",
@@ -7111,6 +7115,9 @@ type taggedAttrInfo struct {
 // attribute access on the tagged receiver emits a *method* call rather
 // than a field load. Maps tag → python-name → {GoName, Ty}.
 var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
+	"__DomDocument": {
+		"documentElement": {GoName: "DocumentElement", Ty: nil},
+	},
 	"__NamedTempFile": {
 		"name": {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
 	},

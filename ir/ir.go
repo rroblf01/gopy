@@ -164,6 +164,10 @@ type Class struct {
 	// Used by dataclasses.is_dataclass() and downstream helpers that need
 	// to distinguish data-style classes from regular ones.
 	IsDataclass bool
+	// DataclassOrder marks @dataclass(order=True). Codegen emits
+	// __lt__ / __le__ / __gt__ / __ge__ comparing the field tuple
+	// lexicographically.
+	DataclassOrder bool
 }
 
 // ClassVar holds the default value and IR type of a hoisted class-level

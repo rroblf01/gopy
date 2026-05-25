@@ -553,6 +553,24 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			if fn != nil && fn.Type() == "Name" && fn.Str("id") == "dataclass" {
 				isDataclass = true
 			}
+			if fn != nil && fn.Type() == "Attribute" {
+				rfn := fn.Child("value")
+				if rfn != nil && rfn.Type() == "Name" && rfn.Str("id") == "dataclasses" && fn.Str("attr") == "dataclass" {
+					isDataclass = true
+				}
+			}
+			if isDataclass {
+				for _, kw := range d.Children("keywords") {
+					if kw.Str("arg") == "order" {
+						v := kw.Child("value")
+						if v != nil && v.Type() == "Constant" {
+							if b, ok := v["value"].(bool); ok && b {
+								class.DataclassOrder = true
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 	bodyNodes := n.Children("body")

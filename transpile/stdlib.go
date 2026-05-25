@@ -107,7 +107,7 @@ var stdlibModules = map[string]stdlibModule{
 			"getegid":   {GoFunc: "__gopy_os_getegid", GoImport: "os", Helper: helperOsGetegid, RetKind: "int"},
 			"getlogin":  {GoFunc: "__gopy_os_getlogin", GoImport: "os", Helper: helperOsGetlogin, HelperImports: []string{"os/user"}, RetKind: "str"},
 			"system":    {GoFunc: "__gopy_os_system", Helper: helperOsSystem, HelperImports: []string{"os/exec", "os"}, RetKind: "int"},
-			"fspath":    {GoFunc: "__gopy_os_fspath", Helper: helperOsFspath, RetKind: "str"},
+			"fspath":    {GoFunc: "__gopy_os_fspath", Helper: helperOsFspath, ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "fmt"}, RetKind: "str"},
 		},
 		Subs: map[string]stdlibModule{
 			"path": {
@@ -498,8 +498,8 @@ var stdlibModules = map[string]stdlibModule{
 							"Comment":              {GoFunc: "__gopy_dom_comment_unused"},
 							"Node":                 {GoFunc: "__gopy_dom_node_unused"},
 							"NodeList":             {GoFunc: "__gopy_dom_nodelist_unused"},
-							"parseString":          {GoFunc: "__gopy_dom_parse_str_unused"},
-							"parse":                {GoFunc: "__gopy_dom_parse_unused"},
+							"parseString":          {GoFunc: "__gopy_dom_parse_string", Helper: helperDomParseString, RetTag: "__DomDocument", ExtraHelpers: map[string]string{"__DomDocument": helperDomDocumentType, "__XMLElement": helperXMLElementType, "__gopy_xml_fromstring": helperXMLFromstring, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"encoding/xml", "strings", "sort"}},
+							"parse":                {GoFunc: "__gopy_dom_parse", Helper: helperDomParse, RetTag: "__DomDocument", ExtraHelpers: map[string]string{"__DomDocument": helperDomDocumentType, "__XMLElement": helperXMLElementType, "__gopy_xml_fromstring": helperXMLFromstring, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"encoding/xml", "os", "strings", "sort"}},
 							"getDOMImplementation": {GoFunc: "__gopy_dom_impl_unused"},
 						},
 					},
@@ -5748,6 +5748,43 @@ const helperEmailFormatDatetime = `func __gopy_email_format_datetime(args ...any
 // helperXMLElementType — minimal Element tree node. Holds Tag, Text,
 // Attrib (attr map), and Children. .find(tag) / .findall(tag) walk
 // direct children; .iter(tag) walks the whole subtree.
+// helperDomDocumentType — minidom Document wraps the same __XMLElement
+// tree the etree path uses. .documentElement returns the root; .toxml()
+// serializes; .getElementsByTagName walks the tree.
+const helperDomDocumentType = `type __DomDocument struct {
+	root *__XMLElement
+}
+
+func (d *__DomDocument) DocumentElement() *__XMLElement { return d.root }
+
+func (d *__DomDocument) Toxml(args ...string) string {
+	if d.root == nil {
+		return ""
+	}
+	var b strings.Builder
+	__gopy_xml_serialize(d.root, &b)
+	return b.String()
+}
+
+func (d *__DomDocument) GetElementsByTagName(tag string) []*__XMLElement {
+	if d.root == nil {
+		return []*__XMLElement{}
+	}
+	return d.root.Iter(tag)
+}`
+
+const helperDomParseString = `func __gopy_dom_parse_string(s string) *__DomDocument {
+	return &__DomDocument{root: __gopy_xml_fromstring(s)}
+}`
+
+const helperDomParse = `func __gopy_dom_parse(path string) *__DomDocument {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		panic(NewException("FileNotFoundError: " + err.Error()))
+	}
+	return &__DomDocument{root: __gopy_xml_fromstring(string(data))}
+}`
+
 // helperXMLIndent matches xml.etree.ElementTree.indent: walks the tree
 // in place, writing newline+indent strings into each parent's Text /
 // each child's Tail so the serializer renders a pretty-printed shape.
@@ -9943,7 +9980,12 @@ const helperOsSystem = `func __gopy_os_system(cmd string) int64 {
 }`
 
 const helperOsFspath = `func __gopy_os_fspath(p any) string {
-	if s, ok := p.(string); ok { return s }
+	switch v := p.(type) {
+	case string:
+		return v
+	case *__Path:
+		return v.p
+	}
 	return ""
 }`
 
