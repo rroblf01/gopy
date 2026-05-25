@@ -562,6 +562,7 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 	// class-codegen pipeline emits the constructor.
 	dataclassDone := false
 	if isDataclass {
+		class.IsDataclass = true
 		class.HasInit = true
 		dcSc := newScope()
 		dcSc.declare("self", &Type{Kind: TyNamed, Name: name})

@@ -5651,6 +5651,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinReplace(c)
 			case "dataclasses.fields":
 				return g.builtinFields(c)
+			case "dataclasses.is_dataclass":
+				return g.builtinIsDataclass(c)
 			case "typing.cast":
 				if len(c.Args) != 2 {
 					return fmt.Errorf("typing.cast() takes (type, value)")
@@ -5675,6 +5677,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinRandomSample(c)
 			case "random.choices":
 				return g.builtinRandomChoices(c)
+			case "secrets.choice":
+				return g.builtinSecretsChoice(c)
 			case "itertools.groupby":
 				return g.builtinGroupBy(c)
 			case "logging.basicConfig":
@@ -6639,6 +6643,7 @@ var taggedMethodRename = map[string]map[string]string{
 		"replace":         "Replace",
 		"chmod":           "Chmod",
 		"lchmod":          "Lchmod",
+		"expanduser":      "Expanduser",
 	},
 	"__Datetime": {
 		"year":       "Year",
@@ -6669,6 +6674,11 @@ var taggedMethodRename = map[string]map[string]string{
 		"seek":  "Seek",
 		"close": "Close",
 		"flush": "Flush",
+	},
+	"__DirEntry": {
+		"is_file":    "Is_file",
+		"is_dir":     "Is_dir",
+		"is_symlink": "Is_symlink",
 	},
 	"__Logger": {
 		"debug":              "Debug",
@@ -6834,6 +6844,7 @@ var taggedMethodRetTag = map[string]map[string]string{
 		"relative_to": "__Path",
 		"rename":      "__Path",
 		"replace":     "__Path",
+		"expanduser":  "__Path",
 	},
 	"__XMLElement": {
 		"find": "__XMLElement",
@@ -6873,6 +6884,10 @@ type taggedAttrInfo struct {
 var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 	"__NamedTempFile": {
 		"name": {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
+	},
+	"__DirEntry": {
+		"name": {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
+		"path": {GoName: "Path", Ty: &ir.Type{Kind: ir.TyStr}},
 	},
 	"__Path": {
 		"name":    {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
@@ -7176,6 +7191,8 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinGlob(synth)
 		case "json.dumps":
 			return g.builtinJSONDumps(synth)
+		case "dataclasses.is_dataclass":
+			return g.builtinIsDataclass(synth)
 		case "datetime.timedelta":
 			return g.builtinTimedelta(synth)
 		case "random.choice":
@@ -7186,6 +7203,8 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinRandomSample(synth)
 		case "random.choices":
 			return g.builtinRandomChoices(synth)
+		case "secrets.choice":
+			return g.builtinSecretsChoice(synth)
 		case "heapq.heappush":
 			return g.builtinHeappush(synth)
 		case "heapq.heappop":
@@ -9954,6 +9973,78 @@ func (g *gen) builtinRandomSample(c *ir.Call) error {
 	g.writef("}\n")
 	g.writeIndent()
 	g.writef("return __cp[len(__cp)-__k:]\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinIsDataclass returns true when the arg resolves to a class
+// (or instance of a class) declared with @dataclass. Class names go
+// through g.classes; instance receivers route through effectiveType
+// → TyNamed → g.classes lookup. Unknown receivers emit `false`.
+func (g *gen) builtinIsDataclass(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("dataclasses.is_dataclass() takes one positional argument")
+	}
+	var clsName string
+	if n, ok := c.Args[0].(*ir.Name); ok {
+		if _, isClass := g.classes[n.N]; isClass {
+			clsName = n.N
+		}
+	}
+	if clsName == "" {
+		if t := g.effectiveType(c.Args[0]); t != nil && t.Kind == ir.TyNamed {
+			if _, ok := g.classes[t.Name]; ok {
+				clsName = t.Name
+			}
+		}
+	}
+	result := "false"
+	if clsName != "" {
+		if cls, ok := g.classes[clsName]; ok && cls.IsDataclass {
+			result = "true"
+		}
+	}
+	g.writef("func() bool { _ = ")
+	if err := g.boxedExpr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("; return %s }()", result)
+	return nil
+}
+
+// builtinSecretsChoice picks one element from a typed slice using
+// crypto/rand. Panics IndexError on empty input. Same shape as
+// random.choice but CSPRNG-backed.
+func (g *gen) builtinSecretsChoice(c *ir.Call) error {
+	if len(c.Args) != 1 || len(c.Keywords) != 0 {
+		return fmt.Errorf("secrets.choice() takes one positional argument")
+	}
+	elem, err := g.listElemTypeOfG(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("secrets.choice(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.addImport("crypto/rand")
+	g.addImport("math/big")
+	g.needsException = true
+	g.writef("func() %s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("if len(__src) == 0 { panic(NewException(\"IndexError: cannot choose from empty sequence\")) }\n")
+	g.writeIndent()
+	g.writef("__n, __err := rand.Int(rand.Reader, big.NewInt(int64(len(__src))))\n")
+	g.writeIndent()
+	g.writef("if __err != nil { panic(__err) }\n")
+	g.writeIndent()
+	g.writef("return __src[__n.Int64()]\n")
 	g.indent--
 	g.writeIndent()
 	g.writef("}()")

@@ -439,7 +439,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **String formatting locale-aware** (`{:n}` type with current locale grouping)
 - **`unicodedata.normalize` NFKD / NFC** — only category lookup is wired
 - **`gettext.translation` with `.mo` catalogs** — `gettext`/`ngettext` return source string unchanged
-- **`os.scandir`** as a context manager iterator — eager-materialized like `os.walk`
+- **`os.scandir`** as a true iterator + context manager — gopy materializes the entry list eagerly (no `__enter__` / `__next__`); the returned slice still exposes per-entry `.name` / `.path` / `.is_file()` / `.is_dir()` / `.is_symlink()`
 - **`shutil.copy` / `copytree` preserving permissions and metadata** — basic copy works, full attribute preservation may differ from CPython
 
 ### Out of scope (intentional)

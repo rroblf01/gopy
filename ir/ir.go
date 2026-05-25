@@ -160,6 +160,10 @@ type Class struct {
 	// `<Class>.<field>` / `cls.<field>` access at codegen rewrites to
 	// that name, mirroring Python's shared class-state semantics.
 	ClassVars map[string]ClassVar
+	// IsDataclass marks classes decorated with @dataclass / @dataclasses.dataclass.
+	// Used by dataclasses.is_dataclass() and downstream helpers that need
+	// to distinguish data-style classes from regular ones.
+	IsDataclass bool
 }
 
 // ClassVar holds the default value and IR type of a hoisted class-level

@@ -97,6 +97,7 @@ var stdlibModules = map[string]stdlibModule{
 			"cpu_count": {GoFunc: "__gopy_os_cpu_count", Helper: helperOsCPUCount, HelperImports: []string{"runtime"}, RetKind: "int"},
 			"urandom":   {GoFunc: "__gopy_os_urandom", Helper: helperOsUrandom, HelperImports: []string{"crypto/rand"}, RetKind: "str"},
 			"walk":      {GoFunc: "__gopy_os_walk", Helper: helperOsWalk, HelperImports: []string{"os", "path/filepath"}},
+			"scandir":   {GoFunc: "__gopy_os_scandir", Helper: helperOsScandir, ExtraHelpers: map[string]string{"__DirEntry": helperDirEntryType}, HelperImports: []string{"os"}},
 			"chdir":     {GoFunc: "os.Chdir", GoImport: "os"},
 			"getpid":    {GoFunc: "__gopy_os_getpid", GoImport: "os", Helper: helperOsGetpid, RetKind: "int"},
 			"getppid":   {GoFunc: "__gopy_os_getppid", GoImport: "os", Helper: helperOsGetppid, RetKind: "int"},
@@ -265,6 +266,7 @@ var stdlibModules = map[string]stdlibModule{
 			"token_urlsafe": {GoFunc: "__gopy_secrets_token_urlsafe", GoImport: "crypto/rand", Helper: helperSecretsTokenUrl, HelperImports: []string{"encoding/base64"}, RetKind: "str"},
 			"token_bytes":   {GoFunc: "__gopy_secrets_token_bytes", GoImport: "crypto/rand", Helper: helperSecretsTokenBytes, RetKind: "str"},
 			"randbelow":     {GoFunc: "__gopy_secrets_randbelow", Helper: helperSecretsRandbelow, HelperImports: []string{"crypto/rand", "math/big"}, RetKind: "int"},
+			"choice":        {GoFunc: "__gopy_secrets_choice_unused"},
 			"compare_digest": {GoFunc: "__gopy_compare_digest", Helper: helperCompareDigest, HelperImports: []string{"crypto/subtle"}, RetKind: "bool"},
 		},
 	},
@@ -7289,6 +7291,16 @@ func (p *__Path) Samefile(other any) bool {
 
 func (p *__Path) As_posix() string { return filepath.ToSlash(p.p) }
 
+func (p *__Path) Expanduser() *__Path {
+	if len(p.p) > 0 && p.p[0] == '~' {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return &__Path{p: home + p.p[1:]}
+		}
+	}
+	return &__Path{p: p.p}
+}
+
 func (p *__Path) With_stem(stem string) *__Path {
 	ext := filepath.Ext(p.p)
 	dir := filepath.Dir(p.p)
@@ -7555,6 +7567,35 @@ const helperOsWalk = `func __gopy_os_walk(root string) [][]any {
 // sys.version_info (major, minor, micro, releaselevel, serial). gopy
 // has no embedded interpreter, so the values are a stable stub.
 const helperSysVersionInfo = `var __gopy_sys_version_info = []any{int64(3), int64(12), int64(0), "final", int64(0)}`
+
+const helperDirEntryType = `type __DirEntry struct {
+	name string
+	path string
+	d    os.DirEntry
+}
+
+func (e *__DirEntry) Name() string     { return e.name }
+func (e *__DirEntry) Path() string     { return e.path }
+func (e *__DirEntry) Is_file() bool    { return !e.d.IsDir() && e.d.Type()&os.ModeSymlink == 0 }
+func (e *__DirEntry) Is_dir() bool     { return e.d.IsDir() }
+func (e *__DirEntry) Is_symlink() bool { return e.d.Type()&os.ModeSymlink != 0 }`
+
+const helperOsScandir = `func __gopy_os_scandir(p string) []*__DirEntry {
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		panic(err)
+	}
+	out := make([]*__DirEntry, 0, len(entries))
+	for _, e := range entries {
+		full := p
+		if len(full) > 0 && full[len(full)-1] != '/' {
+			full += "/"
+		}
+		full += e.Name()
+		out = append(out, &__DirEntry{name: e.Name(), path: full, d: e})
+	}
+	return out
+}`
 
 const helperOsListdir = `func __gopy_os_listdir(p string) []string {
 	entries, err := os.ReadDir(p)
