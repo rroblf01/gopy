@@ -1009,9 +1009,13 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"gettext": {
 		Funcs: map[string]stdlibFunc{
-			"gettext":  {GoFunc: "__gopy_gettext_identity", Helper: helperGettextIdentity, RetKind: "str"},
-			"ngettext": {GoFunc: "__gopy_gettext_n", Helper: helperGettextN, RetKind: "str"},
-			"install":  {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"gettext":     {GoFunc: "__gopy_gettext_identity", Helper: helperGettextIdentity, RetKind: "str"},
+			"ngettext":    {GoFunc: "__gopy_gettext_n", Helper: helperGettextN, RetKind: "str"},
+			"install":     {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"translation": {GoFunc: "__gopy_gettext_translation", Helper: helperGettextTranslation, RetTag: "__GettextTranslation", ExtraHelpers: map[string]string{"__GettextTranslation": helperGettextTranslationType}},
+			"find":        {GoFunc: "__gopy_gettext_find", Helper: helperGettextFind, RetKind: "str"},
+			"bindtextdomain":  {GoFunc: "__gopy_warnings_noop", Helper: helperWarningsNoop},
+			"textdomain":      {GoFunc: "__gopy_gettext_identity", Helper: helperGettextIdentity, RetKind: "str"},
 		},
 	},
 	"locale": {
@@ -1049,8 +1053,10 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"unicodedata": {
 		Funcs: map[string]stdlibFunc{
-			"category": {GoFunc: "__gopy_unicodedata_category", Helper: helperUnicodedataCategory, HelperImports: []string{"unicode"}, RetKind: "str"},
-			"name":     {GoFunc: "__gopy_unicodedata_name", Helper: helperUnicodedataName, RetKind: "str"},
+			"category":  {GoFunc: "__gopy_unicodedata_category", Helper: helperUnicodedataCategory, HelperImports: []string{"unicode"}, RetKind: "str"},
+			"name":      {GoFunc: "__gopy_unicodedata_name", Helper: helperUnicodedataName, RetKind: "str"},
+			"normalize": {GoFunc: "__gopy_unicodedata_normalize", Helper: helperUnicodedataNormalize, RetKind: "str"},
+			"lookup":    {GoFunc: "__gopy_unicodedata_lookup", Helper: helperUnicodedataLookup, RetKind: "str"},
 		},
 	},
 	"dis": {
@@ -2104,8 +2110,8 @@ var stdlibModules = map[string]stdlibModule{
 			"HAS_NPN":                 {GoExpr: "true"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"create_default_context":  {GoFunc: "__gopy_ssl_ctx_unused"},
-			"SSLContext":              {GoFunc: "__gopy_ssl_ctx_unused"},
+			"create_default_context":  {GoFunc: "__gopy_ssl_ctx_new", Helper: helperSSLContextNew, RetTag: "__SSLContext", ExtraHelpers: map[string]string{"__SSLContext": helperSSLContextType}},
+			"SSLContext":              {GoFunc: "__gopy_ssl_ctx_new", Helper: helperSSLContextNew, RetTag: "__SSLContext", ExtraHelpers: map[string]string{"__SSLContext": helperSSLContextType}},
 			"wrap_socket":             {GoFunc: "__gopy_ssl_wrap_unused"},
 			"get_default_verify_paths": {GoFunc: "__gopy_ssl_paths_unused"},
 			"get_server_certificate":  {GoFunc: "__gopy_ssl_get_cert_unused"},
@@ -6584,6 +6590,30 @@ const helperWarningsNoop = `func __gopy_warnings_noop(args ...any) {}`
 // load .mo translation catalogs; the message string is returned as-is.
 const helperGettextIdentity = `func __gopy_gettext_identity(s string) string { return s }`
 
+// helperGettextTranslationType — translation object returned by
+// gettext.translation(). .gettext / .ngettext echo the source string;
+// .install() registers _ as a global lookup (no-op in gopy).
+const helperGettextTranslationType = `type __GettextTranslation struct{}
+
+func (t *__GettextTranslation) Gettext(s string) string  { return s }
+func (t *__GettextTranslation) Lgettext(s string) string { return s }
+func (t *__GettextTranslation) Ngettext(s1, s2 string, n int64) string {
+	if n == 1 {
+		return s1
+	}
+	return s2
+}
+func (t *__GettextTranslation) Lngettext(s1, s2 string, n int64) string {
+	return t.Ngettext(s1, s2, n)
+}
+func (t *__GettextTranslation) Install(args ...any) {}`
+
+const helperGettextTranslation = `func __gopy_gettext_translation(args ...any) *__GettextTranslation {
+	return &__GettextTranslation{}
+}`
+
+const helperGettextFind = `func __gopy_gettext_find(args ...any) string { return "" }`
+
 const helperGettextN = `func __gopy_gettext_n(args ...any) string {
 	if len(args) < 3 {
 		if len(args) > 0 {
@@ -6739,6 +6769,71 @@ const helperUnicodedataName = `func __gopy_unicodedata_name(args ...any) string 
 		}
 	}
 	return ""
+}`
+
+// helperUnicodedataNormalize — pass-through. CPython's NFC/NFD/NFKC/NFKD
+// table-driven normalization lives in golang.org/x/text/unicode/norm.
+// gopy stays in the stdlib so we return the input unchanged. ASCII-only
+// strings round-trip correctly; non-ASCII may differ from CPython.
+const helperUnicodedataNormalize = `func __gopy_unicodedata_normalize(form, s string) string {
+	return s
+}`
+
+// helperSSLContextType — minimal SSLContext shim. Stores config options
+// the caller may toggle (check_hostname / verify_mode / certfile);
+// load_cert_chain / load_verify_locations / set_ciphers / set_alpn_protocols
+// accept and discard since gopy's HTTP client uses Go's net/http with
+// default TLS behavior. wrap_socket returns the socket unmodified.
+const helperSSLContextType = `type __SSLContext struct {
+	CheckHostname bool
+	VerifyMode    int64
+	Protocol      int64
+	Certfile      string
+	Keyfile       string
+	CafileChain   []string
+}
+
+func (c *__SSLContext) Load_cert_chain(args ...any) {
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok {
+			c.Certfile = s
+		}
+	}
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok {
+			c.Keyfile = s
+		}
+	}
+}
+
+func (c *__SSLContext) Load_verify_locations(args ...any) {
+	for _, a := range args {
+		if s, ok := a.(string); ok && s != "" {
+			c.CafileChain = append(c.CafileChain, s)
+		}
+	}
+}
+
+func (c *__SSLContext) Set_ciphers(args ...any)            {}
+func (c *__SSLContext) Set_alpn_protocols(args ...any)     {}
+func (c *__SSLContext) Set_npn_protocols(args ...any)      {}
+func (c *__SSLContext) Set_default_verify_paths(args ...any) {}
+func (c *__SSLContext) Wrap_socket(args ...any) any {
+	if len(args) > 0 {
+		return args[0]
+	}
+	return nil
+}`
+
+const helperSSLContextNew = `func __gopy_ssl_ctx_new(args ...any) *__SSLContext {
+	return &__SSLContext{CheckHostname: true, VerifyMode: 2}
+}`
+
+// helperUnicodedataLookup — accept the Unicode name and surface a stub
+// "?" since gopy doesn't ship the name database. Callers seeded with
+// well-known names should pre-resolve at the call site.
+const helperUnicodedataLookup = `func __gopy_unicodedata_lookup(name string) string {
+	return "?"
 }`
 
 const helperDisNoop = `func __gopy_dis_noop(args ...any) {}`

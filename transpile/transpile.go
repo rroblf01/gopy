@@ -6910,6 +6910,22 @@ var taggedMethodRename = map[string]map[string]string{
 		"get": "Get",
 		"set": "Set",
 	},
+	"__GettextTranslation": {
+		"gettext":   "Gettext",
+		"lgettext":  "Lgettext",
+		"ngettext":  "Ngettext",
+		"lngettext": "Lngettext",
+		"install":   "Install",
+	},
+	"__SSLContext": {
+		"load_cert_chain":         "Load_cert_chain",
+		"load_verify_locations":   "Load_verify_locations",
+		"set_ciphers":             "Set_ciphers",
+		"set_alpn_protocols":      "Set_alpn_protocols",
+		"set_npn_protocols":       "Set_npn_protocols",
+		"set_default_verify_paths": "Set_default_verify_paths",
+		"wrap_socket":             "Wrap_socket",
+	},
 	"__Mmap": {
 		"read":       "Read",
 		"read_byte":  "Read_byte",
