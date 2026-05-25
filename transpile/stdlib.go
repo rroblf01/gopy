@@ -1317,6 +1317,7 @@ var stdlibModules = map[string]stdlibModule{
 			"check_call":   {GoFunc: "__gopy_subprocess_check_call", Helper: helperSubprocessCheckCall, HelperImports: []string{"os/exec"}, RetKind: "int"},
 			"call":         {GoFunc: "__gopy_subprocess_call", Helper: helperSubprocessCall, HelperImports: []string{"os/exec"}, RetKind: "int"},
 			"getoutput":    {GoFunc: "__gopy_subprocess_getoutput", Helper: helperSubprocessGetoutput, HelperImports: []string{"os/exec", "strings"}, RetKind: "str"},
+			"Popen":        {GoFunc: "__gopy_subprocess_popen", Helper: helperSubprocessPopen, RetTag: "__Popen", ExtraHelpers: map[string]string{"__Popen": helperPopenType}, HelperImports: []string{"os/exec", "io", "syscall"}},
 		},
 	},
 	"functools": {
@@ -1590,12 +1591,12 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"threading": {
 		Funcs: map[string]stdlibFunc{
-			"Lock":          {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}},
-			"RLock":         {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}},
-			"Event":         {GoFunc: "__gopy_threading_event_unused"},
-			"Condition":     {GoFunc: "__gopy_threading_cond_unused"},
-			"Semaphore":     {GoFunc: "__gopy_threading_sem_unused"},
-			"BoundedSemaphore": {GoFunc: "__gopy_threading_sem_unused"},
+			"Lock":          {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}, HelperImports: []string{"sync"}},
+			"RLock":         {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}, HelperImports: []string{"sync"}},
+			"Event":         {GoFunc: "__gopy_threading_event_new", Helper: helperThreadingEvent, RetTag: "__Event", ExtraHelpers: map[string]string{"__Event": helperEventType}, HelperImports: []string{"sync", "time"}},
+			"Condition":     {GoFunc: "__gopy_threading_cond_new", Helper: helperThreadingCond, RetTag: "__Condition", ExtraHelpers: map[string]string{"__Condition": helperCondType, "__Lock": helperLockType}, HelperImports: []string{"sync"}},
+			"Semaphore":     {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
+			"BoundedSemaphore": {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
 			"Barrier":       {GoFunc: "__gopy_threading_barrier_unused"},
 			"Thread":        {GoFunc: "__gopy_threading_thread_unused"},
 			"Timer":         {GoFunc: "__gopy_threading_timer_unused"},
@@ -3341,15 +3342,164 @@ const helperGetpassGetuser = `func __gopy_getpass_getuser() string {
 // transpiled program is single-goroutine by default, so acquire/release
 // degrade to bookkeeping. Context-manager use (`with lock:`) works too
 // because Acquire returns the lock itself.
-const helperLockType = `type __Lock struct{ held bool }
+const helperLockType = `type __Lock struct {
+	mu    sync.Mutex
+	held  bool
+}
 
-func (l *__Lock) Acquire(args ...any) bool { l.held = true; return true }
-func (l *__Lock) Release()                 { l.held = false }
+func (l *__Lock) Acquire(args ...any) bool { l.mu.Lock(); l.held = true; return true }
+func (l *__Lock) Release()                 { l.held = false; l.mu.Unlock() }
 func (l *__Lock) Locked() bool             { return l.held }
-func (l *__Lock) Enter() *__Lock           { l.held = true; return l }
-func (l *__Lock) Exit() bool               { l.held = false; return false }`
+func (l *__Lock) Enter() *__Lock           { l.mu.Lock(); l.held = true; return l }
+func (l *__Lock) Exit() bool               { l.held = false; l.mu.Unlock(); return false }`
 
 const helperThreadingLock = `func __gopy_threading_lock() *__Lock { return &__Lock{} }`
+
+// helperEventType — threading.Event backed by a channel that closes on
+// set(). wait() blocks on receive (or returns False after the optional
+// timeout). clear() rotates the channel.
+const helperEventType = `type __Event struct {
+	mu sync.Mutex
+	ch chan struct{}
+	on bool
+}
+
+func (e *__Event) ensure() {
+	if e.ch == nil {
+		e.ch = make(chan struct{})
+	}
+}
+
+func (e *__Event) Is_set() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.on
+}
+
+func (e *__Event) Set() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ensure()
+	if !e.on {
+		close(e.ch)
+		e.on = true
+	}
+}
+
+func (e *__Event) Clear() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ch = make(chan struct{})
+	e.on = false
+}
+
+func (e *__Event) Wait(args ...float64) bool {
+	e.mu.Lock()
+	if e.on {
+		e.mu.Unlock()
+		return true
+	}
+	e.ensure()
+	ch := e.ch
+	e.mu.Unlock()
+	if len(args) > 0 && args[0] >= 0 {
+		t := time.NewTimer(time.Duration(args[0] * float64(time.Second)))
+		defer t.Stop()
+		select {
+		case <-ch:
+			return true
+		case <-t.C:
+			return false
+		}
+	}
+	<-ch
+	return true
+}`
+
+const helperThreadingEvent = `func __gopy_threading_event_new(args ...any) *__Event {
+	return &__Event{ch: make(chan struct{})}
+}`
+
+// helperCondType — threading.Condition wraps a sync.Cond. notify/notify_all
+// signal waiters; wait() releases the lock during the wait.
+const helperCondType = `type __Condition struct {
+	mu   *sync.Mutex
+	cond *sync.Cond
+	lk   *__Lock
+}
+
+func (c *__Condition) ensure() {
+	if c.mu == nil {
+		c.mu = &sync.Mutex{}
+		c.cond = sync.NewCond(c.mu)
+	}
+}
+
+func (c *__Condition) Acquire(args ...any) bool {
+	c.ensure()
+	c.mu.Lock()
+	return true
+}
+
+func (c *__Condition) Release() {
+	if c.mu != nil {
+		c.mu.Unlock()
+	}
+}
+
+func (c *__Condition) Wait(args ...float64) bool {
+	c.ensure()
+	c.cond.Wait()
+	return true
+}
+
+func (c *__Condition) Notify(args ...int64) {
+	if c.cond != nil {
+		c.cond.Signal()
+	}
+}
+
+func (c *__Condition) Notify_all() {
+	if c.cond != nil {
+		c.cond.Broadcast()
+	}
+}
+
+func (c *__Condition) Enter() *__Condition { c.Acquire(); return c }
+func (c *__Condition) Exit() bool          { c.Release(); return false }`
+
+const helperThreadingCond = `func __gopy_threading_cond_new(args ...any) *__Condition {
+	return &__Condition{}
+}`
+
+// helperSemType — threading.Semaphore / BoundedSemaphore backed by a
+// buffered channel. Acquire blocks until a slot is free; Release frees one.
+const helperSemType = `type __Semaphore struct {
+	ch chan struct{}
+}
+
+func (s *__Semaphore) Acquire(args ...any) bool {
+	s.ch <- struct{}{}
+	return true
+}
+
+func (s *__Semaphore) Release() {
+	<-s.ch
+}
+
+func (s *__Semaphore) Enter() *__Semaphore { s.Acquire(); return s }
+func (s *__Semaphore) Exit() bool          { s.Release(); return false }`
+
+const helperThreadingSem = `func __gopy_threading_sem_new(args ...int64) *__Semaphore {
+	cap := int64(1)
+	if len(args) > 0 {
+		cap = args[0]
+	}
+	if cap < 1 {
+		cap = 1
+	}
+	return &__Semaphore{ch: make(chan struct{}, cap)}
+}`
 
 // helperQueueType is a minimal FIFO/LIFO container modeled on
 // queue.Queue. Goroutine-safe via the embedded mutex. Empty() / Qsize()
@@ -6383,6 +6533,130 @@ const helperOpItemgetter = `func __gopy_operator_itemgetter(args ...any) func(an
 
 const helperOpAttrgetter = `func __gopy_operator_attrgetter(args ...any) func(any) any {
 	return func(o any) any { return o }
+}`
+
+// helperPopenType — minimal subprocess.Popen wrapper. Captures stdout
+// and stderr to in-memory buffers when PIPE is requested; communicate()
+// writes the optional input and returns (stdout, stderr) as strings.
+// terminate() / kill() send the matching signals. returncode follows
+// the wait().
+const helperPopenType = `type __Popen struct {
+	cmd        *exec.Cmd
+	stdinW     io.WriteCloser
+	stdoutR    io.ReadCloser
+	stderrR    io.ReadCloser
+	Returncode int64
+	Pid        int64
+	done       bool
+}
+
+func (p *__Popen) Wait(args ...float64) int64 {
+	if p.done {
+		return p.Returncode
+	}
+	err := p.cmd.Wait()
+	p.done = true
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		p.Returncode = int64(exitErr.ExitCode())
+	} else if err != nil {
+		p.Returncode = -1
+	}
+	return p.Returncode
+}
+
+func (p *__Popen) Communicate(args ...any) []any {
+	if p.stdinW != nil {
+		if len(args) > 0 {
+			if s, ok := args[0].(string); ok && s != "" {
+				p.stdinW.Write([]byte(s))
+			}
+		}
+		p.stdinW.Close()
+		p.stdinW = nil
+	}
+	var out, errOut []byte
+	if p.stdoutR != nil {
+		out, _ = io.ReadAll(p.stdoutR)
+	}
+	if p.stderrR != nil {
+		errOut, _ = io.ReadAll(p.stderrR)
+	}
+	p.Wait()
+	return []any{string(out), string(errOut)}
+}
+
+func (p *__Popen) Terminate() {
+	if p.cmd != nil && p.cmd.Process != nil {
+		p.cmd.Process.Signal(syscall.SIGTERM)
+	}
+}
+
+func (p *__Popen) Kill() {
+	if p.cmd != nil && p.cmd.Process != nil {
+		p.cmd.Process.Kill()
+	}
+}
+
+func (p *__Popen) Poll() any {
+	if p.done {
+		return p.Returncode
+	}
+	return nil
+}`
+
+const helperSubprocessPopen = `func __gopy_subprocess_popen(argv []string, args ...any) *__Popen {
+	if len(argv) == 0 {
+		panic(NewException("ValueError: empty argv"))
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	wantStdin := false
+	wantStdout := false
+	wantStderr := false
+	for _, a := range args {
+		if m, ok := a.(map[string]any); ok {
+			if v, ok := m["stdin"].(int64); ok && v == -1 {
+				wantStdin = true
+			}
+			if v, ok := m["stdout"].(int64); ok && v == -1 {
+				wantStdout = true
+			}
+			if v, ok := m["stderr"].(int64); ok && v == -1 {
+				wantStderr = true
+			}
+			if v, ok := m["cwd"].(string); ok && v != "" {
+				cmd.Dir = v
+			}
+		}
+	}
+	p := &__Popen{cmd: cmd}
+	if wantStdin {
+		w, err := cmd.StdinPipe()
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		p.stdinW = w
+	}
+	if wantStdout {
+		r, err := cmd.StdoutPipe()
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		p.stdoutR = r
+	}
+	if wantStderr {
+		r, err := cmd.StderrPipe()
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		p.stderrR = r
+	}
+	if err := cmd.Start(); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	if cmd.Process != nil {
+		p.Pid = int64(cmd.Process.Pid)
+	}
+	return p
 }`
 
 // helperSubprocessCheckOutput runs argv and returns stdout as a string.

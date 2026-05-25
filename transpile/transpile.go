@@ -6865,6 +6865,30 @@ var taggedMethodRename = map[string]map[string]string{
 		"release": "Release",
 		"locked":  "Locked",
 	},
+	"__Event": {
+		"set":     "Set",
+		"clear":   "Clear",
+		"is_set":  "Is_set",
+		"wait":    "Wait",
+	},
+	"__Condition": {
+		"acquire":    "Acquire",
+		"release":    "Release",
+		"wait":       "Wait",
+		"notify":     "Notify",
+		"notify_all": "Notify_all",
+	},
+	"__Semaphore": {
+		"acquire": "Acquire",
+		"release": "Release",
+	},
+	"__Popen": {
+		"wait":        "Wait",
+		"communicate": "Communicate",
+		"terminate":   "Terminate",
+		"kill":        "Kill",
+		"poll":        "Poll",
+	},
 	"__Deque": {
 		"append":     "Append",
 		"appendleft": "Appendleft",
@@ -7092,6 +7116,10 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 		"returncode": {GoName: "Returncode", Ty: &ir.Type{Kind: ir.TyInt}},
 		"stdout":     {GoName: "Stdout", Ty: &ir.Type{Kind: ir.TyStr}},
 		"stderr":     {GoName: "Stderr", Ty: &ir.Type{Kind: ir.TyStr}},
+	},
+	"__Popen": {
+		"returncode": {GoName: "Returncode", Ty: &ir.Type{Kind: ir.TyInt}},
+		"pid":        {GoName: "Pid", Ty: &ir.Type{Kind: ir.TyInt}},
 	},
 	"__URLParseResult": {
 		"scheme":   {GoName: "Scheme", Ty: &ir.Type{Kind: ir.TyStr}},
@@ -7436,6 +7464,8 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinAccumulate(synth)
 		case "subprocess.run":
 			return g.builtinSubprocessRun(synth)
+		case "subprocess.Popen":
+			return g.builtinSubprocessPopen(synth)
 		case "glob.glob", "glob.iglob":
 			return g.builtinGlob(synth)
 		case "json.dumps":
@@ -12687,6 +12717,39 @@ func (g *gen) builtinURLRequest(c *ir.Call) error {
 			g.writef(", ")
 		}
 		g.writef("map[string]any{")
+		for i, kw := range c.Keywords {
+			if i > 0 {
+				g.writef(", ")
+			}
+			g.writef("%q: ", kw.Name)
+			if err := g.boxedExpr(kw.Value); err != nil {
+				return err
+			}
+		}
+		g.writef("}")
+	}
+	g.writef(")")
+	return nil
+}
+
+// builtinSubprocessPopen emits subprocess.Popen(argv, stdin=, stdout=,
+// stderr=, cwd=) as __gopy_subprocess_popen(argv, opts) where opts is
+// the kwargs map the helper recognizes.
+func (g *gen) builtinSubprocessPopen(c *ir.Call) error {
+	if len(c.Args) < 1 {
+		return fmt.Errorf("subprocess.Popen() needs argv as the first positional argument")
+	}
+	g.addImport("os/exec")
+	g.addImport("io")
+	g.addImport("syscall")
+	g.helpers["__gopy_subprocess_popen"] = helperSubprocessPopen
+	g.helpers["__Popen"] = helperPopenType
+	g.writef("__gopy_subprocess_popen(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	if len(c.Keywords) > 0 {
+		g.writef(", map[string]any{")
 		for i, kw := range c.Keywords {
 			if i > 0 {
 				g.writef(", ")

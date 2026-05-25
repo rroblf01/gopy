@@ -382,9 +382,9 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 
 - **`datetime.timezone.utc`** as a real tz-aware object — exposed as the literal `"UTC"` string (no `astimezone` / offset arithmetic)
 - **`asyncio.Lock` / `Queue` / `Semaphore`** with real blocking semantics
-- **`threading.Lock` / `Condition` / `Event`** beyond the stub registration
+- **`threading.Lock` / `RLock`** now wrap `sync.Mutex` and lock/unlock for real. `with lock:` and `lock.acquire()` / `release()` work concurrently. `threading.Event` is backed by a close-on-set channel (`set`/`clear`/`wait(timeout)`/`is_set`). `threading.Condition` wraps `sync.Cond` (`wait`/`notify`/`notify_all`). `threading.Semaphore` / `BoundedSemaphore` use a buffered channel for slot counting. `threading.Thread` / `Timer` / `Barrier` / `local` still stubs
 - **`multiprocessing` real fork / IPC**
-- **`subprocess.Popen` streaming stdin/stdout** — `run(..., input=, cwd=)` and `check_output` are synchronous-only; persistent `Popen` objects with `.communicate(...)` / `.stdin.write(...)` aren't wired
+- **`subprocess.Popen(argv, stdin=, stdout=, stderr=, cwd=)`** now wraps `exec.Cmd` with optional `Stdin/Stdout/Stderr` pipes. `.communicate(input=)` writes the input then reads both pipes; `.wait()`, `.poll()`, `.terminate()`, `.kill()`, `.pid`, `.returncode` work. Streaming direct `.stdin.write(...)` between communicate calls still unwired
 - **`gzip.open(path, mode)` as context manager** — `with gzip.open(path, "wt") as f: f.write(...)` and `with gzip.open(path, "rt") as f: f.read() / f.readline() / f.readlines()` route through a `__GzipFile` shim that wraps `compress/gzip`. Read mode decompresses the whole file eagerly (no streaming) and write mode flushes on context exit
 - **`urllib.request.Request(url, data=, headers=, method=)`** — kwargs ride through a special-case builder so the resulting `*__URLRequest` carries the method override, headers map, and POST body when supplied; `urlopen(req)` now respects both the `Method` and any `Headers` on the request
 - **`bytes.fromhex(s)` / `bytearray.fromhex(s)`** — strips spaces, decodes via `encoding/hex`, returns the result as a gopy-string. Bad hex raises `ValueError` through the standard `NewException` channel
