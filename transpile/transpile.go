@@ -6160,10 +6160,12 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 			if _, dup := kwIdx[p.Name]; dup {
 				return fmt.Errorf("%s: keyword %q clashes with positional", fn.Name, p.Name)
 			}
+			specializeLambdaArg(c.Args[i], p.Ty)
 			if err := emit(c.Args[i]); err != nil {
 				return err
 			}
 		case kwIdx[p.Name] != nil:
+			specializeLambdaArg(kwIdx[p.Name], p.Ty)
 			if err := emit(kwIdx[p.Name]); err != nil {
 				return err
 			}
@@ -14629,6 +14631,36 @@ func (g *gen) stdlibCallRetTag(e ir.Expr) string {
 		return fn.RetTag
 	}
 	return ""
+}
+
+// specializeLambdaArg retypes a lambda passed as an argument when the
+// target parameter is annotated `Callable[[A, B], R]`. The lambda was
+// lowered with TyAny-typed params at definition time; re-lowering the
+// body against the concrete signature lets `x * 2` etc. compile under
+// int64 / float64 / user-class element types instead of erroring at
+// emission. Silently no-ops for non-lambda args or non-Callable params.
+func specializeLambdaArg(arg ir.Expr, paramTy *ir.Type) {
+	if paramTy == nil || paramTy.Kind != ir.TyFunc {
+		return
+	}
+	lam, ok := arg.(*ir.Lambda)
+	if !ok {
+		return
+	}
+	if lam.Ty != nil && lam.Ty.Kind == ir.TyFunc {
+		return
+	}
+	body, err := ir.LowerLambdaBody(lam, paramTy.FuncParams)
+	if err != nil {
+		return
+	}
+	lam.Body = body
+	lam.Ty = paramTy
+	if len(lam.Params) == len(paramTy.FuncParams) {
+		for i, p := range paramTy.FuncParams {
+			lam.Params[i].Ty = p
+		}
+	}
 }
 
 // isSuperCall returns true when expr is a call to bare `super()`.

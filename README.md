@@ -172,7 +172,7 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] Decorators on class methods (any name) — same passthrough treatment as free-function decorators
 - [x] Inner / nested function definitions with closure capture
 - [x] Lambda expressions (specialized inside `map` / `filter` / `sorted(key=...)`)
-- [ ] Lambdas as first-class values (closures with full type inference)
+- [x] Lambdas as first-class values: lambdas passed to user functions with a `Callable[[T], U]` typed parameter re-lower their body against the declared param types at the call site, so `apply(lambda x: x * 2, 7)` compiles even when `apply` is user-defined. The standalone-lambda fallback (`f = lambda x: ...` without annotation) still emits `func(p any) any` and only works for `any`-friendly bodies
 - [x] Module-level `name = expr` / `name: T = expr` declarations (emit as Go package-scope vars)
 - [x] `global` declaration inside functions (writes route to the package var, no shadow); `nonlocal` accepted (best-effort scope binding)
 - [x] Class methods that return new instances of the class — both the forward-reference form (`-> "Box"`) and the bare-name form under `from __future__ import annotations` (`-> Box`) resolve to the enclosing class so `b.doubled().n` typechecks downstream
@@ -308,7 +308,7 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [ ] LSP / editor diagnostics: report unsupported features at edit time
 - [x] Transpile errors prefix the offending module / filename in front of the existing `line N: ...` context, so multi-file builds point at the source instead of just a line number. Full caret-with-source-excerpt rendering is still a future improvement
 - [x] CI workflow in this repo (GitHub Actions) running the fixture suite on `ubuntu-latest` + `macos-latest`
-- [ ] Continuous benchmarks dashboard so regressions surface in PRs
+- [x] Continuous benchmarks dashboard so regressions surface in PRs — `.github/workflows/bench.yml` re-runs every `bench_*.py` fixture on every push / PR / `workflow_dispatch` against both `ubuntu-latest` and `macos-latest`. The summary table (CPython ms / gopy ms / speedup / RSS) lands in the job summary page (`$GITHUB_STEP_SUMMARY`) and as a downloadable per-OS artifact (`bench-report-<os>.md`)
 
 ### Codegen quality
 

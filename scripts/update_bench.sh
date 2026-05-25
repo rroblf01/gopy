@@ -18,15 +18,18 @@ trap 'rm -f "$tmp"' EXIT
   echo "| Benchmark | CPython (ms) | gopy Go (ms) | Speedup | Python RSS (MB) | gopy RSS (MB) | RSS save |"
   echo "|-----------|-------------:|-------------:|--------:|----------------:|--------------:|---------:|"
 
+  # Field-walk approach (instead of `match($0, re, arr)`) keeps the awk
+  # script portable to BSD awk on macOS — the array-capture form is
+  # gawk-only and silently breaks on the default awk shipped with macOS.
   for fixture in tests/fixtures/bench_*.py; do
     name="$(basename "$fixture" .py)"
     out="$(go run ./cmd/gopy-bench -n 5 -warmup 1 "$fixture" 2>&1)"
-    py_ms=$(awk '/=== CPython ===/{f=1; next} f && /wall ms/ {match($0, /mean=([0-9.]+)/, a); print a[1]; exit}' <<<"$out")
-    go_ms=$(awk '/=== gopy Go ===/{f=1; next} f && /wall ms/ {match($0, /mean=([0-9.]+)/, a); print a[1]; exit}' <<<"$out")
-    py_mb=$(awk '/=== CPython ===/{f=1; next} f && /RSS  MB/ {match($0, /mean=([0-9.]+)/, a); print a[1]; exit}' <<<"$out")
-    go_mb=$(awk '/=== gopy Go ===/{f=1; next} f && /RSS  MB/ {match($0, /mean=([0-9.]+)/, a); print a[1]; exit}' <<<"$out")
-    speedup=$(awk -v p="$py_ms" -v g="$go_ms" 'BEGIN{ if (g>0) printf "%.1fx", p/g; else print "n/a" }')
-    rss_save=$(awk -v p="$py_mb" -v g="$go_mb" 'BEGIN{ if (g>0) printf "%.2fx", p/g; else print "n/a" }')
+    py_ms=$(awk '/=== CPython ===/{f=1; next} f && /wall ms/ { for (i=1;i<=NF;i++) if ($i ~ /^mean=/) { sub("mean=","",$i); print $i; exit } }' <<<"$out")
+    go_ms=$(awk '/=== gopy Go ===/{f=1; next} f && /wall ms/ { for (i=1;i<=NF;i++) if ($i ~ /^mean=/) { sub("mean=","",$i); print $i; exit } }' <<<"$out")
+    py_mb=$(awk '/=== CPython ===/{f=1; next} f && /RSS  MB/ { for (i=1;i<=NF;i++) if ($i ~ /^mean=/) { sub("mean=","",$i); print $i; exit } }' <<<"$out")
+    go_mb=$(awk '/=== gopy Go ===/{f=1; next} f && /RSS  MB/ { for (i=1;i<=NF;i++) if ($i ~ /^mean=/) { sub("mean=","",$i); print $i; exit } }' <<<"$out")
+    speedup=$(awk -v p="$py_ms" -v g="$go_ms" 'BEGIN{ if (g+0>0) printf "%.1fx", p/g; else print "n/a" }')
+    rss_save=$(awk -v p="$py_mb" -v g="$go_mb" 'BEGIN{ if (g+0>0) printf "%.2fx", p/g; else print "n/a" }')
     printf "| %s | %s | %s | %s | %s | %s | %s |\n" "$name" "$py_ms" "$go_ms" "$speedup" "$py_mb" "$go_mb" "$rss_save"
   done
   echo

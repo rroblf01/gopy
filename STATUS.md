@@ -380,17 +380,13 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 
 ### Stdlib gaps
 
-- **`csv.writer`** as a stateful file-bound writer (only `csv.reader(lines)` round-trips)
-- **`csv.DictReader` / `DictWriter`**
-- **`timedelta(seconds=..., minutes=...)`** keyword constructors (only positional days)
-- **`datetime.timezone.utc`** as a real tz-aware object — exposed as the literal `"UTC"` string
-- **`datetime` parsing** (`strptime`, `fromisoformat` with offsets)
+- **`datetime.timezone.utc`** as a real tz-aware object — exposed as the literal `"UTC"` string (no `astimezone` / offset arithmetic)
+- **`datetime.fromisoformat` with offsets** — naive `YYYY-MM-DDTHH:MM:SS` parses, suffixed offsets (`+0500`, `Z`) drop to UTC
 - **`asyncio.Lock` / `Queue` / `Semaphore`** with real blocking semantics
 - **`threading.Lock` / `Condition` / `Event`** beyond the stub registration
 - **`multiprocessing` real fork / IPC**
 - **`subprocess.Popen` streaming stdin/stdout** — `run` / `check_output` are synchronous-only
 - ~~**`re` flags** (`re.IGNORECASE`, `re.MULTILINE`, etc.) — flag args parse but compiled patterns ignore them~~ now applied: each Go regexp helper accepts trailing flag args and prefixes the pattern with `(?ims)` as appropriate. `IGNORECASE` / `MULTILINE` / `DOTALL` work; `VERBOSE` / `ASCII` / `UNICODE` accept-but-no-op (Go regexp syntax differs)
-- **`re.compile` returning a reusable pattern with `.match` / `.search` / `.sub` methods** — top-level helpers work, `Pattern` objects don't
 - **`json.JSONEncoder` / `JSONDecoder` subclassing** — registered as stub
 - **`pickle` binary protocol** — JSON-backed; not wire-compatible with CPython
 - **`socket` UDP / Unix-domain / raw sockets** — only TCP TCP-stream forms wired
