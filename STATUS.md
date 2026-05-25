@@ -407,7 +407,10 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`sqlite3`** real driver — registered as stub
 - **`xml.etree.ElementTree`** — `ElementTree.parse(path)` / `tree.getroot()` / `tree.write(path)` work (UTF-8 prolog included), plus `Element.set` / `.append` / `.remove` / `.insert` / `.keys` / `.items` and module-level `Element` / `SubElement` / `tostring` / `fromstring`. `ET.indent(tree, space="  ", level=0)` walks the tree in place and fills in Text/Tail strings so the serializer emits a pretty-printed shape; namespace-aware (Clark notation) tags aren't wired
 - **`xml.dom.minidom.parseString(s)` / `parse(path)`** now return a `__DomDocument` wrapping the existing `__XMLElement` tree (so `.documentElement` / `.getElementsByTagName(tag)` / `.toxml()` work). Note: gopy element nodes use `.tag` rather than CPython's `.tagName`. `xml.sax` still stub
-- **`os.fspath(p)`** now accepts both `string` and `*__Path` (CPython's PathLike protocol approximation)
+- **`Element.itertext()`** added: depth-first walk that yields each node's `Text` and trailing `Tail` (matches CPython for the trees gopy produces)
+- **`os.fspath(p)`** accepts both `string` and `*__Path` (CPython's PathLike protocol approximation)
+- **`os.uname()`** returns `[sysname, nodename, release, version, machine]` driven by `runtime.GOOS` / `os.Hostname()` / `runtime.GOARCH`; release/version come back empty since Go doesn't expose kernel-release strings
+- **`pwd.getpwuid` / `pwd.getpwnam` / `grp.getgrgid` / `grp.getgrnam`** now scan `/etc/passwd` / `/etc/group` line-by-line and return the same tuple shape CPython surfaces (`(name, passwd, uid, gid, gecos, dir, shell)` and `(name, passwd, gid, members)`). Lookup miss raises `KeyError` via the prefix channel
 - **`html.parser.HTMLParser`** — stub
 - **`email.message.EmailMessage` / `email.message.Message`** — `__EmailMessage` shim with `add_header` / `replace_header` / `del_item` / `get(name[, default])` / `get_all` / `set_payload` / `get_payload` / `keys` / `items` / `as_string`. Header lookup is case-insensitive; insertion order is preserved. `email.parser` still stubs (no source-side parsing yet)
 - **`turtle`, `tkinter`, `curses`, `readline`** — UI / terminal modules not wired

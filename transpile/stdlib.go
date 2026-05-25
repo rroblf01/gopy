@@ -108,6 +108,7 @@ var stdlibModules = map[string]stdlibModule{
 			"getlogin":  {GoFunc: "__gopy_os_getlogin", GoImport: "os", Helper: helperOsGetlogin, HelperImports: []string{"os/user"}, RetKind: "str"},
 			"system":    {GoFunc: "__gopy_os_system", Helper: helperOsSystem, HelperImports: []string{"os/exec", "os"}, RetKind: "int"},
 			"fspath":    {GoFunc: "__gopy_os_fspath", Helper: helperOsFspath, ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "fmt"}, RetKind: "str"},
+			"uname":     {GoFunc: "__gopy_os_uname", Helper: helperOsUname, HelperImports: []string{"os", "runtime"}},
 		},
 		Subs: map[string]stdlibModule{
 			"path": {
@@ -822,14 +823,14 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"pwd": {
 		Funcs: map[string]stdlibFunc{
-			"getpwuid": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub},
-			"getpwnam": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub},
+			"getpwuid": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub, HelperImports: []string{"os", "strings", "strconv"}},
+			"getpwnam": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub, HelperImports: []string{"os", "strings", "strconv"}},
 		},
 	},
 	"grp": {
 		Funcs: map[string]stdlibFunc{
-			"getgrgid": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub},
-			"getgrnam": {GoFunc: "__gopy_pwd_stub", Helper: helperPwdStub},
+			"getgrgid": {GoFunc: "__gopy_grp_stub", Helper: helperPwdStub, HelperImports: []string{"os", "strings", "strconv"}},
+			"getgrnam": {GoFunc: "__gopy_grp_stub", Helper: helperPwdStub, HelperImports: []string{"os", "strings", "strconv"}},
 		},
 	},
 	"selectors": {
@@ -5923,6 +5924,24 @@ func (e *__XMLElement) Get(key string, args ...string) string {
 	return ""
 }
 
+func (e *__XMLElement) Itertext() []string {
+	var out []string
+	var walk func(n *__XMLElement)
+	walk = func(n *__XMLElement) {
+		if n.Text != "" {
+			out = append(out, n.Text)
+		}
+		for _, c := range n.Children {
+			walk(c)
+			if c.Tail != "" {
+				out = append(out, c.Tail)
+			}
+		}
+	}
+	walk(e)
+	return out
+}
+
 func (e *__XMLElement) Set(key, value string) { e.attribSet(key, value) }
 
 func (e *__XMLElement) Append(child *__XMLElement) {
@@ -7077,8 +7096,85 @@ const helperArrayNew = `func __gopy_array_new(args ...any) []any {
 
 // helperPwdStub — gopy doesn't expose Unix passwd/group via stdlib.
 // Returns a 7-tuple analog with empty fields.
+// helperPwdLookup approximates pwd.getpwuid / pwd.getpwnam by walking
+// /etc/passwd line-by-line. CPython surfaces a struct_passwd; gopy
+// returns the same fields as a []any tuple: (pw_name, pw_passwd, pw_uid,
+// pw_gid, pw_gecos, pw_dir, pw_shell). On lookup failure raises KeyError.
 const helperPwdStub = `func __gopy_pwd_stub(args ...any) []any {
-	return []any{"", "", int64(0), int64(0), "", "", ""}
+	if len(args) == 0 {
+		panic(NewException("TypeError: pwd lookup needs an argument"))
+	}
+	data, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		panic(NewException("KeyError: pwd lookup failed: " + err.Error()))
+	}
+	wantName := ""
+	wantUID := int64(-1)
+	switch v := args[0].(type) {
+	case string:
+		wantName = v
+	case int64:
+		wantUID = v
+	case int:
+		wantUID = int64(v)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, ":")
+		if len(parts) < 7 {
+			continue
+		}
+		uid, _ := strconv.ParseInt(parts[2], 10, 64)
+		gid, _ := strconv.ParseInt(parts[3], 10, 64)
+		if (wantName != "" && parts[0] == wantName) || (wantUID >= 0 && uid == wantUID) {
+			return []any{parts[0], parts[1], uid, gid, parts[4], parts[5], parts[6]}
+		}
+	}
+	panic(NewException("KeyError: not found"))
+}
+
+// helperGrpLookup mirrors helperPwdStub for /etc/group entries.
+// Returns (gr_name, gr_passwd, gr_gid, gr_mem[]).
+func __gopy_grp_stub(args ...any) []any {
+	if len(args) == 0 {
+		panic(NewException("TypeError: grp lookup needs an argument"))
+	}
+	data, err := os.ReadFile("/etc/group")
+	if err != nil {
+		panic(NewException("KeyError: grp lookup failed: " + err.Error()))
+	}
+	wantName := ""
+	wantGID := int64(-1)
+	switch v := args[0].(type) {
+	case string:
+		wantName = v
+	case int64:
+		wantGID = v
+	case int:
+		wantGID = int64(v)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, ":")
+		if len(parts) < 4 {
+			continue
+		}
+		gid, _ := strconv.ParseInt(parts[2], 10, 64)
+		if (wantName != "" && parts[0] == wantName) || (wantGID >= 0 && gid == wantGID) {
+			members := []any{}
+			for _, m := range strings.Split(parts[3], ",") {
+				if m != "" {
+					members = append(members, m)
+				}
+			}
+			return []any{parts[0], parts[1], gid, members}
+		}
+	}
+	panic(NewException("KeyError: not found"))
 }`
 
 // helperOp* — operator module wrappers. Add/Sub/Mul work on int64;
@@ -8921,6 +9017,16 @@ const helperOsGetcwd = `func __gopy_os_getcwd() string {
 		return ""
 	}
 	return d
+}`
+
+// helperOsUname approximates os.uname() on Linux/macOS. CPython returns
+// a posix.uname_result with 5 fields (sysname, nodename, release,
+// version, machine). gopy returns a []any tuple in the same order;
+// release / version surface as empty strings since Go's runtime doesn't
+// expose kernel release.
+const helperOsUname = `func __gopy_os_uname() []any {
+	host, _ := os.Hostname()
+	return []any{runtime.GOOS, host, "", "", runtime.GOARCH}
 }`
 
 const helperOsEnviron = `func __gopy_os_environ() map[string]string {
