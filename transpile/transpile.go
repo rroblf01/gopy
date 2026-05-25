@@ -6889,6 +6889,20 @@ var taggedMethodRename = map[string]map[string]string{
 		"kill":        "Kill",
 		"poll":        "Poll",
 	},
+	"__Thread": {
+		"start":    "Start",
+		"join":     "Join",
+		"is_alive": "Is_alive",
+		"getName":  "GetName",
+	},
+	"__Timer": {
+		"start":  "Start",
+		"cancel": "Cancel",
+	},
+	"__Local": {
+		"get": "Get",
+		"set": "Set",
+	},
 	"__Deque": {
 		"append":     "Append",
 		"appendleft": "Appendleft",
@@ -7080,12 +7094,13 @@ var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 		"path": {GoName: "Path", Ty: &ir.Type{Kind: ir.TyStr}},
 	},
 	"__Path": {
-		"name":    {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
-		"parent":  {GoName: "Parent", Ty: nil},
-		"suffix":  {GoName: "Suffix", Ty: &ir.Type{Kind: ir.TyStr}},
-		"stem":    {GoName: "Stem", Ty: &ir.Type{Kind: ir.TyStr}},
-		"parts":   {GoName: "Parts", Ty: &ir.Type{Kind: ir.TyList, Elem: &ir.Type{Kind: ir.TyStr}}},
-		"parents": {GoName: "Parents", Ty: &ir.Type{Kind: ir.TyList}},
+		"name":     {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
+		"parent":   {GoName: "Parent", Ty: nil},
+		"suffix":   {GoName: "Suffix", Ty: &ir.Type{Kind: ir.TyStr}},
+		"suffixes": {GoName: "Suffixes", Ty: &ir.Type{Kind: ir.TyList, Elem: &ir.Type{Kind: ir.TyStr}}},
+		"stem":     {GoName: "Stem", Ty: &ir.Type{Kind: ir.TyStr}},
+		"parts":    {GoName: "Parts", Ty: &ir.Type{Kind: ir.TyList, Elem: &ir.Type{Kind: ir.TyStr}}},
+		"parents":  {GoName: "Parents", Ty: &ir.Type{Kind: ir.TyList}},
 	},
 	"__Date": {
 		"year":  {GoName: "Year", Ty: &ir.Type{Kind: ir.TyInt}},
@@ -7466,6 +7481,10 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinSubprocessRun(synth)
 		case "subprocess.Popen":
 			return g.builtinSubprocessPopen(synth)
+		case "threading.Thread":
+			return g.builtinThreadingThread(synth)
+		case "threading.Timer":
+			return g.builtinThreadingTimer(synth)
 		case "glob.glob", "glob.iglob":
 			return g.builtinGlob(synth)
 		case "json.dumps":
@@ -12727,6 +12746,67 @@ func (g *gen) builtinURLRequest(c *ir.Call) error {
 			}
 		}
 		g.writef("}")
+	}
+	g.writef(")")
+	return nil
+}
+
+// builtinThreadingThread emits threading.Thread(target=, args=, kwargs=,
+// name=, daemon=) as __gopy_threading_thread_new with the kwargs packed
+// into a map[string]any. target is wrapped in a func(...any) any shim so
+// the helper can invoke it without knowing the original signature.
+func (g *gen) builtinThreadingThread(c *ir.Call) error {
+	g.addImport("sync")
+	g.addImport("time")
+	g.helpers["__gopy_threading_thread_new"] = helperThreadingThread
+	g.helpers["__Thread"] = helperThreadType
+	g.writef("__gopy_threading_thread_new(map[string]any{")
+	first := true
+	for _, kw := range c.Keywords {
+		if !first {
+			g.writef(", ")
+		}
+		first = false
+		g.writef("%q: ", kw.Name)
+		if kw.Name == "target" {
+			g.writef("func(__a ...any) any { ")
+			if err := g.expr(kw.Value); err != nil {
+				return err
+			}
+			g.writef("(); return nil }")
+			continue
+		}
+		if err := g.boxedExpr(kw.Value); err != nil {
+			return err
+		}
+	}
+	g.writef("})")
+	return nil
+}
+
+// builtinThreadingTimer wraps threading.Timer(interval, function, args=).
+// First two positionals are interval and target; target wraps in the
+// uniform `func(...any) any` shim.
+func (g *gen) builtinThreadingTimer(c *ir.Call) error {
+	g.addImport("time")
+	g.helpers["__gopy_threading_timer_new"] = helperThreadingTimer
+	g.helpers["__Timer"] = helperTimerType
+	g.writef("__gopy_threading_timer_new(")
+	for i, a := range c.Args {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if i == 1 {
+			g.writef("func(__a ...any) any { ")
+			if err := g.expr(a); err != nil {
+				return err
+			}
+			g.writef("(); return nil }")
+			continue
+		}
+		if err := g.boxedExpr(a); err != nil {
+			return err
+		}
 	}
 	g.writef(")")
 	return nil

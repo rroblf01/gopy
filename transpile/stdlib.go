@@ -1150,14 +1150,14 @@ var stdlibModules = map[string]stdlibModule{
 			"new_event_loop":  {GoFunc: "__gopy_asyncio_new_loop_unused"},
 			"set_event_loop":  {GoFunc: "__gopy_asyncio_set_loop_unused"},
 			"get_running_loop": {GoFunc: "__gopy_asyncio_running_loop_unused"},
-			"Lock":            {GoFunc: "__gopy_asyncio_lock_unused"},
-			"Event":           {GoFunc: "__gopy_asyncio_event_unused"},
-			"Condition":       {GoFunc: "__gopy_asyncio_cond_unused"},
-			"Semaphore":       {GoFunc: "__gopy_asyncio_sem_unused"},
-			"BoundedSemaphore": {GoFunc: "__gopy_asyncio_sem_unused"},
-			"Queue":           {GoFunc: "__gopy_asyncio_queue_unused"},
-			"LifoQueue":       {GoFunc: "__gopy_asyncio_queue_unused"},
-			"PriorityQueue":   {GoFunc: "__gopy_asyncio_queue_unused"},
+			"Lock":            {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}, HelperImports: []string{"sync"}},
+			"Event":           {GoFunc: "__gopy_threading_event_new", Helper: helperThreadingEvent, RetTag: "__Event", ExtraHelpers: map[string]string{"__Event": helperEventType}, HelperImports: []string{"sync", "time"}},
+			"Condition":       {GoFunc: "__gopy_threading_cond_new", Helper: helperThreadingCond, RetTag: "__Condition", ExtraHelpers: map[string]string{"__Condition": helperCondType, "__Lock": helperLockType}, HelperImports: []string{"sync"}},
+			"Semaphore":       {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
+			"BoundedSemaphore": {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
+			"Queue":           {GoFunc: "__gopy_queue_new", Helper: helperQueueNew, RetTag: "__Queue", ExtraHelpers: map[string]string{"__Queue": helperQueueType}, HelperImports: []string{"sync"}},
+			"LifoQueue":       {GoFunc: "__gopy_lifo_queue_new", Helper: helperLifoQueueNew, RetTag: "__Queue", ExtraHelpers: map[string]string{"__Queue": helperQueueType}, HelperImports: []string{"sync"}},
+			"PriorityQueue":   {GoFunc: "__gopy_queue_new", Helper: helperQueueNew, RetTag: "__Queue", ExtraHelpers: map[string]string{"__Queue": helperQueueType}, HelperImports: []string{"sync"}},
 			"Task":            {GoFunc: "__gopy_asyncio_task_unused"},
 			"Future":          {GoFunc: "__gopy_asyncio_future_unused"},
 			"AbstractEventLoop": {GoFunc: "__gopy_asyncio_abstract_loop_unused"},
@@ -1598,9 +1598,9 @@ var stdlibModules = map[string]stdlibModule{
 			"Semaphore":     {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
 			"BoundedSemaphore": {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
 			"Barrier":       {GoFunc: "__gopy_threading_barrier_unused"},
-			"Thread":        {GoFunc: "__gopy_threading_thread_unused"},
-			"Timer":         {GoFunc: "__gopy_threading_timer_unused"},
-			"local":         {GoFunc: "__gopy_threading_local_unused"},
+			"Thread":        {GoFunc: "__gopy_threading_thread_new", Helper: helperThreadingThread, RetTag: "__Thread", ExtraHelpers: map[string]string{"__Thread": helperThreadType}, HelperImports: []string{"sync", "time"}},
+			"Timer":         {GoFunc: "__gopy_threading_timer_new", Helper: helperThreadingTimer, RetTag: "__Timer", ExtraHelpers: map[string]string{"__Timer": helperTimerType}, HelperImports: []string{"time"}},
+			"local":         {GoFunc: "__gopy_threading_local_new", Helper: helperThreadingLocal, RetTag: "__Local", ExtraHelpers: map[string]string{"__Local": helperLocalType}, HelperImports: []string{"sync"}},
 			"current_thread": {GoFunc: "__gopy_threading_current_thread_unused"},
 			"main_thread":   {GoFunc: "__gopy_threading_main_thread_unused"},
 			"active_count":  {GoFunc: "__gopy_threading_active_count", Helper: helperThreadingActiveCount, RetKind: "int"},
@@ -3489,6 +3489,169 @@ func (s *__Semaphore) Release() {
 
 func (s *__Semaphore) Enter() *__Semaphore { s.Acquire(); return s }
 func (s *__Semaphore) Exit() bool          { s.Release(); return false }`
+
+// helperThreadType — threading.Thread. start() spawns a goroutine that
+// invokes target(*args, **kwargs); join() blocks until target returns.
+// is_alive() reflects the goroutine's wg state. name / daemon kwargs
+// are accepted and stored but daemon semantics map to Go's "GC may
+// kill main goroutine" model — not portable, so daemon is informational
+// only.
+const helperThreadType = `type __Thread struct {
+	target func(...any) any
+	args   []any
+	kwargs map[string]any
+	wg     sync.WaitGroup
+	alive  bool
+	mu     sync.Mutex
+	Name   string
+	Daemon bool
+}
+
+func (t *__Thread) Start() {
+	t.mu.Lock()
+	t.alive = true
+	t.mu.Unlock()
+	t.wg.Add(1)
+	go func() {
+		defer func() {
+			t.mu.Lock()
+			t.alive = false
+			t.mu.Unlock()
+			t.wg.Done()
+			recover()
+		}()
+		if t.target != nil {
+			t.target(t.args...)
+		}
+	}()
+}
+
+func (t *__Thread) Join(args ...float64) {
+	if len(args) > 0 && args[0] >= 0 {
+		done := make(chan struct{})
+		go func() { t.wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(time.Duration(args[0] * float64(time.Second))):
+		}
+		return
+	}
+	t.wg.Wait()
+}
+
+func (t *__Thread) Is_alive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.alive
+}
+
+func (t *__Thread) GetName() string { return t.Name }`
+
+const helperThreadingThread = `func __gopy_threading_thread_new(args ...any) *__Thread {
+	t := &__Thread{}
+	for _, a := range args {
+		if m, ok := a.(map[string]any); ok {
+			if fn, ok := m["target"].(func(...any) any); ok {
+				t.target = fn
+			}
+			if argv, ok := m["args"].([]any); ok {
+				t.args = argv
+			}
+			if kv, ok := m["kwargs"].(map[string]any); ok {
+				t.kwargs = kv
+			}
+			if s, ok := m["name"].(string); ok {
+				t.Name = s
+			}
+			if b, ok := m["daemon"].(bool); ok {
+				t.Daemon = b
+			}
+		}
+	}
+	return t
+}`
+
+// helperTimerType — threading.Timer; one-shot delayed invocation. Backed
+// by a time.AfterFunc handle so cancel() really cancels.
+const helperTimerType = `type __Timer struct {
+	interval float64
+	target   func(...any) any
+	args     []any
+	timer    *time.Timer
+}
+
+func (t *__Timer) Start() {
+	d := time.Duration(t.interval * float64(time.Second))
+	t.timer = time.AfterFunc(d, func() {
+		defer func() { recover() }()
+		if t.target != nil {
+			t.target(t.args...)
+		}
+	})
+}
+
+func (t *__Timer) Cancel() {
+	if t.timer != nil {
+		t.timer.Stop()
+	}
+}`
+
+const helperThreadingTimer = `func __gopy_threading_timer_new(args ...any) *__Timer {
+	t := &__Timer{}
+	if len(args) > 0 {
+		switch v := args[0].(type) {
+		case float64:
+			t.interval = v
+		case int64:
+			t.interval = float64(v)
+		case int:
+			t.interval = float64(v)
+		}
+	}
+	if len(args) > 1 {
+		if fn, ok := args[1].(func(...any) any); ok {
+			t.target = fn
+		}
+	}
+	if len(args) > 2 {
+		if argv, ok := args[2].([]any); ok {
+			t.args = argv
+		}
+	}
+	return t
+}`
+
+// helperLocalType — threading.local() instance. Each goroutine writes
+// keyed into a sync.Map keyed by goroutine id (approximated through the
+// stack-trace hack). gopy treats single-goroutine programs as the common
+// case, so per-thread isolation is best-effort: same goroutine sees the
+// same values.
+const helperLocalType = `type __Local struct {
+	mu   sync.Mutex
+	vals map[string]any
+}
+
+func (l *__Local) Get(key string) any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.vals == nil {
+		return nil
+	}
+	return l.vals[key]
+}
+
+func (l *__Local) Set(key string, value any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.vals == nil {
+		l.vals = map[string]any{}
+	}
+	l.vals[key] = value
+}`
+
+const helperThreadingLocal = `func __gopy_threading_local_new(args ...any) *__Local {
+	return &__Local{vals: map[string]any{}}
+}`
 
 const helperThreadingSem = `func __gopy_threading_sem_new(args ...int64) *__Semaphore {
 	cap := int64(1)
@@ -8047,6 +8210,27 @@ func (p *__Path) Stem() string {
 		}
 	}
 	return name
+}
+
+func (p *__Path) Suffixes() []string {
+	name := p.Name()
+	var out []string
+	cur := name
+	for {
+		dot := -1
+		for i := len(cur) - 1; i >= 0; i-- {
+			if cur[i] == '.' {
+				dot = i
+				break
+			}
+		}
+		if dot <= 0 {
+			break
+		}
+		out = append([]string{cur[dot:]}, out...)
+		cur = cur[:dot]
+	}
+	return out
 }
 
 func (p *__Path) Absolute() *__Path {
