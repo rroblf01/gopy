@@ -374,7 +374,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`for n in <generator_expr>:`** in some shapes where the gen-expr return type can't be inferred — wrap in `list(...)` to force materialization
 - ~~**`5 in range(N)`**~~ now lowered: emits an inline bounds + modulo check (`__lo <= n < __hi && (n - __lo) % __st == 0`) without materializing the range. Works for `range(N)`, `range(start, stop)`, `range(start, stop, step)` with positive and negative steps
 - **`x is y`** identity on arbitrary objects — only `x is None` / `x is not None` is wired; `id`-comparison for other values returns wrong results
-- **Chained `cmp1 == cmp2 == cmp3` with side-effecting middle term** evaluates the middle twice (Python evaluates once)
+- ~~**Chained `cmp1 == cmp2 == cmp3` with side-effecting middle term**~~ now lowers to a new `ChainedCmp` IR node and codegen emits an IIFE that binds every interior operand to `__cmpN` temps before testing — middle expressions evaluate exactly once, matching CPython
 - ~~**Nested format specs**~~ `f"{x:>{width}}"` / `f"{x:.{prec}f}"`: the embedded `{...}` placeholders inside a format spec lower to `fmt.Sprintf`-style `%v` slots whose runtime expansion feeds `__gopy_fmt_spec`
 - **String slicing with step > 1 on extremely large strings** — works but routes through a per-rune helper, not byte-fast
 

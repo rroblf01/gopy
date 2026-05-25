@@ -509,6 +509,15 @@ type BoolOp struct {
 	L, R Expr
 	Ty   *Type
 }
+
+// ChainedCmp captures `a < b < c [< d ...]` so codegen can evaluate
+// each middle operand exactly once. Operands is length N, Ops is
+// length N-1. Codegen emits an IIFE that binds middles to temps.
+type ChainedCmp struct {
+	Ops      []string
+	Operands []Expr
+	Ty       *Type
+}
 type UnaryOp struct {
 	Op string // "-", "not"
 	X  Expr
@@ -688,6 +697,7 @@ func (*Name) exprNode()       {}
 func (*BinOp) exprNode()      {}
 func (*CmpOp) exprNode()      {}
 func (*BoolOp) exprNode()     {}
+func (*ChainedCmp) exprNode() {}
 func (*UnaryOp) exprNode()    {}
 func (*Call) exprNode()       {}
 func (*MethodCall) exprNode() {}
@@ -714,6 +724,7 @@ func (e *Name) TypeOf() *Type       { return e.Ty }
 func (e *BinOp) TypeOf() *Type      { return e.Ty }
 func (e *CmpOp) TypeOf() *Type      { return e.Ty }
 func (e *BoolOp) TypeOf() *Type     { return e.Ty }
+func (e *ChainedCmp) TypeOf() *Type { return e.Ty }
 func (e *UnaryOp) TypeOf() *Type    { return e.Ty }
 func (e *Call) TypeOf() *Type       { return e.Ty }
 func (e *MethodCall) TypeOf() *Type { return e.Ty }

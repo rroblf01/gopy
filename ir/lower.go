@@ -2580,12 +2580,12 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			}
 			return &CmpOp{Op: op, L: left, R: r, Ty: &Type{Kind: TyBool}}, nil
 		}
-		// Chained comparison `a < b < c` → `(a < b) and (b < c)`, with the
-		// middle operand evaluated once. We approximate "once" by binding
-		// the rendered expression to a local in codegen; at the IR level
-		// we just fold to nested BoolOp(And).
-		var chain Expr
-		prev := left
+		// Chained comparison `a < b < c [< d ...]` — codegen emits an
+		// IIFE that binds each middle operand to a temp and short-circuits
+		// like Python's `(a < b) and (b < c)` semantics but with single
+		// evaluation of the shared operands.
+		operands := []Expr{left}
+		opNames := make([]string, 0, len(ops))
 		for i, opNode := range ops {
 			r, err := lowerExpr(comps[i], sc)
 			if err != nil {
@@ -2595,15 +2595,10 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", n.Lineno(), err)
 			}
-			step := &CmpOp{Op: op, L: prev, R: r, Ty: &Type{Kind: TyBool}}
-			if chain == nil {
-				chain = step
-			} else {
-				chain = &BoolOp{Op: "and", L: chain, R: step, Ty: &Type{Kind: TyBool}}
-			}
-			prev = r
+			operands = append(operands, r)
+			opNames = append(opNames, op)
 		}
-		return chain, nil
+		return &ChainedCmp{Ops: opNames, Operands: operands, Ty: &Type{Kind: TyBool}}, nil
 	case "BoolOp":
 		vals := n.Children("values")
 		if len(vals) < 2 {

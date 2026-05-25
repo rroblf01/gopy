@@ -4532,6 +4532,13 @@ func (g *gen) expr(e ir.Expr) error {
 			return err
 		}
 		g.writef(")")
+	case *ir.ChainedCmp:
+		// Single-eval chained comparison: bind each interior operand to
+		// a temp so it evaluates exactly once. Endpoints can stay inline
+		// since they appear in at most one comparison.
+		if err := g.emitChainedCmp(x); err != nil {
+			return err
+		}
 	case *ir.BoolOp:
 		// Non-bool operand types: Python returns the value (not bool), so
 		// emit IIFE that picks first truthy (`or`) / first falsy (`and`).
@@ -15160,6 +15167,63 @@ func __gopy_fmt_group(s string, sep byte) string {
 }`
 
 // emitInOp emits Python's `in` / `not in` operators. The right operand's
+// emitChainedCmp lowers ChainedCmp{Ops, Operands} to an IIFE that binds
+// each interior operand (indexes 1..N-2) to a synthetic temp so they
+// only evaluate once. Endpoints stay inline because they appear in
+// exactly one comparison. Short-circuits like Python's
+// `(a < b) and (b < c)`.
+func (g *gen) emitChainedCmp(x *ir.ChainedCmp) error {
+	if len(x.Operands) < 3 {
+		return fmt.Errorf("ChainedCmp requires at least 3 operands")
+	}
+	n := len(x.Operands)
+	g.writef("func() bool {\n")
+	g.indent++
+	tempNames := make([]string, n)
+	for i := 0; i < n; i++ {
+		if i == 0 || i == n-1 {
+			tempNames[i] = ""
+			continue
+		}
+		nm := fmt.Sprintf("__cmp%d", i)
+		g.writeIndent()
+		g.writef("%s := ", nm)
+		if err := g.expr(x.Operands[i]); err != nil {
+			return err
+		}
+		g.writef("\n")
+		tempNames[i] = nm
+	}
+	emitOperand := func(i int) error {
+		if tempNames[i] != "" {
+			g.writef("%s", tempNames[i])
+			return nil
+		}
+		return g.expr(x.Operands[i])
+	}
+	g.writeIndent()
+	g.writef("return ")
+	for i, op := range x.Ops {
+		if i > 0 {
+			g.writef(" && ")
+		}
+		g.writef("(")
+		if err := emitOperand(i); err != nil {
+			return err
+		}
+		g.writef(" %s ", op)
+		if err := emitOperand(i + 1); err != nil {
+			return err
+		}
+		g.writef(")")
+	}
+	g.writef("\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
 // IR type drives the shape: strings → strings.Contains, dicts → map
 // lookup with comma-ok, lists/sets → slice / map presence helper.
 func (g *gen) emitInOp(x *ir.CmpOp) error {
