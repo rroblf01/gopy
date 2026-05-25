@@ -6927,6 +6927,12 @@ var taggedMethodRename = map[string]map[string]string{
 		"running":           "Running",
 		"add_done_callback": "Add_done_callback",
 	},
+	"__Shelf": {
+		"get":    "Get",
+		"sync":   "Sync",
+		"close":  "Close",
+		"keys":   "Keys",
+	},
 	"__Timer": {
 		"start":  "Start",
 		"cancel": "Cancel",

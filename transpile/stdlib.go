@@ -1750,16 +1750,16 @@ var stdlibModules = map[string]stdlibModule{
 			"set_start_method":  {GoFunc: "__gopy_mp_start_method_unused"},
 			"get_start_method":  {GoFunc: "__gopy_mp_start_method_unused"},
 			"get_context":       {GoFunc: "__gopy_mp_context_unused"},
-			"Process":           {GoFunc: "__gopy_mp_process_unused"},
-			"Pool":              {GoFunc: "__gopy_mp_pool_unused"},
-			"Lock":              {GoFunc: "__gopy_mp_lock_unused"},
-			"RLock":             {GoFunc: "__gopy_mp_lock_unused"},
-			"Event":             {GoFunc: "__gopy_mp_event_unused"},
-			"Condition":         {GoFunc: "__gopy_mp_cond_unused"},
-			"Semaphore":         {GoFunc: "__gopy_mp_sem_unused"},
-			"BoundedSemaphore":  {GoFunc: "__gopy_mp_sem_unused"},
+			"Process":           {GoFunc: "__gopy_threading_thread_new", Helper: helperThreadingThread, RetTag: "__Thread", ExtraHelpers: map[string]string{"__Thread": helperThreadType}, HelperImports: []string{"sync", "time"}},
+			"Pool":              {GoFunc: "__gopy_cf_tpool_new", Helper: helperCfThreadPoolNew, RetTag: "__ThreadPool", ExtraHelpers: map[string]string{"__ThreadPool": helperCfThreadPoolType, "__Future": helperCfFutureType}, HelperImports: []string{"sync", "fmt"}},
+			"Lock":              {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}, HelperImports: []string{"sync"}},
+			"RLock":             {GoFunc: "__gopy_threading_lock", Helper: helperThreadingLock, RetTag: "__Lock", ExtraHelpers: map[string]string{"__Lock": helperLockType}, HelperImports: []string{"sync"}},
+			"Event":             {GoFunc: "__gopy_threading_event_new", Helper: helperThreadingEvent, RetTag: "__Event", ExtraHelpers: map[string]string{"__Event": helperEventType}, HelperImports: []string{"sync", "time"}},
+			"Condition":         {GoFunc: "__gopy_threading_cond_new", Helper: helperThreadingCond, RetTag: "__Condition", ExtraHelpers: map[string]string{"__Condition": helperCondType, "__Lock": helperLockType}, HelperImports: []string{"sync"}},
+			"Semaphore":         {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
+			"BoundedSemaphore":  {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
 			"Barrier":           {GoFunc: "__gopy_mp_barrier_unused"},
-			"Queue":             {GoFunc: "__gopy_mp_queue_unused"},
+			"Queue":             {GoFunc: "__gopy_queue_new", Helper: helperQueueNew, RetTag: "__Queue", ExtraHelpers: map[string]string{"__Queue": helperQueueType}, HelperImports: []string{"sync"}},
 			"JoinableQueue":     {GoFunc: "__gopy_mp_queue_unused"},
 			"SimpleQueue":       {GoFunc: "__gopy_mp_queue_unused"},
 			"Pipe":              {GoFunc: "__gopy_mp_pipe_unused"},
@@ -2641,10 +2641,10 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"shelve": {
 		Funcs: map[string]stdlibFunc{
-			"open":     {GoFunc: "__gopy_shelve_unused"},
-			"Shelf":    {GoFunc: "__gopy_shelve_unused"},
-			"BsdDbShelf": {GoFunc: "__gopy_shelve_unused"},
-			"DbfilenameShelf": {GoFunc: "__gopy_shelve_unused"},
+			"open":           {GoFunc: "__gopy_shelve_open", Helper: helperShelveOpen, RetTag: "__Shelf", ExtraHelpers: map[string]string{"__Shelf": helperShelfType}, HelperImports: []string{"encoding/json", "os"}},
+			"Shelf":          {GoFunc: "__gopy_shelve_open", Helper: helperShelveOpen, RetTag: "__Shelf", ExtraHelpers: map[string]string{"__Shelf": helperShelfType}, HelperImports: []string{"encoding/json", "os"}},
+			"BsdDbShelf":     {GoFunc: "__gopy_shelve_open", Helper: helperShelveOpen, RetTag: "__Shelf", ExtraHelpers: map[string]string{"__Shelf": helperShelfType}, HelperImports: []string{"encoding/json", "os"}},
+			"DbfilenameShelf": {GoFunc: "__gopy_shelve_open", Helper: helperShelveOpen, RetTag: "__Shelf", ExtraHelpers: map[string]string{"__Shelf": helperShelfType}, HelperImports: []string{"encoding/json", "os"}},
 		},
 	},
 	"sqlite3": {
@@ -8084,6 +8084,98 @@ func (p *__ThreadPool) Exit() bool           { p.Shutdown(); return false }`
 
 const helperCfThreadPoolNew = `func __gopy_cf_tpool_new(args ...any) *__ThreadPool {
 	return &__ThreadPool{}
+}`
+
+// helperShelfType — shelve.Shelf shim backed by a JSON-on-disk map.
+// open(path) loads the file (or empty map); sync() / close() writes
+// back. CPython uses dbm/anydbm under the hood; gopy uses JSON for
+// portability. Wire-compat with CPython shelf files: no.
+const helperShelfType = `type __Shelf struct {
+	path string
+	data map[string]any
+}
+
+func (s *__Shelf) ensure() {
+	if s.data == nil {
+		s.data = map[string]any{}
+	}
+}
+
+func (s *__Shelf) Get(key string, args ...any) any {
+	s.ensure()
+	if v, ok := s.data[key]; ok {
+		return v
+	}
+	if len(args) > 0 {
+		return args[0]
+	}
+	return nil
+}
+
+func (s *__Shelf) Set(key string, value any) {
+	s.ensure()
+	s.data[key] = value
+}
+
+func (s *__Shelf) Delete(key string) {
+	if s.data != nil {
+		delete(s.data, key)
+	}
+}
+
+func (s *__Shelf) Contains(key string) bool {
+	if s.data == nil {
+		return false
+	}
+	_, ok := s.data[key]
+	return ok
+}
+
+func (s *__Shelf) Keys() []string {
+	out := []string{}
+	for k := range s.data {
+		out = append(out, k)
+	}
+	return out
+}
+
+func (s *__Shelf) Sync() {
+	if s.path == "" {
+		return
+	}
+	if s.data == nil {
+		s.data = map[string]any{}
+	}
+	b, err := json.Marshal(s.data)
+	if err != nil {
+		panic(NewException("shelve.sync: " + err.Error()))
+	}
+	if err := os.WriteFile(s.path, b, 0o644); err != nil {
+		panic(NewException("shelve.sync: " + err.Error()))
+	}
+}
+
+func (s *__Shelf) Close() {
+	s.Sync()
+}
+
+func (s *__Shelf) Enter() *__Shelf { return s }
+func (s *__Shelf) Exit() bool      { s.Close(); return false }`
+
+const helperShelveOpen = `func __gopy_shelve_open(args ...any) *__Shelf {
+	path := ""
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok {
+			path = s
+		}
+	}
+	sh := &__Shelf{path: path, data: map[string]any{}}
+	if path != "" {
+		if b, err := os.ReadFile(path); err == nil {
+			json.Unmarshal(b, &sh.data)
+		}
+	}
+	return sh
 }`
 
 // helperHmacType wraps a stdlib hash.Hash plus the key/algo so .hexdigest()
