@@ -2383,6 +2383,46 @@ func (g *gen) resolveStdlibPath(e ir.Expr) string {
 	return ""
 }
 
+// emitScandirCM lowers `with os.scandir(path) as it:` to an IIFE that
+// materializes the entry list via the existing helper and runs the body
+// with the iterator var bound to the resulting `[]*__DirEntry`. CPython's
+// scandir is a true iterator + CM; gopy already collects eagerly, so the
+// CM form is just a scoping wrapper.
+func (g *gen) emitScandirCM(call *ir.Call, varName string, body []ir.Stmt) error {
+	g.addImport("os")
+	g.helpers["__gopy_os_scandir"] = helperOsScandir
+	g.helpers["__DirEntry"] = helperDirEntryType
+	g.writeIndent()
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	if varName != "" {
+		g.writef("%s := __gopy_os_scandir(", varName)
+	} else {
+		g.writef("_ = __gopy_os_scandir(")
+	}
+	if len(call.Args) >= 1 {
+		if err := g.expr(call.Args[0]); err != nil {
+			return err
+		}
+	} else {
+		g.writef("\".\"")
+	}
+	g.writef(")\n")
+	if varName != "" {
+		g.writeIndent()
+		g.writef("_ = %s\n", varName)
+		g.varTypes[varName] = "__DirEntrySlice"
+	}
+	if err := g.stmts(body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	return nil
+}
+
 // emitGzipOpen lowers `with gzip.open(path, mode) as fh:` to an IIFE that
 // opens (and on read, fully decompresses) the file. fh dispatches via the
 // __GzipFile tagged-method table, so fh.read(), fh.write(), fh.readline()
@@ -2521,6 +2561,8 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitNamedTempFile(call, w.VarName, w.Body)
 			case "gzip.open":
 				return g.emitGzipOpen(call, w.VarName, w.Body)
+			case "os.scandir":
+				return g.emitScandirCM(call, w.VarName, w.Body)
 			}
 		}
 	}
@@ -2537,6 +2579,8 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitNamedTempFile(synth, w.VarName, w.Body)
 			case "gzip.open":
 				return g.emitGzipOpen(synth, w.VarName, w.Body)
+			case "os.scandir":
+				return g.emitScandirCM(synth, w.VarName, w.Body)
 			}
 		}
 	}
@@ -6751,6 +6795,8 @@ var taggedMethodRename = map[string]map[string]string{
 		"replace":         "Replace",
 		"chmod":           "Chmod",
 		"lchmod":          "Lchmod",
+		"lstat":           "Lstat",
+		"stat":            "Stat",
 		"expanduser":      "Expanduser",
 	},
 	"__Datetime": {
@@ -7069,6 +7115,22 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 }
 
 func (g *gen) methodCall(m *ir.MethodCall) error {
+	// complex.conjugate() — `c.conjugate()` returns a complex with the
+	// imaginary part negated. Maps to math/cmplx.Conj.
+	if recvTy := g.effectiveType(m.Recv); recvTy != nil && recvTy.Kind == ir.TyComplex {
+		if m.Method == "conjugate" {
+			if len(m.Args) != 0 {
+				return fmt.Errorf("complex.conjugate() takes no arguments")
+			}
+			g.addImport("math/cmplx")
+			g.writef("cmplx.Conj(")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
+		}
+	}
 	// Int instance methods: `n.bit_length()` and `n.bit_count()`. CPython's
 	// `bit_length` returns ceil(log2(|n|)+1); `bit_count` returns popcount
 	// of the magnitude. Both ignore the sign so we abs() first, then use
@@ -7186,12 +7248,11 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		g.writef("return int64(__n) }()")
 		return nil
 	}
-	// `bytes.fromhex("aabbcc")` — classmethod-like. gopy stores bytes as
-	// string, so we decode through encoding/hex and surface the resulting
-	// byte buffer as a Go string. Whitespace inside the literal is stripped
-	// to match CPython (which tolerates separators like spaces / underscores
-	// are not allowed by bytes.fromhex but spaces are).
-	if n, ok := m.Recv.(*ir.Name); ok && n.N == "bytes" && m.Method == "fromhex" {
+	// `bytes.fromhex("aabbcc")` / `bytearray.fromhex(...)` — classmethod-like.
+	// gopy stores bytes (and bytearray) as string, so both forms decode
+	// through encoding/hex and surface the resulting buffer as a Go string.
+	// Whitespace inside the literal is stripped to match CPython.
+	if n, ok := m.Recv.(*ir.Name); ok && (n.N == "bytes" || n.N == "bytearray") && m.Method == "fromhex" {
 		if len(m.Args) != 1 {
 			return fmt.Errorf("bytes.fromhex(s) requires one arg")
 		}

@@ -387,7 +387,9 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`subprocess.Popen` streaming stdin/stdout** — `run(..., input=, cwd=)` and `check_output` are synchronous-only; persistent `Popen` objects with `.communicate(...)` / `.stdin.write(...)` aren't wired
 - **`gzip.open(path, mode)` as context manager** — `with gzip.open(path, "wt") as f: f.write(...)` and `with gzip.open(path, "rt") as f: f.read() / f.readline() / f.readlines()` route through a `__GzipFile` shim that wraps `compress/gzip`. Read mode decompresses the whole file eagerly (no streaming) and write mode flushes on context exit
 - **`urllib.request.Request(url, data=, headers=, method=)`** — kwargs ride through a special-case builder so the resulting `*__URLRequest` carries the method override, headers map, and POST body when supplied; `urlopen(req)` now respects both the `Method` and any `Headers` on the request
-- **`bytes.fromhex(s)`** — strips spaces, decodes via `encoding/hex`, returns the result as a gopy-string. Bad hex raises `ValueError` through the standard `NewException` channel
+- **`bytes.fromhex(s)` / `bytearray.fromhex(s)`** — strips spaces, decodes via `encoding/hex`, returns the result as a gopy-string. Bad hex raises `ValueError` through the standard `NewException` channel
+- **`pathlib.Path.stat()`** returns a `map[string]any` with `st_size` / `st_mode` / `st_mtime` / `st_isdir` (same shape as the existing `lstat()`). CPython hands back `os.stat_result` with attribute access — gopy callers reach into the map by key
+- **`complex.conjugate()`** routes through `math/cmplx.Conj`; `.real` / `.imag` already worked via `real()` / `imag()`
 - ~~**`re` flags** (`re.IGNORECASE`, `re.MULTILINE`, etc.) — flag args parse but compiled patterns ignore them~~ now applied: each Go regexp helper accepts trailing flag args and prefixes the pattern with `(?ims)` as appropriate. `IGNORECASE` / `MULTILINE` / `DOTALL` work; `VERBOSE` / `ASCII` / `UNICODE` accept-but-no-op (Go regexp syntax differs)
 - **`json.JSONEncoder` / `JSONDecoder` subclassing** — registered as stub
 - **`pickle` binary protocol** — JSON-backed; not wire-compatible with CPython
@@ -399,7 +401,8 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`logging.Logger` hierarchy, `Filter` chaining, custom `Handler`** — per-logger `setLevel` / `getEffectiveLevel` / `isEnabledFor` work and the module-level threshold gates emission, but propagation to parent loggers, custom handlers, and formatter pipelines aren't wired
 - **`argparse` subparsers / mutually exclusive groups / callable `type=` converters** — flat positional / optional args + `type=int|float|str|bool` + `default=` + `action=store_true|store_false` + `dest=` work; nested parsers / `type=MyClass` not yet
 - ~~**`configparser` write-back to file (`.write(fp)`)** — read + `set()` work, no serializer yet~~ now wired: `cp.write(fh)` accepts any handle with a `Write(string) int64` method (or `*os.File` from `with open(...) as fh`) and emits one section per existing entry plus DEFAULT
-- **`mmap`, `select`, `selectors`, `signal`** real wakeups — all registered as stubs
+- **`mmap`, `select`, `selectors`** real wakeups — all registered as stubs
+- **`signal.signal(SIG, handler)`** registers a real Go `signal.Notify` channel and spawns a listener goroutine that calls back into the Python handler with `(signum, None)` on delivery. `signal.getsignal(SIG)` returns the last-registered callable. `SIG_DFL` / `SIG_IGN` reset the channel. Goroutine-driven, so cross-platform but skips CPython's reentrancy guarantees
 - **`sqlite3`** real driver — registered as stub
 - **`xml.etree.ElementTree`** — `ElementTree.parse(path)` / `tree.getroot()` / `tree.write(path)` work (UTF-8 prolog included), plus `Element.set` / `.append` / `.remove` / `.insert` / `.keys` / `.items` and module-level `Element` / `SubElement` / `tostring` / `fromstring`. `ET.indent(tree, space="  ", level=0)` walks the tree in place and fills in Text/Tail strings so the serializer emits a pretty-printed shape; namespace-aware (Clark notation) tags aren't wired
 - **`xml.dom.minidom`, `xml.sax`** parsers — registered as stubs
@@ -442,7 +445,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **String formatting locale-aware** (`{:n}` type with current locale grouping)
 - **`unicodedata.normalize` NFKD / NFC** — only category lookup is wired
 - **`gettext.translation` with `.mo` catalogs** — `gettext`/`ngettext` return source string unchanged
-- **`os.scandir`** as a true iterator + context manager — gopy materializes the entry list eagerly (no `__enter__` / `__next__`); the returned slice still exposes per-entry `.name` / `.path` / `.is_file()` / `.is_dir()` / `.is_symlink()`
+- **`os.scandir`** materializes the entry list eagerly (no `__next__`), but `with os.scandir(path) as it:` now lowers as an IIFE so the iterator-as-context-manager idiom compiles. The returned slice still exposes per-entry `.name` / `.path` / `.is_file()` / `.is_dir()` / `.is_symlink()`
 - **`shutil.copy` / `copytree` preserving permissions and metadata** — basic copy works, full attribute preservation may differ from CPython
 
 ### Out of scope (intentional)

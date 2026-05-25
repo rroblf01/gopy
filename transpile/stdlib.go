@@ -1108,9 +1108,9 @@ var stdlibModules = map[string]stdlibModule{
 			"SIG_IGN":  {GoExpr: "any(1)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"signal":     {GoFunc: "__gopy_signal_noop", Helper: helperSignalNoop},
-			"getsignal":  {GoFunc: "__gopy_signal_noop", Helper: helperSignalNoop},
-			"set_wakeup_fd": {GoFunc: "__gopy_signal_noop_int", Helper: helperSignalNoopInt, RetKind: "int"},
+			"signal":     {GoFunc: "__gopy_signal_signal", Helper: helperSignalSignal, HelperImports: []string{"os", "os/signal", "sync", "syscall"}},
+			"getsignal":  {GoFunc: "__gopy_signal_getsignal", Helper: helperSignalSignal, HelperImports: []string{"os", "os/signal", "sync", "syscall"}},
+			"set_wakeup_fd": {GoFunc: "__gopy_signal_noop_int", Helper: helperSignalSignal, HelperImports: []string{"os", "os/signal", "sync", "syscall"}, RetKind: "int"},
 		},
 	},
 	"atexit": {
@@ -6341,11 +6341,73 @@ const helperBinasciiCrc32 = `func __gopy_binascii_crc32(args ...any) int64 {
 	return int64(crc32.ChecksumIEEE([]byte(s)))
 }`
 
-// helperSignalNoop / NoopInt — gopy doesn't install OS signal handlers
-// from transpiled Python. Accept and discard so libraries calling
-// signal.signal(SIGINT, h) compile.
-const helperSignalNoop = `func __gopy_signal_noop(args ...any) any { return nil }`
-const helperSignalNoopInt = `func __gopy_signal_noop_int(args ...any) int64 { return 0 }`
+// helperSignalSignal — register a Python-style signal handler with the
+// Go runtime. Each unique signum spawns a long-lived goroutine that
+// listens on os/signal.Notify and invokes the handler with
+// (signum, nil) when fired. SIG_DFL (any(0)) / SIG_IGN (any(1)) reset
+// the channel by closing the previous registration. Returns the prior
+// handler (or nil if none).
+const helperSignalSignal = `var __gopy_signal_handlers sync.Map
+
+func __gopy_signal_signal(args ...any) any {
+	if len(args) < 2 {
+		return nil
+	}
+	var signum int64
+	switch v := args[0].(type) {
+	case int64:
+		signum = v
+	case int:
+		signum = int64(v)
+	default:
+		return nil
+	}
+	prev, _ := __gopy_signal_handlers.Load(signum)
+	if v, ok := args[1].(any); ok {
+		if i, isInt := v.(int); isInt && (i == 0 || i == 1) {
+			signal.Reset(syscall.Signal(signum))
+			__gopy_signal_handlers.Delete(signum)
+			return prev
+		}
+	}
+	__gopy_signal_handlers.Store(signum, args[1])
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.Signal(signum))
+	go func() {
+		for s := range ch {
+			h, ok := __gopy_signal_handlers.Load(int64(s.(syscall.Signal)))
+			if !ok {
+				continue
+			}
+			if fn, ok := h.(func(int64, any) any); ok {
+				fn(int64(s.(syscall.Signal)), nil)
+				continue
+			}
+			if fn, ok := h.(func(...any) any); ok {
+				fn(int64(s.(syscall.Signal)), nil)
+				continue
+			}
+		}
+	}()
+	return prev
+}
+
+func __gopy_signal_getsignal(args ...any) any {
+	if len(args) == 0 {
+		return nil
+	}
+	var signum int64
+	switch v := args[0].(type) {
+	case int64:
+		signum = v
+	case int:
+		signum = int64(v)
+	}
+	h, _ := __gopy_signal_handlers.Load(signum)
+	return h
+}
+
+func __gopy_signal_noop_int(args ...any) int64 { return 0 }`
 
 // helperAtexitNoop — gopy doesn't run deferred Python callbacks at
 // exit. Accept registration silently.
@@ -7795,6 +7857,19 @@ func (p *__Path) Lchmod(mode int64) { p.Chmod(mode) }
 
 func (p *__Path) Lstat() map[string]any {
 	st, err := os.Lstat(p.p)
+	if err != nil {
+		panic(err)
+	}
+	return map[string]any{
+		"st_size":  int64(st.Size()),
+		"st_mode":  int64(st.Mode()),
+		"st_mtime": float64(st.ModTime().Unix()),
+		"st_isdir": st.IsDir(),
+	}
+}
+
+func (p *__Path) Stat() map[string]any {
+	st, err := os.Stat(p.p)
 	if err != nil {
 		panic(err)
 	}
