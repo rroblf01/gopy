@@ -123,6 +123,8 @@ var stdlibModules = map[string]stdlibModule{
 					"relpath":      {GoFunc: "__gopy_path_relpath", GoImport: "path/filepath", Helper: helperPathRelpath, RetKind: "str"},
 					"getsize":      {GoFunc: "__gopy_path_getsize", GoImport: "os", Helper: helperPathGetsize, RetKind: "int"},
 					"getmtime":     {GoFunc: "__gopy_path_getmtime", GoImport: "os", Helper: helperPathGetmtime, RetKind: "float"},
+					"getatime":     {GoFunc: "__gopy_path_getatime", GoImport: "os", Helper: helperPathGetatime, ExtraHelpers: map[string]string{"__gopy_path_getmtime": helperPathGetmtime}, RetKind: "float"},
+					"getctime":     {GoFunc: "__gopy_path_getctime", GoImport: "os", Helper: helperPathGetctime, ExtraHelpers: map[string]string{"__gopy_path_getmtime": helperPathGetmtime}, RetKind: "float"},
 					"normpath":     {GoFunc: "filepath.Clean", GoImport: "path/filepath", RetKind: "str"},
 					"expanduser":   {GoFunc: "__gopy_path_expanduser", GoImport: "os", Helper: helperPathExpanduser, RetKind: "str"},
 					"expandvars":   {GoFunc: "os.ExpandEnv", GoImport: "os", RetKind: "str"},
@@ -393,6 +395,7 @@ var stdlibModules = map[string]stdlibModule{
 			"rmtree":            {GoFunc: "__gopy_shutil_rmtree", GoImport: "os", Helper: helperShutilRmtree},
 			"copy":              {GoFunc: "__gopy_shutil_copy", GoImport: "io", Helper: helperShutilCopy, HelperImports: []string{"os"}},
 			"copyfile":          {GoFunc: "__gopy_shutil_copy", GoImport: "io", Helper: helperShutilCopy, HelperImports: []string{"os"}},
+			"copytree":          {GoFunc: "__gopy_shutil_copytree", GoImport: "io", Helper: helperShutilCopytree, ExtraHelpers: map[string]string{"__gopy_shutil_copy": helperShutilCopy}, HelperImports: []string{"os"}, RetKind: "str"},
 			"move":              {GoFunc: "__gopy_shutil_move", GoImport: "os", Helper: helperShutilMove},
 			"which":             {GoFunc: "__gopy_shutil_which", Helper: helperShutilWhich, HelperImports: []string{"os/exec"}, RetKind: "str"},
 			"disk_usage":        {GoFunc: "__gopy_shutil_diskusage", Helper: helperShutilDiskUsage},
@@ -401,9 +404,14 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"tempfile": {
 		Funcs: map[string]stdlibFunc{
-			"mkdtemp":     {GoFunc: "__gopy_tempfile_mkdtemp", GoImport: "os", Helper: helperTempfileMkdtemp, RetKind: "str"},
-			"gettempdir":  {GoFunc: "os.TempDir", GoImport: "os", RetKind: "str"},
-			"mkstemp":     {GoFunc: "__gopy_tempfile_mkstemp", GoImport: "os", Helper: helperTempfileMkstemp},
+			"mkdtemp":            {GoFunc: "__gopy_tempfile_mkdtemp", GoImport: "os", Helper: helperTempfileMkdtemp, RetKind: "str"},
+			"gettempdir":         {GoFunc: "os.TempDir", GoImport: "os", RetKind: "str"},
+			"mkstemp":            {GoFunc: "__gopy_tempfile_mkstemp", GoImport: "os", Helper: helperTempfileMkstemp},
+			// Marker so `from tempfile import TemporaryDirectory` resolves
+			// the alias; actual context-manager lowering lives in
+			// emitTempDir, which intercepts the With statement before any
+			// stdlib helper call would be emitted.
+			"TemporaryDirectory": {GoFunc: "__gopy_tempdir_unused"},
 		},
 	},
 	"cmath": {
@@ -469,6 +477,7 @@ var stdlibModules = map[string]stdlibModule{
 							"tostring":   {GoFunc: "__gopy_xml_tostring", Helper: helperXMLTostring, ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"strings", "sort"}, RetKind: "str"},
 							"Element":    {GoFunc: "__gopy_xml_element", Helper: helperXMLElement, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize}, HelperImports: []string{"strings", "sort", "fmt"}},
 							"SubElement": {GoFunc: "__gopy_xml_subelement", Helper: helperXMLSubElement, RetTag: "__XMLElement", ExtraHelpers: map[string]string{"__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize, "__gopy_xml_element": helperXMLElement}, HelperImports: []string{"strings", "sort", "fmt"}},
+							"parse":      {GoFunc: "__gopy_xml_parse", Helper: helperXMLParse, RetTag: "__XMLTree", ExtraHelpers: map[string]string{"__XMLTree": helperXMLTreeType, "__XMLElement": helperXMLElementType, "__gopy_xml_serialize": helperXMLSerialize, "__gopy_xml_fromstring": helperXMLFromstring}, HelperImports: []string{"encoding/xml", "os", "strings", "sort"}},
 						},
 					},
 				},
@@ -4306,7 +4315,47 @@ const helperCalWeekday = `func __gopy_cal_weekday(year, month, day int64) int64 
 	return (w + 6) % 7
 }`
 
-const helperGlob = `func __gopy_glob(pattern string) []string {
+const helperGlob = `func __gopy_glob(pattern string, opts ...any) []string {
+	recursive := false
+	for _, o := range opts {
+		if m, ok := o.(map[string]any); ok {
+			if v, ok := m["recursive"].(bool); ok {
+				recursive = v
+			}
+		}
+	}
+	if recursive && strings.Contains(pattern, "**") {
+		// Split on "**" — descend through every subdirectory beneath the
+		// prefix, then match the suffix against each candidate. Mirrors
+		// CPython recursive glob for common dir/**/*.ext shapes.
+		idx := strings.Index(pattern, "**")
+		prefix := pattern[:idx]
+		suffix := pattern[idx+2:]
+		suffix = strings.TrimLeft(suffix, "/")
+		root := strings.TrimRight(prefix, "/")
+		if root == "" {
+			root = "."
+		}
+		out := []string{}
+		_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			candidate := p
+			if suffix != "" {
+				if d.IsDir() {
+					return nil
+				}
+				ok, _ := filepath.Match(suffix, d.Name())
+				if !ok {
+					return nil
+				}
+			}
+			out = append(out, candidate)
+			return nil
+		})
+		return out
+	}
 	out, err := filepath.Glob(pattern)
 	if err != nil {
 		return []string{}
@@ -4351,6 +4400,33 @@ const helperShutilCopy = `func __gopy_shutil_copy(src, dst string) string {
 	defer out.Close()
 	if _, err := io.Copy(out, in); err != nil {
 		panic(err)
+	}
+	return dst
+}`
+
+const helperShutilCopytree = `func __gopy_shutil_copytree(src, dst string) string {
+	si, err := os.Stat(src)
+	if err != nil {
+		panic(err)
+	}
+	if !si.IsDir() {
+		panic(NewException("NotADirectoryError: " + src))
+	}
+	if err := os.MkdirAll(dst, si.Mode()); err != nil {
+		panic(err)
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		panic(err)
+	}
+	for _, e := range entries {
+		srcChild := src + "/" + e.Name()
+		dstChild := dst + "/" + e.Name()
+		if e.IsDir() {
+			__gopy_shutil_copytree(srcChild, dstChild)
+			continue
+		}
+		__gopy_shutil_copy(srcChild, dstChild)
 	}
 	return dst
 }`
@@ -5116,6 +5192,33 @@ const helperXMLSubElement = `func __gopy_xml_subelement(parent *__XMLElement, ta
 	child := __gopy_xml_element(tag, args...)
 	parent.Children = append(parent.Children, child)
 	return child
+}`
+
+const helperXMLTreeType = `type __XMLTree struct {
+	root *__XMLElement
+}
+
+func (t *__XMLTree) Getroot() *__XMLElement { return t.root }
+
+func (t *__XMLTree) Write(path string, args ...any) {
+	if t.root == nil {
+		return
+	}
+	var b strings.Builder
+	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+	__gopy_xml_serialize(t.root, &b)
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		panic(err)
+	}
+}`
+
+const helperXMLParse = `func __gopy_xml_parse(path string) *__XMLTree {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	root := __gopy_xml_fromstring(string(data))
+	return &__XMLTree{root: root}
 }`
 
 const helperXMLFromstring = `func __gopy_xml_fromstring(src string) *__XMLElement {
@@ -7152,6 +7255,70 @@ func (p *__Path) Parents() []*__Path {
 	}
 }
 
+func (p *__Path) Is_relative_to(other any) bool {
+	var rhs string
+	switch v := other.(type) {
+	case string:
+		rhs = v
+	case *__Path:
+		rhs = v.p
+	default:
+		rhs = fmt.Sprintf("%v", v)
+	}
+	rel, err := filepath.Rel(rhs, p.p)
+	if err != nil {
+		return false
+	}
+	return !strings.HasPrefix(rel, "..")
+}
+
+func (p *__Path) Symlink_to(target any) {
+	var dst string
+	switch v := target.(type) {
+	case string:
+		dst = v
+	case *__Path:
+		dst = v.p
+	default:
+		dst = fmt.Sprintf("%v", v)
+	}
+	if err := os.Symlink(dst, p.p); err != nil {
+		panic(err)
+	}
+}
+
+func (p *__Path) Hardlink_to(target any) {
+	var dst string
+	switch v := target.(type) {
+	case string:
+		dst = v
+	case *__Path:
+		dst = v.p
+	default:
+		dst = fmt.Sprintf("%v", v)
+	}
+	if err := os.Link(dst, p.p); err != nil {
+		panic(err)
+	}
+}
+
+func (p *__Path) Relative_to(other any) *__Path {
+	var rhs string
+	switch v := other.(type) {
+	case string:
+		rhs = v
+	case *__Path:
+		rhs = v.p
+	default:
+		rhs = fmt.Sprintf("%v", v)
+	}
+	rel, err := filepath.Rel(rhs, p.p)
+	if err != nil {
+		panic(NewException("ValueError: " + err.Error()))
+	}
+	return &__Path{p: rel}
+}
+
 func (p *__Path) With_suffix(suffix string) *__Path {
 	stem := p.p
 	for i := len(stem) - 1; i >= 0; i-- {
@@ -7394,6 +7561,18 @@ const helperPathGetmtime = `func __gopy_path_getmtime(p string) float64 {
 	}
 	t := i.ModTime()
 	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
+}`
+
+// Go's os.FileInfo doesn't expose atime / ctime portably, so atime
+// and ctime collapse to mtime here. Better than panicking; matches
+// what CPython returns on filesystems that don't track distinct
+// access/change times.
+const helperPathGetatime = `func __gopy_path_getatime(p string) float64 {
+	return __gopy_path_getmtime(p)
+}`
+
+const helperPathGetctime = `func __gopy_path_getctime(p string) float64 {
+	return __gopy_path_getmtime(p)
 }`
 
 const helperPathExpanduser = `func __gopy_path_expanduser(p string) string {

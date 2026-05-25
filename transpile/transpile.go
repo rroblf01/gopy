@@ -2310,6 +2310,49 @@ func (g *gen) emitSuppress(call *ir.Call, body []ir.Stmt) error {
 	return nil
 }
 
+// emitTempDir lowers `with tempfile.TemporaryDirectory([prefix=...]) as d:`
+// to an IIFE that creates a fresh os.MkdirTemp directory, binds its path
+// to `d` (string-typed), and defers os.RemoveAll so cleanup runs even on
+// panic. The `as` name is optional — when omitted, the body just runs
+// inside the scoped IIFE without a binding.
+func (g *gen) emitTempDir(call *ir.Call, varName string, body []ir.Stmt) error {
+	g.addImport("os")
+	prefix := ""
+	for _, kw := range call.Keywords {
+		if kw.Name == "prefix" {
+			if sl, ok := kw.Value.(*ir.StrLit); ok {
+				prefix = sl.V
+			}
+		}
+	}
+	g.writeIndent()
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__td, __err := os.MkdirTemp(%q, %q)\n", "", prefix)
+	g.writeIndent()
+	g.writef("if __err != nil { panic(__err) }\n")
+	g.writeIndent()
+	g.writef("defer os.RemoveAll(__td)\n")
+	if varName != "" {
+		g.writeIndent()
+		g.writef("%s := __td\n", varName)
+		g.writeIndent()
+		g.writef("_ = %s\n", varName)
+		g.localVarTypes[varName] = &ir.Type{Kind: ir.TyStr}
+	} else {
+		g.writeIndent()
+		g.writef("_ = __td\n")
+	}
+	if err := g.stmts(body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	return nil
+}
+
 func (g *gen) withCM(w *ir.WithCM) error {
 	// contextlib.suppress(ExcA, ExcB, ...) — swallow panics whose
 	// Exception message prefix matches any of the listed classes.
@@ -2319,6 +2362,9 @@ func (g *gen) withCM(w *ir.WithCM) error {
 		if n, ok2 := call.Func.(*ir.Name); ok2 {
 			if path, hit := g.aliases[n.N]; hit && path == "contextlib.suppress" {
 				return g.emitSuppress(call, w.Body)
+			}
+			if path, hit := g.aliases[n.N]; hit && path == "tempfile.TemporaryDirectory" {
+				return g.emitTempDir(call, w.VarName, w.Body)
 			}
 		}
 	}
@@ -5490,6 +5536,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinInsort(c)
 			case "subprocess.run":
 				return g.builtinSubprocessRun(c)
+			case "glob.glob", "glob.iglob":
+				return g.builtinGlob(c)
 			case "collections.deque":
 				return g.builtinDeque(c)
 			case "functools.reduce":
@@ -6483,9 +6531,13 @@ var taggedMethodRename = map[string]map[string]string{
 		"is_symlink":  "Is_symlink",
 		"samefile":    "Samefile",
 		"as_posix":    "As_posix",
-		"with_suffix": "With_suffix",
-		"with_name":   "With_name",
-		"with_stem":   "With_stem",
+		"with_suffix":     "With_suffix",
+		"with_name":       "With_name",
+		"with_stem":       "With_stem",
+		"is_relative_to":  "Is_relative_to",
+		"relative_to":     "Relative_to",
+		"symlink_to":      "Symlink_to",
+		"hardlink_to":     "Hardlink_to",
 	},
 	"__Datetime": {
 		"year":       "Year",
@@ -6584,6 +6636,10 @@ var taggedMethodRename = map[string]map[string]string{
 		"keys":    "Keys",
 		"items":   "Items",
 	},
+	"__XMLTree": {
+		"getroot": "Getroot",
+		"write":   "Write",
+	},
 	"__URLRequest": {
 		"add_header": "Add_header",
 	},
@@ -6667,9 +6723,13 @@ var taggedMethodRetTag = map[string]map[string]string{
 		"with_suffix": "__Path",
 		"with_name":   "__Path",
 		"with_stem":   "__Path",
+		"relative_to": "__Path",
 	},
 	"__XMLElement": {
 		"find": "__XMLElement",
+	},
+	"__XMLTree": {
+		"getroot": "__XMLElement",
 	},
 }
 
@@ -6999,6 +7059,8 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return g.builtinAccumulate(synth)
 		case "subprocess.run":
 			return g.builtinSubprocessRun(synth)
+		case "glob.glob", "glob.iglob":
+			return g.builtinGlob(synth)
 		case "json.dumps":
 			return g.builtinJSONDumps(synth)
 		case "datetime.timedelta":
@@ -12024,6 +12086,45 @@ func (d *__Deque) Len() int64 { return int64(len(d.items)) }`
 // helper. The first positional argument is the command list; any kwargs
 // at the call site (capture_output=True, text=True, ...) are silently
 // ignored — the helper always captures stdout / stderr / returncode.
+// builtinGlob threads glob.glob(pattern, recursive=True) through the
+// helper. recursive splits the pattern on "**" and walks the prefix dir,
+// matching the suffix against each candidate. Standard 1-arg form still
+// dispatches through filepath.Glob inside the helper.
+func (g *gen) builtinGlob(c *ir.Call) error {
+	if len(c.Args) < 1 {
+		return fmt.Errorf("glob.glob() needs a pattern")
+	}
+	g.addImport("path/filepath")
+	g.addImport("strings")
+	g.addImport("os")
+	g.helpers["__gopy_glob"] = helperGlob
+	g.writef("__gopy_glob(")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	var honored []ir.Keyword
+	for _, kw := range c.Keywords {
+		if kw.Name == "recursive" {
+			honored = append(honored, kw)
+		}
+	}
+	if len(honored) > 0 {
+		g.writef(", map[string]any{")
+		for i, kw := range honored {
+			if i > 0 {
+				g.writef(", ")
+			}
+			g.writef("%q: ", kw.Name)
+			if err := g.boxedExpr(kw.Value); err != nil {
+				return err
+			}
+		}
+		g.writef("}")
+	}
+	g.writef(")")
+	return nil
+}
+
 func (g *gen) builtinSubprocessRun(c *ir.Call) error {
 	if len(c.Args) < 1 {
 		return fmt.Errorf("subprocess.run() needs the command list as the first positional argument")

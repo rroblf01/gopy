@@ -398,7 +398,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`configparser` write-back to file (`.write(fp)`)** — read + `set()` work, no serializer yet
 - **`mmap`, `select`, `selectors`, `signal`** real wakeups — all registered as stubs
 - **`sqlite3`** real driver — registered as stub
-- **`xml.etree.ElementTree.tree-level write` (write to file, XML declaration)** — `Element.set` / `.append` / `.remove` / `.insert` / `.keys` / `.items` + module-level `Element` / `SubElement` constructors + `tostring(el)` work; full `ElementTree.write(path)` with prolog / pretty-printing not yet
+- **`xml.etree.ElementTree` pretty-printing on write** — `ElementTree.parse(path)` / `tree.getroot()` / `tree.write(path)` work (UTF-8 prolog included), plus `Element.set` / `.append` / `.remove` / `.insert` / `.keys` / `.items` and module-level `Element` / `SubElement` / `tostring` / `fromstring`. CPython's `ET.indent(tree)` pretty-printer and namespace-aware (Clark notation) tags aren't wired
 - **`xml.dom.minidom`, `xml.sax`** parsers — registered as stubs
 - **`html.parser.HTMLParser`** — stub
 - **`email.parser` / `email.message`** — stubs

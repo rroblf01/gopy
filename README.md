@@ -206,7 +206,7 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] `re.split(pattern, s)`, `re.escape(s)`, `re.fullmatch(pattern, s)`, `re.subn(pattern, repl, s)` returns `[result, count]`
 - [x] `csv.writer(fh)` stateful writer with `.writerow(row)` / `.writerows(rows)` bound to a `with open(...)` handle; `csv.DictReader(lines)` returns `[]map[string]string`; `csv.DictWriter(fh, fields)` with `.writeheader()` / `.writerow(d)` / `.writerows(rows)`
 - [x] `pathlib.Path` arithmetic (`p / "sub"`), `.name`, `.parent`, `.suffix`, `.stem`
-- [x] `pathlib.Path.iterdir()` (returns `[]*Path`; loop var inherits the Path tag so `for child in p.iterdir(): print(child.name)` works), `.mkdir(parents, exist_ok)`, `.unlink()`, `.glob(pattern)` (shell-style glob via `filepath.Glob`), `.rglob(pattern)` (recursive walk via `filepath.WalkDir`; basename-matched against the pattern), `.read_bytes()` / `.write_bytes(s)` (alias the text counterparts since gopy maps `bytes` to `string`), `.match(pattern)` (right-anchored fnmatch on basename; multi-segment patterns match the joined path), `Path.cwd()` / `Path.home()` classmethods returning a freshly-tagged Path from `os.Getwd` / `os.UserHomeDir`, `.is_symlink()`, `.samefile(other)` (accepts str or Path), `.as_posix()`, `.with_stem(stem)`, `.parts` (segment list), `.parents` (ancestor Path list)
+- [x] `pathlib.Path.iterdir()` (returns `[]*Path`; loop var inherits the Path tag so `for child in p.iterdir(): print(child.name)` works), `.mkdir(parents, exist_ok)`, `.unlink()`, `.glob(pattern)` (shell-style glob via `filepath.Glob`), `.rglob(pattern)` (recursive walk via `filepath.WalkDir`; basename-matched against the pattern), `.read_bytes()` / `.write_bytes(s)` (alias the text counterparts since gopy maps `bytes` to `string`), `.match(pattern)` (right-anchored fnmatch on basename; multi-segment patterns match the joined path), `Path.cwd()` / `Path.home()` classmethods returning a freshly-tagged Path from `os.Getwd` / `os.UserHomeDir`, `.is_symlink()`, `.samefile(other)` (accepts str or Path), `.as_posix()`, `.with_stem(stem)`, `.parts` (segment list), `.parents` (ancestor Path list), `.is_relative_to(other)`, `.relative_to(other)` (panics `ValueError` if not under base, mirroring CPython), `.symlink_to(target)` / `.hardlink_to(target)` (via `os.Symlink` / `os.Link`)
 - [x] `json.dumps(v, indent=N)` pretty-prints with N-space indentation; default form keeps the existing Python-style separators
 - [x] `json.load(fh)` / `json.dump(v, fh)` for `with open(...) as fh:` handles
 - [x] File iteration line by line (`for line in fh:`)
@@ -246,11 +246,11 @@ High-level checklist of what still needs to land before gopy is genuinely usable
 - [x] `threading.Lock()` / `threading.RLock()` (single-goroutine no-op shims with `.acquire()` / `.release()` / `.locked()`)
 - [x] `typing.cast(T, x)` — runtime identity (returns `x` unchanged; type annotation is informational only)
 - [x] `time.monotonic()`, `time.perf_counter()`, `time.time_ns()` (monotonic nanosecond reading)
-- [x] `shutil.rmtree(p)`, `shutil.copy(src, dst)` / `shutil.copyfile`, `shutil.move(src, dst)`
-- [x] `tempfile.mkdtemp([prefix])`, `tempfile.mkstemp([prefix])` (returns `[fd, name]`), `tempfile.gettempdir()`
+- [x] `shutil.rmtree(p)`, `shutil.copy(src, dst)` / `shutil.copyfile`, `shutil.copytree(src, dst)` (recursive directory copy), `shutil.move(src, dst)`
+- [x] `tempfile.mkdtemp([prefix])`, `tempfile.mkstemp([prefix])` (returns `[fd, name]`), `tempfile.gettempdir()`, `with tempfile.TemporaryDirectory([prefix=...]) as d:` lowers to an IIFE that creates a fresh `os.MkdirTemp` directory, binds its path to `d` (string), and defers `os.RemoveAll` so cleanup fires even on panic
 - [x] `hmac.new(key, msg, digestmod)` (sha1/sha256/sha512/md5), `.update(msg)`, `.hexdigest()`, `hmac.compare_digest`
 - [x] `gzip.compress(s)` / `gzip.decompress(s)`, `zlib.compress(s)` / `zlib.decompress(s)` / `zlib.crc32(s)` / `zlib.adler32(s)`
-- [x] `glob.glob(pattern)` (annotate the receiving var as `list[str]` so methods like `.sort()` resolve)
+- [x] `glob.glob(pattern[, recursive=True])` (annotate the receiving var as `list[str]` so methods like `.sort()` resolve). With `recursive=True` and a `**` in the pattern, gopy splits on `**`, walks the prefix dir via `filepath.WalkDir`, and matches the suffix against each candidate's basename — covers the common `dir/**/*.ext` shape
 - [x] `socket.gethostname()` / `socket.getfqdn()`
 - [x] `b"..."` bytes literals pass through as `str` (gopy uses Go's `string` for both)
 - [x] `string` constants (`ascii_letters`, `digits`, `punctuation`, ...)
