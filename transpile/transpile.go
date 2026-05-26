@@ -1289,6 +1289,76 @@ func (g *gen) stmt(s ir.Stmt) error {
 		}
 		g.writef("\n")
 		return nil
+	case *ir.SliceAssignStep:
+		// `xs[start:stop:step] = rhs` with step != 1 — emit a loop that
+		// walks rhs in parallel with the strided indices into xs.
+		// Omitted start/stop bind to step-sign-aware defaults at runtime
+		// (negative step: start=len-1, stop=-1; positive: start=0, stop=len).
+		g.writeIndent()
+		g.writef("func() {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("__dst := %s\n", x.Target)
+		g.writeIndent()
+		g.writef("__rhs := ")
+		if err := g.expr(x.Value); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("__step := int(")
+		if err := g.expr(x.Step); err != nil {
+			return err
+		}
+		g.writef(")\n")
+		g.writeIndent()
+		if x.Start != nil {
+			g.writef("__start := int(")
+			if err := g.expr(x.Start); err != nil {
+				return err
+			}
+			g.writef(")\n")
+			g.writeIndent()
+			g.writef("if __start < 0 { __start += len(__dst) }\n")
+		} else {
+			g.writef("var __start int\n")
+			g.writeIndent()
+			g.writef("if __step > 0 { __start = 0 } else { __start = len(__dst) - 1 }\n")
+		}
+		g.writeIndent()
+		if x.Stop != nil {
+			g.writef("__stop := int(")
+			if err := g.expr(x.Stop); err != nil {
+				return err
+			}
+			g.writef(")\n")
+			g.writeIndent()
+			g.writef("if __stop < 0 { __stop += len(__dst) }\n")
+		} else {
+			g.writef("var __stop int\n")
+			g.writeIndent()
+			g.writef("if __step > 0 { __stop = len(__dst) } else { __stop = -1 }\n")
+		}
+		g.writeIndent()
+		g.writef("__j := 0\n")
+		g.writeIndent()
+		g.writef("if __step > 0 {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("for __i := __start; __i < __stop && __j < len(__rhs); __i += __step { __dst[__i] = __rhs[__j]; __j++ }\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("} else if __step < 0 {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("for __i := __start; __i > __stop && __j < len(__rhs); __i += __step { __dst[__i] = __rhs[__j]; __j++ }\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+		g.indent--
+		g.writeIndent()
+		g.writef("}()\n")
+		return nil
 	case *ir.AssignAttr:
 		g.writeIndent()
 		// Class var assignment: `Class.field = expr` or `cls.field = expr`
@@ -8652,7 +8722,15 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			g.writeIndent()
 			g.writef("return ")
 			if len(m.Args) == 2 {
-				if err := g.expr(m.Args[1]); err != nil {
+				// Empty list / dict default with no inferred type would
+				// emit `[]any{}` or `map[any]any{}` and mismatch the
+				// fixed return type. Reshape using the dict's value
+				// type when the literal is empty.
+				if ll, ok := m.Args[1].(*ir.ListLit); ok && len(ll.Elems) == 0 && rt.Val.Kind == ir.TyList {
+					g.writef("%s{}", retGo)
+				} else if dl, ok := m.Args[1].(*ir.DictLit); ok && len(dl.Keys) == 0 && rt.Val.Kind == ir.TyDict {
+					g.writef("%s{}", retGo)
+				} else if err := g.expr(m.Args[1]); err != nil {
 					return err
 				}
 			} else {

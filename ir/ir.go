@@ -270,6 +270,19 @@ type AssignSub struct {
 	Value  Expr
 }
 
+// SliceAssignStep is `xs[start:stop:step] = rhs` with step != 1. Each
+// rhs element is written at xs[start + i*step]. Lower-time guarantees
+// `Target` is a bare Name and `Value` is a typed list whose elem type
+// matches the target's slice elem.
+type SliceAssignStep struct {
+	Target string
+	Start  Expr
+	Stop   Expr
+	Step   Expr
+	Value  Expr
+	ElemTy *Type
+}
+
 // AssignAttr assigns to an attribute: `target.name = value`.
 type AssignAttr struct {
 	Target Expr
@@ -449,6 +462,7 @@ func (*While) stmtNode()      {}
 func (*ForRange) stmtNode()   {}
 func (*ForEach) stmtNode()    {}
 func (*AssignSub) stmtNode()  {}
+func (*SliceAssignStep) stmtNode() {}
 func (*AssignAttr) stmtNode() {}
 func (*Try) stmtNode()        {}
 func (*Raise) stmtNode()      {}

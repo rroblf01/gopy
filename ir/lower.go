@@ -947,6 +947,24 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 				}
 				class.InitArgs = append(class.InitArgs, Param{Name: p.Str("arg"), Ty: ty})
 			}
+			// __init__ defaults live under m.args.defaults, aligned to
+			// trailing params (Python excludes `self` from defaults).
+			if mArgs := m.Child("args"); mArgs != nil {
+				if mdefs := mArgs.Children("defaults"); len(mdefs) > 0 {
+					off := len(class.InitArgs) - len(mdefs)
+					dsc := newScope()
+					for _, p := range class.InitArgs[:off] {
+						dsc.declare(p.Name, p.Ty)
+					}
+					for i, dn := range mdefs {
+						d, err := lowerExpr(dn, dsc)
+						if err != nil {
+							return nil, fmt.Errorf("default for class %s.__init__ param %q: %w", name, class.InitArgs[off+i].Name, err)
+						}
+						class.InitArgs[off+i].Default = d
+					}
+				}
+			}
 			// Lower body in a scope that knows about init params + self.
 			sc := newScope()
 			sc.declare("self", &Type{Kind: TyNamed, Name: name})
@@ -2262,8 +2280,31 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 						return nil, err
 					}
 				}
-				if sliceChild.Child("step") != nil {
-					return nil, fmt.Errorf("line %d: slice assignment with step is not supported", n.Lineno())
+				if stepNode := sliceChild.Child("step"); stepNode != nil {
+					stepExpr, err := lowerExpr(stepNode, sc)
+					if err != nil {
+						return nil, err
+					}
+					tgtTy, _ := sc.lookup(targetName)
+					var elemTy *Type
+					if tgtTy != nil && tgtTy.Kind == TyList {
+						elemTy = tgtTy.Elem
+					}
+					if ll, ok := val.(*ListLit); ok && elemTy != nil {
+						ll.ElemTy = elemTy
+						ll.Ty = tgtTy
+					}
+					// Leave Start/Stop nil when omitted so codegen can
+					// pick the right default based on step sign at
+					// runtime (negative step starts from len-1).
+					return &SliceAssignStep{
+						Target: targetName,
+						Start:  lowExpr,
+						Stop:   highExpr,
+						Step:   stepExpr,
+						Value:  val,
+						ElemTy: elemTy,
+					}, nil
 				}
 				if lowExpr == nil {
 					lowExpr = &IntLit{V: 0}
