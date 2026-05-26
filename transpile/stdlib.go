@@ -437,7 +437,7 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"Template":  {GoFunc: "__gopy_string_template_new", Helper: helperStringTemplateNew, RetTag: "__Template", ExtraHelpers: map[string]string{"__Template": helperStringTemplateType}, HelperImports: []string{"strings", "fmt"}},
 			"capwords":  {GoFunc: "__gopy_string_capwords", Helper: helperStringCapwords, HelperImports: []string{"strings"}, RetKind: "str"},
-			"Formatter": {GoFunc: "__gopy_string_formatter_unused"},
+			"Formatter": {GoFunc: "__gopy_string_formatter_new", Helper: helperStringFormatterNew, RetTag: "__StringFormatter", ExtraHelpers: map[string]string{"__StringFormatter": helperStringFormatterType}, HelperImports: []string{"fmt", "strings"}},
 		},
 	},
 	"collections": {
@@ -7466,6 +7466,115 @@ const helperOsSetBlocking = `func __gopy_os_set_blocking(fd int64, blocking bool
 // so call expressions evaluate cleanly without changing program state.
 const helperSysNoop = `func __gopy_sys_noop(args ...any) {}`
 const helperSysNoret = `func __gopy_sys_noret(args ...any) any { return nil }`
+
+// string.Formatter: minimal CPython API. .format(fmt, *args, **kwargs)
+// walks the {n} / {name} / {} placeholder syntax and substitutes via
+// fmt.Sprint of the matching arg. .vformat takes args + kwargs as
+// pre-split sequences. Spec strings ({:>10}, {:.2f}) collapse to %v —
+// gopy's full f-string formatter lives elsewhere; Formatter is the
+// fallback for callers that imported it explicitly.
+const helperStringFormatterType = `type __StringFormatter struct{}
+
+func (f *__StringFormatter) Format(args ...any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	tmpl, _ := args[0].(string)
+	rest := args[1:]
+	var kwargs map[string]any
+	if n := len(rest); n > 0 {
+		if kv, ok := rest[n-1].(map[string]any); ok {
+			kwargs = kv
+			rest = rest[:n-1]
+		}
+	}
+	out := strings.Builder{}
+	autoIdx := 0
+	i := 0
+	for i < len(tmpl) {
+		c := tmpl[i]
+		if c == '{' && i+1 < len(tmpl) && tmpl[i+1] == '{' {
+			out.WriteByte('{')
+			i += 2
+			continue
+		}
+		if c == '}' && i+1 < len(tmpl) && tmpl[i+1] == '}' {
+			out.WriteByte('}')
+			i += 2
+			continue
+		}
+		if c != '{' {
+			out.WriteByte(c)
+			i++
+			continue
+		}
+		end := strings.IndexByte(tmpl[i:], '}')
+		if end < 0 {
+			out.WriteByte(c)
+			i++
+			continue
+		}
+		spec := tmpl[i+1 : i+end]
+		i += end + 1
+		if colon := strings.IndexByte(spec, ':'); colon >= 0 {
+			spec = spec[:colon]
+		}
+		var v any
+		if spec == "" {
+			if autoIdx < len(rest) {
+				v = rest[autoIdx]
+				autoIdx++
+			}
+		} else if idx, err := strconv.Atoi(spec); err == nil {
+			if idx >= 0 && idx < len(rest) {
+				v = rest[idx]
+			}
+		} else if kwargs != nil {
+			v = kwargs[spec]
+		}
+		out.WriteString(fmt.Sprintf("%v", v))
+	}
+	return out.String()
+}
+
+func (f *__StringFormatter) Vformat(tmpl string, posArgs []any, kwArgs map[string]any) string {
+	all := []any{tmpl}
+	all = append(all, posArgs...)
+	if kwArgs != nil {
+		all = append(all, kwArgs)
+	}
+	return f.Format(all...)
+}
+
+func (f *__StringFormatter) Parse(s string) []any { return []any{} }
+func (f *__StringFormatter) Get_field(name string, args []any, kw map[string]any) any {
+	if kw != nil {
+		return kw[name]
+	}
+	return nil
+}
+func (f *__StringFormatter) Get_value(key any, args []any, kw map[string]any) any {
+	switch k := key.(type) {
+	case int64:
+		if int(k) < len(args) {
+			return args[k]
+		}
+	case string:
+		if kw != nil {
+			return kw[k]
+		}
+	}
+	return nil
+}
+func (f *__StringFormatter) Check_unused_args(used any, args []any, kw map[string]any) {}
+func (f *__StringFormatter) Format_field(value any, spec string) string {
+	return fmt.Sprintf("%v", value)
+}
+func (f *__StringFormatter) Convert_field(value any, conv string) any { return value }`
+
+const helperStringFormatterNew = `func __gopy_string_formatter_new(args ...any) *__StringFormatter {
+	return &__StringFormatter{}
+}`
 
 // time.get_clock_info(name): CPython returns a namedtuple. gopy returns
 // a map with the same field names so attribute access via .Get(key)

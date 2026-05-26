@@ -7141,6 +7141,16 @@ var taggedMethodRename = map[string]map[string]string{
 		"dump":       "Dump",
 		"clear_memo": "Clear_memo",
 	},
+	"__StringFormatter": {
+		"format":            "Format",
+		"vformat":           "Vformat",
+		"parse":             "Parse",
+		"get_field":         "Get_field",
+		"get_value":         "Get_value",
+		"check_unused_args": "Check_unused_args",
+		"format_field":      "Format_field",
+		"convert_field":     "Convert_field",
+	},
 	"__Unpickler": {
 		"load":       "Load",
 		"find_class": "Find_class",
