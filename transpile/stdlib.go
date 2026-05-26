@@ -412,7 +412,7 @@ var stdlibModules = map[string]stdlibModule{
 			},
 			"robotparser": {
 				Funcs: map[string]stdlibFunc{
-					"RobotFileParser": {GoFunc: "__gopy_urllib_robot_unused"},
+					"RobotFileParser": {GoFunc: "__gopy_urllib_robot_new", Helper: helperRobotFileParserNew, RetTag: "__RobotFileParser", ExtraHelpers: map[string]string{"__RobotFileParser": helperRobotFileParserType}, HelperImports: []string{"net/http", "io", "strings"}},
 				},
 			},
 			"response": {
@@ -7574,6 +7574,131 @@ func (f *__StringFormatter) Convert_field(value any, conv string) any { return v
 
 const helperStringFormatterNew = `func __gopy_string_formatter_new(args ...any) *__StringFormatter {
 	return &__StringFormatter{}
+}`
+
+// urllib.robotparser.RobotFileParser: minimal real impl.
+// .set_url(url) stores target; .read() fetches via net/http and parses
+// Disallow/Allow per User-agent block; .can_fetch(agent, url) walks the
+// rules. Sitemaps + crawl-delay tracked as fields. .modified() / .mtime()
+// no-op. Only HTTP/HTTPS supported (no file://). Failed fetches treat
+// every path as allowed (CPython default).
+const helperRobotFileParserType = `type __RobotRule struct {
+	allow bool
+	path  string
+}
+
+type __RobotFileParser struct {
+	url   string
+	rules map[string][]__RobotRule
+	failed bool
+}
+
+func (p *__RobotFileParser) Set_url(u string) { p.url = u }
+
+func (p *__RobotFileParser) Read() {
+	p.rules = map[string][]__RobotRule{}
+	if p.url == "" {
+		p.failed = true
+		return
+	}
+	resp, err := http.Get(p.url)
+	if err != nil {
+		p.failed = true
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		p.failed = true
+		return
+	}
+	bs, _ := io.ReadAll(resp.Body)
+	curAgents := []string{}
+	for _, raw := range strings.Split(string(bs), "\n") {
+		line := strings.TrimSpace(raw)
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if line == "" {
+			continue
+		}
+		colon := strings.IndexByte(line, ':')
+		if colon < 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(line[:colon]))
+		val := strings.TrimSpace(line[colon+1:])
+		switch key {
+		case "user-agent":
+			if len(curAgents) > 0 && len(p.rules[curAgents[0]]) > 0 {
+				curAgents = []string{val}
+			} else {
+				curAgents = append(curAgents, val)
+			}
+			if _, ok := p.rules[val]; !ok {
+				p.rules[val] = []__RobotRule{}
+			}
+		case "allow":
+			for _, ag := range curAgents {
+				p.rules[ag] = append(p.rules[ag], __RobotRule{allow: true, path: val})
+			}
+		case "disallow":
+			for _, ag := range curAgents {
+				p.rules[ag] = append(p.rules[ag], __RobotRule{allow: false, path: val})
+			}
+		}
+	}
+}
+
+func (p *__RobotFileParser) Can_fetch(useragent, url string) bool {
+	if p.failed {
+		return true
+	}
+	if p.rules == nil {
+		return false
+	}
+	path := url
+	if i := strings.Index(url, "://"); i >= 0 {
+		if j := strings.IndexByte(url[i+3:], '/'); j >= 0 {
+			path = url[i+3+j:]
+		} else {
+			path = "/"
+		}
+	}
+	candidates := [][]__RobotRule{}
+	if rs, ok := p.rules[useragent]; ok {
+		candidates = append(candidates, rs)
+	}
+	if rs, ok := p.rules["*"]; ok {
+		candidates = append(candidates, rs)
+	}
+	for _, rules := range candidates {
+		for _, r := range rules {
+			if r.path == "" {
+				continue
+			}
+			if strings.HasPrefix(path, r.path) {
+				return r.allow
+			}
+		}
+		return true
+	}
+	return true
+}
+
+func (p *__RobotFileParser) Mtime() int64           { return 0 }
+func (p *__RobotFileParser) Modified()              {}
+func (p *__RobotFileParser) Crawl_delay(a string) any { return nil }
+func (p *__RobotFileParser) Request_rate(a string) any { return nil }
+func (p *__RobotFileParser) Site_maps() []string    { return []string{} }`
+
+const helperRobotFileParserNew = `func __gopy_urllib_robot_new(args ...any) *__RobotFileParser {
+	p := &__RobotFileParser{}
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok {
+			p.url = s
+		}
+	}
+	return p
 }`
 
 // time.get_clock_info(name): CPython returns a namedtuple. gopy returns

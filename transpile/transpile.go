@@ -7151,6 +7151,16 @@ var taggedMethodRename = map[string]map[string]string{
 		"format_field":      "Format_field",
 		"convert_field":     "Convert_field",
 	},
+	"__RobotFileParser": {
+		"set_url":      "Set_url",
+		"read":         "Read",
+		"can_fetch":    "Can_fetch",
+		"mtime":        "Mtime",
+		"modified":     "Modified",
+		"crawl_delay":  "Crawl_delay",
+		"request_rate": "Request_rate",
+		"site_maps":    "Site_maps",
+	},
 	"__Unpickler": {
 		"load":       "Load",
 		"find_class": "Find_class",
