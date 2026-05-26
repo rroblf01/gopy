@@ -50,25 +50,25 @@ var stdlibModules = map[string]stdlibModule{
 			"getsizeof":          {GoFunc: "__gopy_sys_getsizeof", Helper: helperSysGetsizeof, HelperImports: []string{"unsafe", "reflect"}, RetKind: "int"},
 			"intern":             {GoFunc: "__gopy_sys_intern", Helper: helperSysIntern, RetKind: "str"},
 			"exc_info":           {GoFunc: "__gopy_sys_exc_info", Helper: helperSysExcInfo},
-			"setrecursionlimit":  {GoFunc: "__gopy_sys_setrecursion_unused"},
+			"setrecursionlimit":  {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
 			"getrecursionlimit":  {GoFunc: "__gopy_sys_getrecursion", Helper: helperSysGetRecursion, RetKind: "int"},
 			"getrefcount":        {GoFunc: "__gopy_sys_getrefcount", Helper: helperSysGetRefcount, RetKind: "int"},
 			"getdefaultencoding": {GoFunc: "__gopy_sys_getenc", Helper: helperSysGetEnc, RetKind: "str"},
 			"getfilesystemencoding": {GoFunc: "__gopy_sys_getfsenc", Helper: helperSysGetFsenc, RetKind: "str"},
-			"set_int_max_str_digits": {GoFunc: "__gopy_sys_setintmax_unused"},
+			"set_int_max_str_digits": {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
 			"get_int_max_str_digits": {GoFunc: "__gopy_sys_getintmax", Helper: helperSysGetIntMaxDigits, RetKind: "int"},
-			"settrace":           {GoFunc: "__gopy_sys_settrace_unused"},
-			"setprofile":         {GoFunc: "__gopy_sys_setprofile_unused"},
-			"gettrace":           {GoFunc: "__gopy_sys_gettrace_unused"},
-			"getprofile":         {GoFunc: "__gopy_sys_getprofile_unused"},
-			"audit":              {GoFunc: "__gopy_sys_audit_unused"},
-			"breakpointhook":     {GoFunc: "__gopy_sys_breakpoint_unused"},
-			"displayhook":        {GoFunc: "__gopy_sys_displayhook_unused"},
-			"excepthook":         {GoFunc: "__gopy_sys_excepthook_unused"},
-			"unraisablehook":     {GoFunc: "__gopy_sys_unraisable_unused"},
+			"settrace":           {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
+			"setprofile":         {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
+			"gettrace":           {GoFunc: "__gopy_sys_noret", Helper: helperSysNoret},
+			"getprofile":         {GoFunc: "__gopy_sys_noret", Helper: helperSysNoret},
+			"audit":              {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
+			"breakpointhook":     {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
+			"displayhook":        {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
+			"excepthook":         {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
+			"unraisablehook":     {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
 			"getswitchinterval":  {GoFunc: "__gopy_sys_getswitch", Helper: helperSysGetSwitch, RetKind: "float"},
-			"setswitchinterval":  {GoFunc: "__gopy_sys_setswitch_unused"},
-			"_getframe":          {GoFunc: "__gopy_sys_getframe_unused"},
+			"setswitchinterval":  {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
+			"_getframe":          {GoFunc: "__gopy_sys_noret", Helper: helperSysNoret},
 			"getallocatedblocks": {GoFunc: "__gopy_sys_alloc", Helper: helperSysGetAllocated, RetKind: "int"},
 			"is_finalizing":      {GoFunc: "__gopy_sys_isfin", Helper: helperSysIsFinalizing, RetKind: "bool"},
 		},
@@ -253,10 +253,10 @@ var stdlibModules = map[string]stdlibModule{
 			"tzset":            {GoFunc: "__gopy_time_tzset", Helper: helperTimeTzset, HelperImports: []string{"os", "time"}},
 			"clock_gettime":    {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
 			"clock_gettime_ns": {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
-			"clock_settime":    {GoFunc: "__gopy_time_clock_settime_unused"},
-			"clock_settime_ns": {GoFunc: "__gopy_time_clock_settime_unused"},
+			"clock_settime":    {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
+			"clock_settime_ns": {GoFunc: "__gopy_sys_noop", Helper: helperSysNoop},
 			"clock_getres":     {GoFunc: "__gopy_time_clockres", Helper: helperTimeClockres, RetKind: "float"},
-			"get_clock_info":   {GoFunc: "__gopy_time_clockinfo_unused"},
+			"get_clock_info":   {GoFunc: "__gopy_time_clock_info", Helper: helperTimeClockInfo},
 		},
 	},
 	"json": {
@@ -7458,6 +7458,25 @@ const helperOsSetBlocking = `func __gopy_os_set_blocking(fd int64, blocking bool
 	__gopy_os_blocking_mu.Lock()
 	__gopy_os_blocking_state[fd] = blocking
 	__gopy_os_blocking_mu.Unlock()
+}`
+
+// Generic no-op hooks for sys/time stubs that have no Go equivalent.
+// __gopy_sys_noop drops every arg silently; __gopy_sys_noret returns nil
+// for getter-shaped CPython hooks (gettrace, getprofile, _getframe, etc.)
+// so call expressions evaluate cleanly without changing program state.
+const helperSysNoop = `func __gopy_sys_noop(args ...any) {}`
+const helperSysNoret = `func __gopy_sys_noret(args ...any) any { return nil }`
+
+// time.get_clock_info(name): CPython returns a namedtuple. gopy returns
+// a map with the same field names so attribute access via .Get(key)
+// works. Defaults: adjustable=False, implementation=Go runtime, monotonic.
+const helperTimeClockInfo = `func __gopy_time_clock_info(args ...any) map[string]any {
+	return map[string]any{
+		"adjustable":     false,
+		"implementation": "Go runtime",
+		"monotonic":      true,
+		"resolution":     float64(1e-9),
+	}
 }`
 
 const helperOsGetBlocking = `func __gopy_os_get_blocking(fd int64) bool {
