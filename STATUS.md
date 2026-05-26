@@ -24,7 +24,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - Builtins: `print`, `len`, `str`, `int`, `float`, `bool`, `range`, `sorted`, `sum`, `min`, `max`, `any`, `all`, `reversed`, `abs`, `round`, `isinstance` (single class or tuple-of-classes), `issubclass`, `pow`, `chr`, `ord`, `repr`, `divmod`, `getattr`, `setattr`, `hasattr`, `list` (iterator materialization — pass-through in the gopy shim), `iter`, `next(it[, default])`, `id`, `hash`
 - Slicing: `xs[a:b]`, `xs[a:]`, `xs[:b]`, `xs[:]`, `xs[a:b:step]`, and negative bounds (`xs[-3:]`, `xs[::-1]`) — routed through a runtime helper for non-trivial cases, fast path for simple bounds
 - Tuple literals as values (`pair = (1, 2)`) — lowered to a slice; iteration and indexing work
-- Set literals `{1, 2, 3}` — lower to the same slice shape; `in` / `not in` work, uniqueness not enforced
+- Set literals `{1, 2, 3}` — lower to the same slice shape; `in` / `not in` work, uniqueness not enforced. `set.add(x)` now dedups (contains-check + conditional `append`) and `set.discard(x)` removes if present (search + slice-out). Both rewrites require the receiver to be addressable
 - `in` / `not in` operators on strings (`strings.Contains`), dicts (comma-ok lookup), and lists (inline scan with element-type cast)
 - Augmented list concat (`xs += ys`) → `append(xs, ys...)`
 - String methods: `.upper()`, `.lower()`, `.strip([chars])`, `.lstrip([chars])`, `.rstrip([chars])`, `.split([sep])`, `sep.join(parts)`, `.replace(old, new)`, `.startswith(s)`, `.endswith(s)`, `.find(s)`, `.count(sub)`, `.title()`, `.capitalize()`, `.center(width[, fillchar])`, `.ljust(width[, fillchar])`, `.rjust(width[, fillchar])`, `.zfill(width)` — chained calls infer through return types

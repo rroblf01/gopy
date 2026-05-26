@@ -9135,6 +9135,42 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			return nil
 		}
 	}
+	// set.add(x) / set.discard(x) — gopy uses slices for sets, so add
+	// becomes a contains-check + conditional append, and discard becomes
+	// a search + remove. The receiver must be addressable for the
+	// rewrite to take effect.
+	if m.Method == "add" || m.Method == "discard" {
+		recvTy := g.effectiveType(m.Recv)
+		if recvTy != nil && recvTy.Kind == ir.TyList {
+			if len(m.Args) != 1 {
+				return fmt.Errorf("set.%s() takes exactly 1 argument", m.Method)
+			}
+			elemGo := g.goType(recvTy.Elem)
+			if m.Method == "add" {
+				g.writef("func() { __s := &(")
+				if err := g.expr(m.Recv); err != nil {
+					return err
+				}
+				g.writef("); var __v %s = ", elemGo)
+				if err := g.expr(m.Args[0]); err != nil {
+					return err
+				}
+				g.writef("; for _, __e := range *__s { if __e == __v { return } }; *__s = append(*__s, __v) }()")
+				return nil
+			}
+			// discard
+			g.writef("func() { __s := &(")
+			if err := g.expr(m.Recv); err != nil {
+				return err
+			}
+			g.writef("); var __v %s = ", elemGo)
+			if err := g.expr(m.Args[0]); err != nil {
+				return err
+			}
+			g.writef("; for __i, __e := range *__s { if __e == __v { *__s = append((*__s)[:__i], (*__s)[__i+1:]...); return } } }()")
+			return nil
+		}
+	}
 	// list.append(x) — Python mutates in place; Go's append returns a new slice
 	// and we must reassign. This is only safe when the receiver is an addressable
 	// expression like a Name or attribute; F2 enforces that.
