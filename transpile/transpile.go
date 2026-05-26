@@ -1931,11 +1931,11 @@ const helperGopyInt = `func __gopy_int(v any) int64 {
 	case string:
 		n, err := strconv.ParseInt(x, 10, 64)
 		if err != nil {
-			panic(err)
+			panic(NewException("ValueError: invalid literal for int(): " + x))
 		}
 		return n
 	}
-	panic("int(): unsupported type")
+	panic(NewException("TypeError: int(): unsupported type"))
 }`
 
 const helperGopyFloat = `func __gopy_float(v any) float64 {
@@ -1949,11 +1949,11 @@ const helperGopyFloat = `func __gopy_float(v any) float64 {
 	case string:
 		n, err := strconv.ParseFloat(x, 64)
 		if err != nil {
-			panic(err)
+			panic(NewException("ValueError: invalid literal for float(): " + x))
 		}
 		return n
 	}
-	panic("float(): unsupported type")
+	panic(NewException("TypeError: float(): unsupported type"))
 }`
 
 // helperPyPrint imitates Python's print(): bools render as "True"/"False",
@@ -2963,6 +2963,17 @@ func (g *gen) localFunc(lf *ir.LocalFunc) error {
 		g.currentFn = prevCurrentFn
 		return err
 	}
+	// Same trailing-panic guard as top-level funcs: if the body ends
+	// with a `try` whose paths all return, Go's flow analysis can't see
+	// through the IIFE wrapper and complains about a missing return.
+	if fn.Ret != nil && fn.Ret.Kind != ir.TyNone && fn.Ret.Kind != ir.TyUnknown {
+		if last := lastStmt(fn.Body); last != nil {
+			if t, ok := last.(*ir.Try); ok && tryContainsReturn(t) {
+				g.writeIndent()
+				g.writef("panic(\"gopy: try fell through without returning\")\n")
+			}
+		}
+	}
 	g.currentFn = prevCurrentFn
 	g.indent--
 	g.writeIndent()
@@ -3497,6 +3508,9 @@ func tryContainsReturn(t *ir.Try) bool {
 }
 
 func (g *gen) try(t *ir.Try) error {
+	// Try always emits `r.(*Exception)` in the recover block, so flag
+	// the Exception base for inclusion.
+	g.needsException = true
 	// If the body / handlers / finally contain `return`, declare local
 	// retval+flag vars, push a tryReturnCtx so nested *ir.Return emits
 	// `flag = true; return` (and writes the value into retval first),
@@ -14918,6 +14932,29 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		}
 		g.writef(")")
 		return true, nil
+	case "format_map":
+		// str.format_map(d) is str.format(**d) — pass the dict positionally
+		// to the same helper which uses it as the kwargs map.
+		if len(m.Args) != 1 {
+			return true, fmt.Errorf("str.format_map() requires exactly one mapping argument")
+		}
+		g.addImport("strings")
+		g.addImport("fmt")
+		g.addImport("reflect")
+		g.addImport("strconv")
+		g.helpers["__gopy_str_format"] = helperStrFormat
+		g.helpers["__gopy_repr"] = helperGopyRepr
+		g.writef("__gopy_str_format(")
+		if err := g.expr(m.Recv); err != nil {
+			return true, err
+		}
+		g.writef(", __gopy_dict_to_any(")
+		if err := g.expr(m.Args[0]); err != nil {
+			return true, err
+		}
+		g.writef("))")
+		g.helpers["__gopy_dict_to_any"] = helperDictToAny
+		return true, nil
 	case "lstrip":
 		g.addImport("strings")
 		if len(m.Args) == 0 {
@@ -15491,6 +15528,41 @@ const helperStrRpartition = `func __gopy_str_rpartition(s, sep string) []string 
 		return []string{"", "", s}
 	}
 	return []string{s[:i], sep, s[i+len(sep):]}
+}`
+
+const helperDictToAny = `func __gopy_dict_to_any(d any) map[string]any {
+	if d == nil {
+		return map[string]any{}
+	}
+	switch m := d.(type) {
+	case map[string]any:
+		return m
+	case map[string]int64:
+		out := make(map[string]any, len(m))
+		for k, v := range m { out[k] = v }
+		return out
+	case map[string]float64:
+		out := make(map[string]any, len(m))
+		for k, v := range m { out[k] = v }
+		return out
+	case map[string]string:
+		out := make(map[string]any, len(m))
+		for k, v := range m { out[k] = v }
+		return out
+	case map[string]bool:
+		out := make(map[string]any, len(m))
+		for k, v := range m { out[k] = v }
+		return out
+	}
+	rv := reflect.ValueOf(d)
+	if rv.Kind() == reflect.Map {
+		out := make(map[string]any, rv.Len())
+		for _, k := range rv.MapKeys() {
+			out[fmt.Sprintf("%v", k.Interface())] = rv.MapIndex(k).Interface()
+		}
+		return out
+	}
+	return map[string]any{}
 }`
 
 const helperStrFormat = `func __gopy_str_format(s string, kw map[string]any, args ...any) string {

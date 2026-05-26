@@ -19,6 +19,14 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 	// so `from itertools import chain` inside `def main():` still
 	// registers the alias before name resolution runs.
 	collectNestedImports(root, m)
+	// Pre-pass: hoist class definitions nested inside function bodies
+	// to module scope. CPython resolves the inner class through closure
+	// capture; gopy emits them as top-level structs since Go has no
+	// inline struct-with-methods. Method bodies still access enclosing
+	// locals only when explicitly captured.
+	if err := hoistNestedClasses(root, m); err != nil {
+		return nil, fmt.Errorf("%s: %v", modName, err)
+	}
 	for _, stmt := range root.Children("body") {
 		if isMainGuard(stmt) {
 			// `if __name__ == "__main__":` — Go runs main() automatically,
@@ -58,6 +66,67 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 		m.Decls = append(m.Decls, decls...)
 	}
 	return m, nil
+}
+
+// hoistNestedClasses walks function bodies recursively and hoists any
+// `class Foo: ...` definitions into the module's decl list. The parser
+// node is mutated in place so subsequent stmt-level lowering doesn't
+// emit anything for them (they become a no-op at the original
+// location). Top-level classes are unaffected — they're lowered through
+// the normal lowerTopLevel path.
+func hoistNestedClasses(root parser.Node, m *Module) error {
+	if root == nil {
+		return nil
+	}
+	var walk func(n parser.Node, insideFunc bool) error
+	walk = func(n parser.Node, insideFunc bool) error {
+		if n == nil {
+			return nil
+		}
+		switch n.Type() {
+		case "FunctionDef", "AsyncFunctionDef":
+			body := n.Children("body")
+			kept := make([]any, 0, len(body))
+			rawBody := n["body"].([]any)
+			for i, s := range body {
+				if s.Type() == "ClassDef" {
+					decls, err := lowerClass(s)
+					if err != nil {
+						return err
+					}
+					m.Decls = append(m.Decls, decls...)
+					continue
+				}
+				if err := walk(s, true); err != nil {
+					return err
+				}
+				kept = append(kept, rawBody[i])
+			}
+			n["body"] = kept
+			return nil
+		case "ClassDef":
+			for _, s := range n.Children("body") {
+				if err := walk(s, false); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		for _, key := range []string{"body", "orelse", "finalbody", "handlers"} {
+			for _, child := range n.Children(key) {
+				if err := walk(child, insideFunc); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	for _, stmt := range root.Children("body") {
+		if err := walk(stmt, false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // collectNestedImports walks function / class bodies looking for Import
@@ -2203,14 +2272,26 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 					highExpr = &Call{Func: &Name{N: "len"}, Args: []Expr{&Name{N: targetName}}}
 				}
 				// New value: list literal whose first chunk is xs[:low],
-				// then spread of RHS, then xs[high:].
-				prefix := &Slice{Value: &Name{N: targetName}, High: lowExpr}
-				suffix := &Slice{Value: &Name{N: targetName}, Low: highExpr}
+				// then spread of RHS, then xs[high:]. Propagate the
+				// target's static type to the rebuilt ListLit so an
+				// empty-list RHS (`xs[1:3] = []`) doesn't collapse to
+				// `[]any{}`.
+				tgtTy, _ := sc.lookup(targetName)
+				var elemTy *Type
+				if tgtTy != nil && tgtTy.Kind == TyList {
+					elemTy = tgtTy.Elem
+				}
+				prefix := &Slice{Value: &Name{N: targetName}, High: lowExpr, Ty: tgtTy}
+				suffix := &Slice{Value: &Name{N: targetName}, Low: highExpr, Ty: tgtTy}
+				if ll, ok := val.(*ListLit); ok && elemTy != nil {
+					ll.ElemTy = elemTy
+					ll.Ty = tgtTy
+				}
 				rebuilt := &ListLit{Elems: []Expr{
 					&Starred{Value: prefix},
 					&Starred{Value: val},
 					&Starred{Value: suffix},
-				}}
+				}, ElemTy: elemTy, Ty: tgtTy}
 				return &Assign{Target: targetName, Value: rebuilt, Decl: false}, nil
 			}
 			obj, err := lowerExpr(tgt.Child("value"), sc)
