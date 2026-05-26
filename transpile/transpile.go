@@ -1148,6 +1148,25 @@ func (g *gen) stmt(s ir.Stmt) error {
 				return nil
 			}
 		}
+		// Tagged stdlib subscript set — e.g. `sh[k] = v` on a __Shelf.
+		if tag := g.exprTag(x.Target); tag != "" {
+			if setter, ok := taggedSubscriptSet[tag]; ok {
+				g.writeIndent()
+				if err := g.expr(x.Target); err != nil {
+					return err
+				}
+				g.writef(".%s(", setter)
+				if err := g.expr(x.Index); err != nil {
+					return err
+				}
+				g.writef(", ")
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef(")\n")
+				return nil
+			}
+		}
 		g.writeIndent()
 		if err := g.expr(x.Target); err != nil {
 			return err
@@ -2044,6 +2063,20 @@ func (g *gen) delStmt(d *ir.Del) error {
 	for _, t := range d.Targets {
 		switch x := t.(type) {
 		case *ir.Subscript:
+			if tag := g.exprTag(x.Value); tag != "" {
+				if delM, ok := taggedSubscriptDel[tag]; ok {
+					g.writeIndent()
+					if err := g.expr(x.Value); err != nil {
+						return err
+					}
+					g.writef(".%s(", delM)
+					if err := g.expr(x.Index); err != nil {
+						return err
+					}
+					g.writef(")\n")
+					continue
+				}
+			}
 			recvTy := g.effectiveType(x.Value)
 			g.writeIndent()
 			if recvTy != nil && recvTy.Kind == ir.TyDict {
@@ -2600,6 +2633,64 @@ func (g *gen) emitNamedTempFile(call *ir.Call, varName string, body []ir.Stmt) e
 	return nil
 }
 
+// emitTempFile lowers `with tempfile.TemporaryFile(...) as f:` to an
+// IIFE that creates an anonymous temp file via os.CreateTemp, exposes
+// it as a *os.File (same shape as `with open(...) as f:`), and defers
+// Close + Remove on block exit.
+func (g *gen) emitTempFile(call *ir.Call, varName string, body []ir.Stmt) error {
+	g.addImport("os")
+	prefix := ""
+	suffix := ""
+	for _, kw := range call.Keywords {
+		switch kw.Name {
+		case "prefix":
+			if sl, ok := kw.Value.(*ir.StrLit); ok {
+				prefix = sl.V
+			}
+		case "suffix":
+			if sl, ok := kw.Value.(*ir.StrLit); ok {
+				suffix = sl.V
+			}
+		}
+	}
+	g.writeIndent()
+	g.writef("func() {\n")
+	g.indent++
+	g.writeIndent()
+	g.writef("__tf, __err := os.CreateTemp(\"\", %q+\"*\"+%q)\n", prefix, suffix)
+	g.writeIndent()
+	g.writef("if __err != nil { panic(__err) }\n")
+	g.writeIndent()
+	g.writef("defer os.Remove(__tf.Name())\n")
+	g.writeIndent()
+	g.writef("defer __tf.Close()\n")
+	if varName != "" {
+		g.writeIndent()
+		g.writef("%s := __tf\n", varName)
+		g.writeIndent()
+		g.writef("_ = %s\n", varName)
+		prev := g.fileVars[varName]
+		g.fileVars[varName] = true
+		defer func() {
+			if prev {
+				g.fileVars[varName] = true
+			} else {
+				delete(g.fileVars, varName)
+			}
+		}()
+	} else {
+		g.writeIndent()
+		g.writef("_ = __tf\n")
+	}
+	if err := g.stmts(body); err != nil {
+		return err
+	}
+	g.indent--
+	g.writeIndent()
+	g.writef("}()\n")
+	return nil
+}
+
 func (g *gen) withCM(w *ir.WithCM) error {
 	// contextlib.suppress(ExcA, ExcB, ...) — swallow panics whose
 	// Exception message prefix matches any of the listed classes.
@@ -2619,6 +2710,8 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitTempDir(call, w.VarName, w.Body)
 			case "tempfile.NamedTemporaryFile":
 				return g.emitNamedTempFile(call, w.VarName, w.Body)
+			case "tempfile.TemporaryFile":
+				return g.emitTempFile(call, w.VarName, w.Body)
 			case "gzip.open":
 				return g.emitGzipOpen(call, w.VarName, w.Body)
 			case "os.scandir":
@@ -2643,6 +2736,8 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitTempDir(synth, w.VarName, w.Body)
 			case "tempfile.NamedTemporaryFile":
 				return g.emitNamedTempFile(synth, w.VarName, w.Body)
+			case "tempfile.TemporaryFile":
+				return g.emitTempFile(synth, w.VarName, w.Body)
 			case "gzip.open":
 				return g.emitGzipOpen(synth, w.VarName, w.Body)
 			case "os.scandir":
@@ -4985,6 +5080,21 @@ func (g *gen) expr(e ir.Expr) error {
 				return nil
 			}
 		}
+		// Tagged stdlib subscript get — e.g. `sh[k]` on a __Shelf binding
+		// dispatches to .Get(key). Returns `any`.
+		if tag := g.exprTag(x.Value); tag != "" {
+			if getter, ok := taggedSubscriptGet[tag]; ok {
+				if err := g.expr(x.Value); err != nil {
+					return err
+				}
+				g.writef(".%s(", getter)
+				if err := g.expr(x.Index); err != nil {
+					return err
+				}
+				g.writef(")")
+				return nil
+			}
+		}
 		// Negative literal index on a list-typed receiver: `xs[-1]` →
 		// `xs[len(xs)-1]`. Go rejects negative constant indices at compile
 		// time, so we rewrite when the IR carries a negative literal.
@@ -6128,6 +6238,16 @@ func (g *gen) call(c *ir.Call) error {
 						return err
 					}
 					g.writef(".Len()")
+					return nil
+				}
+			}
+			// Tagged stdlib container → call Len method.
+			if tag := g.exprTag(c.Args[0]); tag != "" {
+				if lenM, ok := taggedLen[tag]; ok {
+					if err := g.expr(c.Args[0]); err != nil {
+						return err
+					}
+					g.writef(".%s()", lenM)
 					return nil
 				}
 			}
@@ -7347,6 +7467,29 @@ var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 		"minute": {GoName: "Minute", Ty: &ir.Type{Kind: ir.TyInt}},
 		"second": {GoName: "Second", Ty: &ir.Type{Kind: ir.TyInt}},
 	},
+}
+
+// taggedSubscriptGet / Set / Del / Contains / Len route Python-style
+// `recv[k]`, `recv[k] = v`, `del recv[k]`, `k in recv`, `len(recv)`
+// on tagged stdlib receivers to the matching Go method on the shim.
+var taggedSubscriptGet = map[string]string{
+	"__Shelf": "Get",
+}
+
+var taggedSubscriptSet = map[string]string{
+	"__Shelf": "Set",
+}
+
+var taggedSubscriptDel = map[string]string{
+	"__Shelf": "Delete",
+}
+
+var taggedContains = map[string]string{
+	"__Shelf": "Contains",
+}
+
+var taggedLen = map[string]string{
+	"__Shelf": "Len",
 }
 
 var taggedAttrs = map[string]map[string]taggedAttrInfo{
@@ -15539,6 +15682,27 @@ func (g *gen) emitInOp(x *ir.CmpOp) error {
 				return err
 			}
 			g.writef(".Contains(")
+			if err := g.expr(x.L); err != nil {
+				return err
+			}
+			g.writef(")")
+			if negate {
+				g.writef(")")
+			}
+			return nil
+		}
+	}
+	// Tagged stdlib container — `k in sh` on a __Shelf binding routes
+	// through `sh.Contains(k)`.
+	if tag := g.exprTag(x.R); tag != "" {
+		if cM, ok := taggedContains[tag]; ok {
+			if negate {
+				g.writef("(!")
+			}
+			if err := g.expr(x.R); err != nil {
+				return err
+			}
+			g.writef(".%s(", cM)
 			if err := g.expr(x.L); err != nil {
 				return err
 			}

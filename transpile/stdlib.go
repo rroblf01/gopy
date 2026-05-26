@@ -419,6 +419,7 @@ var stdlibModules = map[string]stdlibModule{
 			"which":             {GoFunc: "__gopy_shutil_which", Helper: helperShutilWhich, HelperImports: []string{"os/exec"}, RetKind: "str"},
 			"disk_usage":        {GoFunc: "__gopy_shutil_diskusage", Helper: helperShutilDiskUsage},
 			"get_terminal_size": {GoFunc: "__gopy_shutil_terminal_size", Helper: helperShutilTerminalSize},
+			"make_archive":      {GoFunc: "__gopy_shutil_make_archive", Helper: helperShutilMakeArchive, HelperImports: []string{"archive/tar", "archive/zip", "compress/gzip", "io", "os", "path/filepath"}, RetKind: "str"},
 		},
 	},
 	"tempfile": {
@@ -432,6 +433,7 @@ var stdlibModules = map[string]stdlibModule{
 			// stdlib helper call would be emitted.
 			"TemporaryDirectory":  {GoFunc: "__gopy_tempdir_unused"},
 			"NamedTemporaryFile":  {GoFunc: "__gopy_namedtempfile_unused"},
+			"TemporaryFile":       {GoFunc: "__gopy_tempfile_unused"},
 			"SpooledTemporaryFile": {GoFunc: "__gopy_spooled_tempfile_new", Helper: helperSpooledTempfileNew, RetTag: "__SpooledTempFile", ExtraHelpers: map[string]string{"__SpooledTempFile": helperSpooledTempfileType}, HelperImports: []string{"strings"}},
 		},
 	},
@@ -1587,6 +1589,7 @@ var stdlibModules = map[string]stdlibModule{
 	"getpass": {
 		Funcs: map[string]stdlibFunc{
 			"getuser": {GoFunc: "__gopy_getpass_getuser", GoImport: "os", Helper: helperGetpassGetuser, RetKind: "str"},
+			"getpass": {GoFunc: "__gopy_getpass_getpass", Helper: helperGetpassGetpass, HelperImports: []string{"bufio", "fmt", "os"}, RetKind: "str"},
 		},
 	},
 	"typing": {
@@ -2631,7 +2634,7 @@ var stdlibModules = map[string]stdlibModule{
 			"PIPE_BUF": {GoExpr: "int64(4096)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"select":  {GoFunc: "__gopy_select_unused"},
+			"select":  {GoFunc: "__gopy_select_select", Helper: helperSelectSelect},
 			"poll":    {GoFunc: "__gopy_select_unused"},
 			"epoll":   {GoFunc: "__gopy_select_unused"},
 			"kqueue":  {GoFunc: "__gopy_select_unused"},
@@ -8140,6 +8143,10 @@ func (s *__Shelf) Keys() []string {
 	return out
 }
 
+func (s *__Shelf) Len() int64 {
+	return int64(len(s.data))
+}
+
 func (s *__Shelf) Sync() {
 	if s.path == "" {
 		return
@@ -12079,4 +12086,160 @@ func __gopy_tomllib_split(s string) []string {
 		out = append(out, cur)
 	}
 	return out
+}`
+
+// helperGetpassGetpass — read a line from stdin without echo control.
+// Go's stdlib has no termios; the read still works for piped input but
+// the prompt is visible on a real TTY.
+const helperGetpassGetpass = `func __gopy_getpass_getpass(args ...string) string {
+	prompt := "Password: "
+	if len(args) > 0 && args[0] != "" {
+		prompt = args[0]
+	}
+	fmt.Fprint(os.Stderr, prompt)
+	sc := bufio.NewScanner(os.Stdin)
+	if sc.Scan() {
+		return sc.Text()
+	}
+	return ""
+}`
+
+// helperSelectSelect — synchronous stub that immediately reports every
+// rlist entry as ready. wlist/xlist mirror as "ready" for symmetry; the
+// timeout argument is ignored. Returns [rlist, wlist, xlist].
+const helperSelectSelect = `func __gopy_select_select(args ...any) []any {
+	asSlice := func(v any) []any {
+		switch x := v.(type) {
+		case []any:
+			return x
+		case []int64:
+			out := make([]any, len(x))
+			for i, n := range x {
+				out[i] = n
+			}
+			return out
+		case []string:
+			out := make([]any, len(x))
+			for i, s := range x {
+				out[i] = s
+			}
+			return out
+		}
+		return []any{}
+	}
+	rl := []any{}
+	wl := []any{}
+	xl := []any{}
+	if len(args) > 0 {
+		rl = asSlice(args[0])
+	}
+	if len(args) > 1 {
+		wl = asSlice(args[1])
+	}
+	if len(args) > 2 {
+		xl = asSlice(args[2])
+	}
+	return []any{rl, wl, xl}
+}`
+
+// helperShutilMakeArchive — bundle a directory into tar / gztar / zip.
+// Returns the produced archive path. format must be one of those three.
+const helperShutilMakeArchive = `func __gopy_shutil_make_archive(base string, format string, args ...string) string {
+	root := "."
+	if len(args) > 0 && args[0] != "" {
+		root = args[0]
+	}
+	addAll := func(walkFn func(rel string, info os.FileInfo, full string) error) error {
+		return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, rerr := filepath.Rel(root, path)
+			if rerr != nil {
+				return rerr
+			}
+			if rel == "." {
+				return nil
+			}
+			return walkFn(rel, info, path)
+		})
+	}
+	switch format {
+	case "zip":
+		out := base + ".zip"
+		f, err := os.Create(out)
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		defer f.Close()
+		zw := zip.NewWriter(f)
+		defer zw.Close()
+		if err := addAll(func(rel string, info os.FileInfo, full string) error {
+			if info.IsDir() {
+				_, werr := zw.Create(rel + "/")
+				return werr
+			}
+			w, werr := zw.Create(rel)
+			if werr != nil {
+				return werr
+			}
+			src, ferr := os.Open(full)
+			if ferr != nil {
+				return ferr
+			}
+			defer src.Close()
+			_, cerr := io.Copy(w, src)
+			return cerr
+		}); err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		return out
+	case "tar", "gztar":
+		ext := ".tar"
+		if format == "gztar" {
+			ext = ".tar.gz"
+		}
+		out := base + ext
+		f, err := os.Create(out)
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		defer f.Close()
+		var dst io.Writer = f
+		var gw *gzip.Writer
+		if format == "gztar" {
+			gw = gzip.NewWriter(f)
+			defer gw.Close()
+			dst = gw
+		}
+		tw := tar.NewWriter(dst)
+		defer tw.Close()
+		if err := addAll(func(rel string, info os.FileInfo, full string) error {
+			hdr, herr := tar.FileInfoHeader(info, "")
+			if herr != nil {
+				return herr
+			}
+			hdr.Name = rel
+			if info.IsDir() {
+				hdr.Name += "/"
+			}
+			if werr := tw.WriteHeader(hdr); werr != nil {
+				return werr
+			}
+			if info.IsDir() {
+				return nil
+			}
+			src, ferr := os.Open(full)
+			if ferr != nil {
+				return ferr
+			}
+			defer src.Close()
+			_, cerr := io.Copy(tw, src)
+			return cerr
+		}); err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		return out
+	}
+	panic(NewException("ValueError: unknown archive format: " + format))
 }`
