@@ -7137,6 +7137,14 @@ var taggedMethodRename = map[string]map[string]string{
 		"on_data":        "On_data",
 		"on_startendtag": "On_startendtag",
 	},
+	"__Pickler": {
+		"dump":       "Dump",
+		"clear_memo": "Clear_memo",
+	},
+	"__Unpickler": {
+		"load":       "Load",
+		"find_class": "Find_class",
+	},
 	"__Popen": {
 		"wait":        "Wait",
 		"communicate": "Communicate",

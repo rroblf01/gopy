@@ -155,6 +155,8 @@ var stdlibModules = map[string]stdlibModule{
 			"uname":     {GoFunc: "__gopy_os_uname", Helper: helperOsUname, HelperImports: []string{"os", "runtime"}},
 			"statvfs":   {GoFunc: "__gopy_os_statvfs", Helper: helperOsStatvfs, HelperImports: []string{"syscall"}},
 			"sync":      {GoFunc: "__gopy_os_sync", Helper: helperOsSync, HelperImports: []string{"syscall"}},
+			"set_blocking": {GoFunc: "__gopy_os_set_blocking", Helper: helperOsSetBlocking, ExtraHelpers: map[string]string{"__gopy_os_blocking_state": helperOsBlockingState}, HelperImports: []string{"syscall", "sync"}},
+			"get_blocking": {GoFunc: "__gopy_os_get_blocking", Helper: helperOsGetBlocking, ExtraHelpers: map[string]string{"__gopy_os_blocking_state": helperOsBlockingState}, HelperImports: []string{"syscall", "sync"}, RetKind: "bool"},
 			"sysconf":   {GoFunc: "__gopy_os_sysconf", Helper: helperOsSysconf, RetKind: "int"},
 			"pipe":      {GoFunc: "__gopy_os_pipe", Helper: helperOsPipe, HelperImports: []string{"os"}},
 			"dup":       {GoFunc: "__gopy_os_dup", Helper: helperOsDup, HelperImports: []string{"syscall"}, RetKind: "int"},
@@ -735,8 +737,8 @@ var stdlibModules = map[string]stdlibModule{
 			"loads":     {GoFunc: "__gopy_pickle_loads", Helper: helperPickleLoads, HelperImports: []string{"encoding/json"}},
 			"dump":      {GoFunc: "__gopy_pickle_dump", Helper: helperPickleDump, ExtraHelpers: map[string]string{"__gopy_pickle_dumps": helperPickleDumps}, HelperImports: []string{"encoding/json", "io"}},
 			"load":      {GoFunc: "__gopy_pickle_load", Helper: helperPickleLoad, ExtraHelpers: map[string]string{"__gopy_pickle_loads": helperPickleLoads}, HelperImports: []string{"encoding/json", "io"}},
-			"Pickler":   {GoFunc: "__gopy_pickle_pickler_unused"},
-			"Unpickler": {GoFunc: "__gopy_pickle_unpickler_unused"},
+			"Pickler":   {GoFunc: "__gopy_pickler_new", Helper: helperPicklerNew, RetTag: "__Pickler", ExtraHelpers: map[string]string{"__Pickler": helperPicklerType, "__gopy_pickle_dump": helperPickleDump, "__gopy_pickle_dumps": helperPickleDumps}, HelperImports: []string{"encoding/json", "io"}},
+			"Unpickler": {GoFunc: "__gopy_unpickler_new", Helper: helperUnpicklerNew, RetTag: "__Unpickler", ExtraHelpers: map[string]string{"__Unpickler": helperUnpicklerType, "__gopy_pickle_load": helperPickleLoad, "__gopy_pickle_loads": helperPickleLoads}, HelperImports: []string{"encoding/json", "io"}},
 		},
 	},
 	"configparser": {
@@ -887,9 +889,9 @@ var stdlibModules = map[string]stdlibModule{
 			"print_exception":   {GoFunc: "__gopy_traceback_print_exception", Helper: helperTracebackPrintException, HelperImports: []string{"fmt", "os"}},
 			"format_exception":  {GoFunc: "__gopy_traceback_format_exception", Helper: helperTracebackFormatException, HelperImports: []string{"fmt"}},
 			"format_exception_only": {GoFunc: "__gopy_traceback_format_exception_only", Helper: helperTracebackFormatExceptionOnly, HelperImports: []string{"fmt"}},
-			"format_stack":      {GoFunc: "__gopy_traceback_format_stack", Helper: helperTracebackFormatStack},
-			"print_stack":       {GoFunc: "__gopy_traceback_print_stack", Helper: helperTracebackPrintStack},
-			"extract_stack":     {GoFunc: "__gopy_traceback_extract_stack", Helper: helperTracebackExtractStack},
+			"format_stack":      {GoFunc: "__gopy_traceback_format_stack", Helper: helperTracebackFormatStack, HelperImports: []string{"runtime"}},
+			"print_stack":       {GoFunc: "__gopy_traceback_print_stack", Helper: helperTracebackPrintStack, HelperImports: []string{"runtime", "fmt", "os"}},
+			"extract_stack":     {GoFunc: "__gopy_traceback_extract_stack", Helper: helperTracebackExtractStack, HelperImports: []string{"runtime"}},
 			"extract_tb":        {GoFunc: "__gopy_traceback_extract_tb_unused"},
 			"print_tb":          {GoFunc: "__gopy_traceback_print_tb_unused"},
 			"format_tb":         {GoFunc: "__gopy_traceback_format_tb_unused"},
@@ -7399,6 +7401,74 @@ const helperMimeAudioNew = `func __gopy_mime_audio_new(args ...any) *__EmailMess
 	return m
 }`
 
+// pickle.Pickler(fh[, protocol]) / pickle.Unpickler(fh): bound-handle
+// versions of pickle.dump / pickle.load. Both delegate to the
+// module-level JSON-backed helpers and store the open file handle so
+// caller can interleave .dump(obj) / .load() calls.
+const helperPicklerType = `type __Pickler struct {
+	fh any
+}
+
+func (p *__Pickler) Dump(args ...any) {
+	if len(args) == 0 {
+		return
+	}
+	__gopy_pickle_dump(args[0], p.fh)
+}
+
+func (p *__Pickler) Clear_memo() {}`
+
+const helperPicklerNew = `func __gopy_pickler_new(args ...any) *__Pickler {
+	p := &__Pickler{}
+	if len(args) > 0 {
+		p.fh = args[0]
+	}
+	return p
+}`
+
+const helperUnpicklerType = `type __Unpickler struct {
+	fh any
+}
+
+func (u *__Unpickler) Load(args ...any) any {
+	return __gopy_pickle_load(u.fh)
+}
+
+func (u *__Unpickler) Find_class(mod, name string) any { return nil }`
+
+const helperUnpicklerNew = `func __gopy_unpickler_new(args ...any) *__Unpickler {
+	u := &__Unpickler{}
+	if len(args) > 0 {
+		u.fh = args[0]
+	}
+	return u
+}`
+
+// os.set_blocking(fd, blocking) toggles O_NONBLOCK on the fd via the
+// portable syscall.SetNonblock; the partner os.get_blocking tracks the
+// last-known state per-fd since Go's stdlib has no FcntlInt to query.
+const helperOsBlockingState = `var __gopy_os_blocking_state = map[int64]bool{}
+var __gopy_os_blocking_mu sync.Mutex
+`
+
+const helperOsSetBlocking = `func __gopy_os_set_blocking(fd int64, blocking bool) {
+	if err := syscall.SetNonblock(int(fd), !blocking); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	__gopy_os_blocking_mu.Lock()
+	__gopy_os_blocking_state[fd] = blocking
+	__gopy_os_blocking_mu.Unlock()
+}`
+
+const helperOsGetBlocking = `func __gopy_os_get_blocking(fd int64) bool {
+	__gopy_os_blocking_mu.Lock()
+	defer __gopy_os_blocking_mu.Unlock()
+	if v, ok := __gopy_os_blocking_state[fd]; ok {
+		return v
+	}
+	return true
+}`
+
 const helperMimeApplicationNew = `func __gopy_mime_application_new(args ...any) *__EmailMessage {
 	subtype := "octet-stream"
 	if len(args) > 1 {
@@ -12252,9 +12322,25 @@ const helperTracebackFormatExceptionOnly = `func __gopy_traceback_format_excepti
 	return []string{fmt.Sprintf("Exception: %v\n", last)}
 }`
 
-const helperTracebackFormatStack = `func __gopy_traceback_format_stack() []string { return []string{} }`
-const helperTracebackPrintStack = `func __gopy_traceback_print_stack() {}`
-const helperTracebackExtractStack = `func __gopy_traceback_extract_stack() []any { return []any{} }`
+// traceback.format_stack / print_stack / extract_stack: gopy lacks
+// Python frame objects. We surface Go's runtime.Stack output instead so
+// callers at least see *something* useful when debugging. Each helper
+// returns / prints the raw stack trace as a single multi-line string.
+const helperTracebackFormatStack = `func __gopy_traceback_format_stack() []string {
+	buf := make([]byte, 4096)
+	n := runtime.Stack(buf, false)
+	return []string{string(buf[:n])}
+}`
+const helperTracebackPrintStack = `func __gopy_traceback_print_stack() {
+	buf := make([]byte, 4096)
+	n := runtime.Stack(buf, false)
+	fmt.Fprint(os.Stderr, string(buf[:n]))
+}`
+const helperTracebackExtractStack = `func __gopy_traceback_extract_stack() []any {
+	buf := make([]byte, 4096)
+	n := runtime.Stack(buf, false)
+	return []any{string(buf[:n])}
+}`
 
 const helperNetrcNew = `func __gopy_netrc_new(args ...string) map[string]any {
 	path := ""
