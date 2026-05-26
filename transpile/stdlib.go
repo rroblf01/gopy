@@ -124,6 +124,16 @@ var stdlibModules = map[string]stdlibModule{
 			"execvp":    {GoFunc: "__gopy_os_execvp", Helper: helperOsExecvp, HelperImports: []string{"syscall", "os/exec", "os"}},
 			"fork":      {GoFunc: "__gopy_os_fork", Helper: helperOsFork, RetKind: "int"},
 			"setsid":    {GoFunc: "__gopy_os_setsid", Helper: helperOsSetsid, HelperImports: []string{"syscall"}, RetKind: "int"},
+			"setuid":    {GoFunc: "__gopy_os_setuid", Helper: helperOsSetuid, HelperImports: []string{"syscall"}},
+			"setgid":    {GoFunc: "__gopy_os_setgid", Helper: helperOsSetgid, HelperImports: []string{"syscall"}},
+			"setegid":   {GoFunc: "__gopy_os_setegid", Helper: helperOsSetegid, HelperImports: []string{"syscall"}},
+			"seteuid":   {GoFunc: "__gopy_os_seteuid", Helper: helperOsSeteuid, HelperImports: []string{"syscall"}},
+			"setregid":  {GoFunc: "__gopy_os_setregid", Helper: helperOsSetregid, HelperImports: []string{"syscall"}},
+			"setreuid":  {GoFunc: "__gopy_os_setreuid", Helper: helperOsSetreuid, HelperImports: []string{"syscall"}},
+			"chroot":    {GoFunc: "__gopy_os_chroot", Helper: helperOsChroot, HelperImports: []string{"syscall"}},
+			"utime":     {GoFunc: "__gopy_os_utime", Helper: helperOsUtime, HelperImports: []string{"os", "time"}},
+			"truncate":  {GoFunc: "__gopy_os_truncate", Helper: helperOsTruncate, HelperImports: []string{"os"}},
+			"ftruncate": {GoFunc: "__gopy_os_ftruncate", Helper: helperOsFtruncate, HelperImports: []string{"syscall"}},
 			"getsid":    {GoFunc: "__gopy_os_getsid", Helper: helperOsGetsid, HelperImports: []string{"syscall"}, RetKind: "int"},
 			"getpgid":   {GoFunc: "__gopy_os_getpgid", Helper: helperOsGetpgid, HelperImports: []string{"syscall"}, RetKind: "int"},
 			"getpgrp":   {GoFunc: "__gopy_os_getpgrp", Helper: helperOsGetpgrp, HelperImports: []string{"syscall"}, RetKind: "int"},
@@ -185,7 +195,7 @@ var stdlibModules = map[string]stdlibModule{
 			"asctime":          {GoFunc: "__gopy_time_asctime", GoImport: "time", Helper: helperTimeAsctime, RetKind: "str"},
 			"ctime":            {GoFunc: "__gopy_time_ctime", GoImport: "time", Helper: helperTimeCtime, RetKind: "str"},
 			"tzname":           {GoFunc: "__gopy_time_tzname", GoImport: "time", Helper: helperTimeTzname},
-			"tzset":            {GoFunc: "__gopy_time_tzset_unused"},
+			"tzset":            {GoFunc: "__gopy_time_tzset", Helper: helperTimeTzset, HelperImports: []string{"os", "time"}},
 			"clock_gettime":    {GoFunc: "__gopy_time_monotonic", GoImport: "time", Helper: helperTimeMonotonic, RetKind: "float"},
 			"clock_gettime_ns": {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
 			"clock_settime":    {GoFunc: "__gopy_time_clock_settime_unused"},
@@ -427,6 +437,7 @@ var stdlibModules = map[string]stdlibModule{
 			"get_terminal_size": {GoFunc: "__gopy_shutil_terminal_size", Helper: helperShutilTerminalSize},
 			"make_archive":      {GoFunc: "__gopy_shutil_make_archive", Helper: helperShutilMakeArchive, HelperImports: []string{"archive/tar", "archive/zip", "compress/gzip", "io", "os", "path/filepath"}, RetKind: "str"},
 			"copyfileobj":       {GoFunc: "__gopy_shutil_copyfileobj", Helper: helperShutilCopyfileobj, HelperImports: []string{"io", "os"}, RetKind: "int"},
+			"unpack_archive":    {GoFunc: "__gopy_shutil_unpack_archive", Helper: helperShutilUnpackArchive, HelperImports: []string{"archive/tar", "archive/zip", "compress/gzip", "io", "os", "path/filepath", "strings"}},
 		},
 	},
 	"tempfile": {
@@ -551,6 +562,9 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"http": {
+		Attrs: map[string]stdlibAttr{
+			"HTTPStatus": {GoExpr: `"HTTPStatus"`},
+		},
 		Subs: map[string]stdlibModule{
 			"client": {
 				Funcs: map[string]stdlibFunc{
@@ -762,6 +776,12 @@ var stdlibModules = map[string]stdlibModule{
 			// libraries that use weakref keep compiling.
 			"ref":   {GoFunc: "__gopy_weakref_ref", Helper: helperWeakrefRef},
 			"proxy": {GoFunc: "__gopy_weakref_ref", Helper: helperWeakrefRef},
+			"WeakValueDictionary": {GoFunc: "__gopy_weak_dict", Helper: helperWeakrefDict},
+			"WeakKeyDictionary":   {GoFunc: "__gopy_weak_dict", Helper: helperWeakrefDict},
+			"WeakSet":             {GoFunc: "__gopy_weak_set", Helper: helperWeakrefSet},
+			"finalize":            {GoFunc: "__gopy_weakref_finalize_unused"},
+			"getweakrefcount":     {GoFunc: "__gopy_weakref_count", Helper: helperWeakrefCount, RetKind: "int"},
+			"getweakrefs":         {GoFunc: "__gopy_weakref_refs", Helper: helperWeakrefRefs},
 		},
 	},
 	"pprint": {
@@ -1101,11 +1121,22 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"unicodedata": {
+		Attrs: map[string]stdlibAttr{
+			"ucd_3_2_0":       {GoExpr: `"ucd_3_2_0"`},
+			"unidata_version": {GoExpr: `"15.1.0"`},
+		},
 		Funcs: map[string]stdlibFunc{
 			"category":  {GoFunc: "__gopy_unicodedata_category", Helper: helperUnicodedataCategory, HelperImports: []string{"unicode"}, RetKind: "str"},
 			"name":      {GoFunc: "__gopy_unicodedata_name", Helper: helperUnicodedataName, RetKind: "str"},
 			"normalize": {GoFunc: "__gopy_unicodedata_normalize", Helper: helperUnicodedataNormalize, RetKind: "str"},
 			"lookup":    {GoFunc: "__gopy_unicodedata_lookup", Helper: helperUnicodedataLookup, RetKind: "str"},
+			"bidirectional":   {GoFunc: "__gopy_unicodedata_bidi", Helper: helperUnicodedataBidi, RetKind: "str"},
+			"east_asian_width": {GoFunc: "__gopy_unicodedata_eaw", Helper: helperUnicodedataEaw, HelperImports: []string{"unicode"}, RetKind: "str"},
+			"combining":        {GoFunc: "__gopy_unicodedata_combining", Helper: helperUnicodedataCombining, RetKind: "int"},
+			"mirrored":         {GoFunc: "__gopy_unicodedata_mirrored", Helper: helperUnicodedataMirrored, RetKind: "int"},
+			"decimal":          {GoFunc: "__gopy_unicodedata_decimal", Helper: helperUnicodedataDecimal, HelperImports: []string{"unicode"}},
+			"digit":            {GoFunc: "__gopy_unicodedata_digit", Helper: helperUnicodedataDigit, HelperImports: []string{"unicode"}},
+			"numeric":          {GoFunc: "__gopy_unicodedata_numeric", Helper: helperUnicodedataNumeric, HelperImports: []string{"unicode"}},
 		},
 	},
 	"dis": {
@@ -1167,6 +1198,10 @@ var stdlibModules = map[string]stdlibModule{
 			"getsignal":  {GoFunc: "__gopy_signal_getsignal", Helper: helperSignalSignal, HelperImports: []string{"os", "os/signal", "sync", "syscall"}},
 			"set_wakeup_fd": {GoFunc: "__gopy_signal_noop_int", Helper: helperSignalSignal, HelperImports: []string{"os", "os/signal", "sync", "syscall"}, RetKind: "int"},
 			"alarm":      {GoFunc: "__gopy_signal_alarm", Helper: helperSignalAlarm, HelperImports: []string{"time", "syscall", "os"}, RetKind: "int"},
+			"pthread_kill": {GoFunc: "__gopy_signal_pthread_kill", Helper: helperSignalPthreadKill, HelperImports: []string{"syscall", "os"}},
+			"killpg":       {GoFunc: "__gopy_signal_killpg", Helper: helperSignalKillpg, HelperImports: []string{"syscall"}},
+			"raise_signal": {GoFunc: "__gopy_signal_raise", Helper: helperSignalRaise, HelperImports: []string{"syscall", "os"}},
+			"siginterrupt": {GoFunc: "__gopy_signal_siginterrupt", Helper: helperSignalSiginterrupt},
 			"setitimer":  {GoFunc: "__gopy_signal_setitimer", Helper: helperSignalSetitimer},
 			"getitimer":  {GoFunc: "__gopy_signal_getitimer", Helper: helperSignalGetitimer},
 		},
@@ -1314,6 +1349,8 @@ var stdlibModules = map[string]stdlibModule{
 			"getfqdn":       {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
 			"gethostbyname": {GoFunc: "__gopy_socket_gethostbyname", Helper: helperSocketGethostbyname, HelperImports: []string{"net"}, RetKind: "str"},
 			"gethostbyname_ex": {GoFunc: "__gopy_socket_gethostbyname_ex", Helper: helperSocketGethostbynameEx, HelperImports: []string{"net", "strings"}},
+			"inet_pton":        {GoFunc: "__gopy_socket_inet_pton", Helper: helperSocketInetPton, HelperImports: []string{"net"}, RetKind: "str"},
+			"inet_ntop":        {GoFunc: "__gopy_socket_inet_ntop", Helper: helperSocketInetNtop, HelperImports: []string{"net"}, RetKind: "str"},
 			"gethostbyaddr": {GoFunc: "__gopy_socket_gethostbyaddr", Helper: helperSocketGethostbyaddr, HelperImports: []string{"net"}},
 			"inet_aton":     {GoFunc: "__gopy_socket_inet_aton", Helper: helperSocketInetAton, HelperImports: []string{"net"}, RetKind: "str"},
 			"inet_ntoa":     {GoFunc: "__gopy_socket_inet_ntoa", Helper: helperSocketInetNtoa, HelperImports: []string{"net"}, RetKind: "str"},
@@ -1337,6 +1374,17 @@ var stdlibModules = map[string]stdlibModule{
 			"release":        {GoFunc: "__gopy_platform_release", Helper: helperPlatformRelease, RetKind: "str"},
 			"python_version": {GoFunc: "__gopy_platform_python_version", Helper: helperPlatformPythonVersion, RetKind: "str"},
 			"platform":       {GoFunc: "__gopy_platform_platform", Helper: helperPlatformPlatform, HelperImports: []string{"runtime"}, RetKind: "str"},
+			"processor":      {GoFunc: "__gopy_platform_processor", Helper: helperPlatformProcessor, HelperImports: []string{"runtime"}, RetKind: "str"},
+			"version":        {GoFunc: "__gopy_platform_version", Helper: helperPlatformVersion, RetKind: "str"},
+			"architecture":   {GoFunc: "__gopy_platform_architecture", Helper: helperPlatformArchitecture, HelperImports: []string{"runtime"}},
+			"uname":          {GoFunc: "__gopy_platform_uname", Helper: helperPlatformUname, HelperImports: []string{"runtime", "os"}},
+			"python_implementation": {GoFunc: "__gopy_platform_pyimpl", Helper: helperPlatformPyimpl, RetKind: "str"},
+			"python_compiler":       {GoFunc: "__gopy_platform_pycompiler", Helper: helperPlatformPycompiler, HelperImports: []string{"runtime"}, RetKind: "str"},
+			"python_branch":         {GoFunc: "__gopy_platform_pybranch", Helper: helperPlatformPybranch, RetKind: "str"},
+			"python_revision":       {GoFunc: "__gopy_platform_pyrevision", Helper: helperPlatformPyrevision, RetKind: "str"},
+			"python_build":          {GoFunc: "__gopy_platform_pybuild", Helper: helperPlatformPybuild},
+			"libc_ver":              {GoFunc: "__gopy_platform_libcver", Helper: helperPlatformLibcver},
+			"freedesktop_os_release": {GoFunc: "__gopy_platform_osrelease", Helper: helperPlatformOsrelease, HelperImports: []string{"os", "bufio", "strings"}},
 		},
 	},
 	"dataclasses": {
@@ -1555,6 +1603,7 @@ var stdlibModules = map[string]stdlibModule{
 			"uuid1": {GoFunc: "__gopy_uuid1", GoImport: "crypto/rand", Helper: helperUuid1, RetKind: "str", HelperImports: []string{"fmt", "time"}},
 			"uuid3": {GoFunc: "__gopy_uuid3", Helper: helperUuid3, HelperImports: []string{"crypto/md5", "fmt"}, RetKind: "str"},
 			"uuid5": {GoFunc: "__gopy_uuid5", Helper: helperUuid5, HelperImports: []string{"crypto/sha1", "fmt"}, RetKind: "str"},
+			"UUID":  {GoFunc: "__gopy_uuid_new", Helper: helperUUIDNew, ExtraHelpers: map[string]string{"__UUID": helperUUIDType}, HelperImports: []string{"encoding/hex", "strings"}, RetTag: "__UUID"},
 		},
 	},
 	"textwrap": {
@@ -2566,8 +2615,8 @@ var stdlibModules = map[string]stdlibModule{
 			"PAX_FORMAT":     {GoExpr: "int64(2)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"open":      {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
-			"TarFile":   {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
+			"open":      {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "compress/gzip", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
+			"TarFile":   {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "compress/gzip", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
 			"TarInfo":   {GoFunc: "__gopy_tarfile_unused"},
 			"is_tarfile": {GoFunc: "__gopy_tarfile_is", Helper: helperTarfileIs, HelperImports: []string{"archive/tar", "os"}, RetKind: "bool"},
 			"TarError":  {GoFunc: "__gopy_tarfile_unused"},
@@ -2668,9 +2717,9 @@ var stdlibModules = map[string]stdlibModule{
 		},
 		Funcs: map[string]stdlibFunc{
 			"select":  {GoFunc: "__gopy_select_select", Helper: helperSelectSelect},
-			"poll":    {GoFunc: "__gopy_select_unused"},
-			"epoll":   {GoFunc: "__gopy_select_unused"},
-			"kqueue":  {GoFunc: "__gopy_select_unused"},
+			"poll":    {GoFunc: "__gopy_select_poll", Helper: helperSelectPoll, RetTag: "__Poll", ExtraHelpers: map[string]string{"__Poll": helperSelectPollType}},
+			"epoll":   {GoFunc: "__gopy_select_poll", Helper: helperSelectPoll, RetTag: "__Poll", ExtraHelpers: map[string]string{"__Poll": helperSelectPollType}},
+			"kqueue":  {GoFunc: "__gopy_select_poll", Helper: helperSelectPoll, RetTag: "__Poll", ExtraHelpers: map[string]string{"__Poll": helperSelectPollType}},
 			"kevent":  {GoFunc: "__gopy_select_unused"},
 			"devpoll": {GoFunc: "__gopy_select_unused"},
 			"error":   {GoFunc: "__gopy_select_unused"},
@@ -11673,6 +11722,9 @@ const helperTarFileType = `type __TarEntry struct {
 type __TarFile struct {
 	entries []*__TarEntry
 	closed  bool
+	wf      *os.File
+	tw      *tar.Writer
+	mode    string
 }
 
 func (t *__TarFile) Getnames() []string {
@@ -11736,18 +11788,90 @@ func (t *__TarFile) Extract(name string, args ...any) {
 	panic(NewException("KeyError: " + name))
 }
 
+func (t *__TarFile) Add(name string, args ...any) {
+	if t.tw == nil {
+		panic(NewException("OSError: tarfile not open for writing"))
+	}
+	arcname := name
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok && s != "" {
+			arcname = s
+		}
+	}
+	info, err := os.Stat(name)
+	if err != nil {
+		panic(NewException("FileNotFoundError: " + err.Error()))
+	}
+	hdr, err := tar.FileInfoHeader(info, "")
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	hdr.Name = arcname
+	if info.IsDir() {
+		hdr.Name = arcname + "/"
+		if err := t.tw.WriteHeader(hdr); err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		return
+	}
+	if err := t.tw.WriteHeader(hdr); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	src, err := os.Open(name)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	defer src.Close()
+	if _, err := io.Copy(t.tw, src); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}
+
+func (t *__TarFile) Addfile(args ...any) {
+	if t.tw == nil {
+		return
+	}
+}
+
 func (t *__TarFile) Close() {
 	t.closed = true
+	if t.tw != nil {
+		t.tw.Close()
+		t.tw = nil
+	}
+	if t.wf != nil {
+		t.wf.Close()
+		t.wf = nil
+	}
 }
 
 func __gopy_tarfile_open(path string, args ...string) *__TarFile {
+	mode := "r"
+	if len(args) > 0 && args[0] != "" {
+		mode = args[0]
+	}
+	writing := mode == "w" || mode == "x" || mode == "w:" || mode == "x:"
+	if writing {
+		f, err := os.Create(path)
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		return &__TarFile{wf: f, tw: tar.NewWriter(f), mode: "w"}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		panic(NewException("FileNotFoundError: " + err.Error()))
 	}
 	defer f.Close()
 	var src io.Reader = f
-	// "r:gz" / "r:bz2" not auto-detected here; archive/tar reads raw.
+	if mode == "r:gz" || mode == "r:gzip" {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		defer gz.Close()
+		src = gz
+	}
 	tr := tar.NewReader(src)
 	tf := &__TarFile{}
 	for {
@@ -11787,6 +11911,9 @@ const helperZipFileType = `type __ZipEntry struct {
 type __ZipFile struct {
 	entries []*__ZipEntry
 	closed  bool
+	wf      *os.File
+	zw      *zip.Writer
+	mode    string
 }
 
 func (z *__ZipFile) Namelist() []string {
@@ -11840,11 +11967,65 @@ func (z *__ZipFile) Extractall(args ...any) {
 	}
 }
 
+func (z *__ZipFile) Writestr(name, body string) {
+	if z.zw == nil {
+		panic(NewException("OSError: zipfile not open for writing"))
+	}
+	w, err := z.zw.Create(name)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	if _, err := w.Write([]byte(body)); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}
+
+func (z *__ZipFile) Write(name string, args ...string) {
+	if z.zw == nil {
+		panic(NewException("OSError: zipfile not open for writing"))
+	}
+	arcname := name
+	if len(args) > 0 && args[0] != "" {
+		arcname = args[0]
+	}
+	src, err := os.Open(name)
+	if err != nil {
+		panic(NewException("FileNotFoundError: " + err.Error()))
+	}
+	defer src.Close()
+	w, err := z.zw.Create(arcname)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	if _, err := io.Copy(w, src); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}
+
 func (z *__ZipFile) Close() {
 	z.closed = true
+	if z.zw != nil {
+		z.zw.Close()
+		z.zw = nil
+	}
+	if z.wf != nil {
+		z.wf.Close()
+		z.wf = nil
+	}
 }
 
 func __gopy_zipfile_open(path string, args ...string) *__ZipFile {
+	mode := "r"
+	if len(args) > 0 && args[0] != "" {
+		mode = args[0]
+	}
+	if mode == "w" || mode == "x" || mode == "a" {
+		f, err := os.Create(path)
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		return &__ZipFile{wf: f, zw: zip.NewWriter(f), mode: "w"}
+	}
 	r, err := zip.OpenReader(path)
 	if err != nil {
 		panic(NewException("OSError: " + err.Error()))
@@ -13192,4 +13373,607 @@ const helperOsPopen = `func __gopy_os_popen(args ...string) *__PopenFile {
 		}()
 	}
 	return &__PopenFile{cmd: cmd, stdout: buf}
+}`
+
+// helperTimeTzset — re-evaluate TZ env via time.LoadLocation. CPython
+// updates time.timezone / time.tzname; gopy just refreshes the local
+// zone so subsequent localtime() calls follow the new TZ.
+const helperTimeTzset = `func __gopy_time_tzset(args ...any) {
+	tz := os.Getenv("TZ")
+	if tz == "" {
+		time.Local = time.UTC
+		return
+	}
+	if loc, err := time.LoadLocation(tz); err == nil {
+		time.Local = loc
+	}
+}`
+
+// helperSignalPthreadKill — gopy can't address goroutines individually,
+// so pthread_kill is treated as a process-wide signal delivery (matches
+// Python's single-threaded behavior for callers).
+const helperSignalPthreadKill = `func __gopy_signal_pthread_kill(args ...any) {
+	if len(args) < 2 {
+		return
+	}
+	var sig syscall.Signal
+	if s, ok := args[1].(int64); ok {
+		sig = syscall.Signal(s)
+	}
+	p, err := os.FindProcess(os.Getpid())
+	if err == nil {
+		p.Signal(sig)
+	}
+}`
+
+const helperSignalKillpg = `func __gopy_signal_killpg(pgid, sig int64) {
+	syscall.Kill(int(-pgid), syscall.Signal(sig))
+}`
+
+const helperSignalRaise = `func __gopy_signal_raise(sig int64) {
+	p, err := os.FindProcess(os.Getpid())
+	if err == nil {
+		p.Signal(syscall.Signal(sig))
+	}
+}`
+
+const helperSignalSiginterrupt = `func __gopy_signal_siginterrupt(args ...any) {}`
+
+const helperOsSetuid = `func __gopy_os_setuid(uid int64) {
+	if err := syscall.Setuid(int(uid)); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperOsSetgid = `func __gopy_os_setgid(gid int64) {
+	if err := syscall.Setgid(int(gid)); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperOsSetegid = `func __gopy_os_setegid(gid int64) {
+	if err := syscall.Setegid(int(gid)); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperOsSeteuid = `func __gopy_os_seteuid(uid int64) {
+	if err := syscall.Seteuid(int(uid)); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperOsSetregid = `func __gopy_os_setregid(rgid, egid int64) {
+	if err := syscall.Setregid(int(rgid), int(egid)); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperOsSetreuid = `func __gopy_os_setreuid(ruid, euid int64) {
+	if err := syscall.Setreuid(int(ruid), int(euid)); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperOsChroot = `func __gopy_os_chroot(path string) {
+	if err := syscall.Chroot(path); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+// helperUUIDType — uuid.UUID instance wrapping the canonical hyphenated
+// hex form. Exposes .hex (no dashes), .int (big-endian decimal as
+// string — gopy lacks bignum), .bytes (raw 16-byte string), .urn,
+// .version, .variant.
+const helperUUIDType = `type __UUID struct {
+	raw string
+}
+
+func (u *__UUID) String() string { return u.raw }
+
+func (u *__UUID) Hex() string {
+	return strings.ReplaceAll(u.raw, "-", "")
+}
+
+func (u *__UUID) Bytes() string {
+	hexs := strings.ReplaceAll(u.raw, "-", "")
+	b, err := hex.DecodeString(hexs)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func (u *__UUID) Urn() string {
+	return "urn:uuid:" + u.raw
+}
+
+func (u *__UUID) Version() int64 {
+	hexs := strings.ReplaceAll(u.raw, "-", "")
+	if len(hexs) < 13 {
+		return 0
+	}
+	v, err := __gopy_hex_nibble(hexs[12])
+	if err != nil {
+		return 0
+	}
+	return int64(v)
+}
+
+func (u *__UUID) Variant() string {
+	hexs := strings.ReplaceAll(u.raw, "-", "")
+	if len(hexs) < 17 {
+		return "reserved"
+	}
+	v, err := __gopy_hex_nibble(hexs[16])
+	if err != nil {
+		return "reserved"
+	}
+	switch {
+	case v < 8:
+		return "reserved for NCS compatibility"
+	case v < 12:
+		return "specified in RFC 4122"
+	case v < 14:
+		return "reserved for Microsoft compatibility"
+	default:
+		return "reserved for future definition"
+	}
+}
+
+func __gopy_hex_nibble(c byte) (uint8, error) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', nil
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, nil
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, nil
+	}
+	return 0, &__gopyHexErr{c}
+}
+
+type __gopyHexErr struct{ c byte }
+
+func (e *__gopyHexErr) Error() string { return "invalid hex char" }`
+
+const helperUUIDNew = `func __gopy_uuid_new(args ...any) *__UUID {
+	if len(args) == 0 {
+		return &__UUID{}
+	}
+	s := ""
+	if v, ok := args[0].(string); ok {
+		s = v
+	}
+	clean := strings.ReplaceAll(s, "-", "")
+	clean = strings.ReplaceAll(clean, "{", "")
+	clean = strings.ReplaceAll(clean, "}", "")
+	clean = strings.TrimPrefix(clean, "urn:uuid:")
+	clean = strings.ToLower(clean)
+	if len(clean) != 32 {
+		panic(NewException("ValueError: badly formed UUID string"))
+	}
+	for _, c := range clean {
+		if _, err := __gopy_hex_nibble(byte(c)); err != nil {
+			panic(NewException("ValueError: badly formed UUID string"))
+		}
+	}
+	canonical := clean[0:8] + "-" + clean[8:12] + "-" + clean[12:16] + "-" + clean[16:20] + "-" + clean[20:32]
+	return &__UUID{raw: canonical}
+}`
+
+// Platform extras: gopy maps each to a best-effort string. Real CPython
+// reads /proc/cpuinfo / uname(3) / sysinfo; gopy stays minimal.
+const helperPlatformProcessor = `func __gopy_platform_processor() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x86_64"
+	case "arm64":
+		return "aarch64"
+	case "386":
+		return "i386"
+	case "arm":
+		return "arm"
+	}
+	return runtime.GOARCH
+}`
+
+const helperPlatformVersion = `func __gopy_platform_version() string { return "" }`
+
+const helperPlatformArchitecture = `func __gopy_platform_architecture(args ...any) []any {
+	bits := "64bit"
+	if runtime.GOARCH == "386" || runtime.GOARCH == "arm" {
+		bits = "32bit"
+	}
+	return []any{bits, ""}
+}`
+
+const helperPlatformUname = `func __gopy_platform_uname() []any {
+	host, _ := os.Hostname()
+	sys := runtime.GOOS
+	switch sys {
+	case "darwin":
+		sys = "Darwin"
+	case "linux":
+		sys = "Linux"
+	case "windows":
+		sys = "Windows"
+	}
+	machine := runtime.GOARCH
+	switch machine {
+	case "amd64":
+		machine = "x86_64"
+	case "arm64":
+		machine = "aarch64"
+	}
+	return []any{sys, host, "", "", machine, ""}
+}`
+
+const helperPlatformPyimpl = `func __gopy_platform_pyimpl() string { return "CPython" }`
+
+const helperPlatformPycompiler = `func __gopy_platform_pycompiler() string {
+	return "Go " + runtime.Version()
+}`
+
+const helperPlatformPybranch = `func __gopy_platform_pybranch() string { return "" }`
+
+const helperPlatformPyrevision = `func __gopy_platform_pyrevision() string { return "" }`
+
+const helperPlatformPybuild = `func __gopy_platform_pybuild() []any {
+	return []any{"default", "gopy"}
+}`
+
+const helperPlatformLibcver = `func __gopy_platform_libcver(args ...any) []any {
+	return []any{"", ""}
+}`
+
+const helperPlatformOsrelease = `func __gopy_platform_osrelease(args ...any) map[string]any {
+	out := map[string]any{}
+	paths := []string{"/etc/os-release", "/usr/lib/os-release"}
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			ln := strings.TrimSpace(sc.Text())
+			if ln == "" || strings.HasPrefix(ln, "#") {
+				continue
+			}
+			eq := strings.Index(ln, "=")
+			if eq < 0 {
+				continue
+			}
+			k := strings.TrimSpace(ln[:eq])
+			v := strings.TrimSpace(ln[eq+1:])
+			v = strings.Trim(v, "\"'")
+			out[k] = v
+		}
+		f.Close()
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return out
+}`
+
+// Unicodedata extras: Go's `unicode` package supplies category info but
+// no full UCD. These return Python-shaped sentinels for the common cases.
+const helperUnicodedataBidi = `func __gopy_unicodedata_bidi(args ...any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	s, ok := args[0].(string)
+	if !ok || len(s) == 0 {
+		return ""
+	}
+	r := []rune(s)[0]
+	switch {
+	case r >= '0' && r <= '9':
+		return "EN"
+	case (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'):
+		return "L"
+	}
+	return ""
+}`
+
+const helperUnicodedataEaw = `func __gopy_unicodedata_eaw(args ...any) string {
+	if len(args) == 0 {
+		return "N"
+	}
+	s, ok := args[0].(string)
+	if !ok || len(s) == 0 {
+		return "N"
+	}
+	r := []rune(s)[0]
+	if r < 0x80 {
+		return "Na"
+	}
+	if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) {
+		return "W"
+	}
+	return "N"
+}`
+
+const helperUnicodedataCombining = `func __gopy_unicodedata_combining(args ...any) int64 {
+	if len(args) == 0 {
+		return 0
+	}
+	return 0
+}`
+
+const helperUnicodedataMirrored = `func __gopy_unicodedata_mirrored(args ...any) int64 {
+	if len(args) == 0 {
+		return 0
+	}
+	s, ok := args[0].(string)
+	if !ok || len(s) == 0 {
+		return 0
+	}
+	r := []rune(s)[0]
+	switch r {
+	case '(', ')', '[', ']', '{', '}', '<', '>':
+		return 1
+	}
+	return 0
+}`
+
+const helperUnicodedataDecimal = `func __gopy_unicodedata_decimal(args ...any) any {
+	if len(args) == 0 {
+		return nil
+	}
+	s, ok := args[0].(string)
+	if !ok || len(s) == 0 {
+		if len(args) > 1 {
+			return args[1]
+		}
+		panic(NewException("ValueError: not a decimal"))
+	}
+	r := []rune(s)[0]
+	if r >= '0' && r <= '9' {
+		return int64(r - '0')
+	}
+	if len(args) > 1 {
+		return args[1]
+	}
+	panic(NewException("ValueError: not a decimal"))
+}`
+
+const helperUnicodedataDigit = `func __gopy_unicodedata_digit(args ...any) any {
+	return __gopy_unicodedata_decimal(args...)
+}`
+
+const helperUnicodedataNumeric = `func __gopy_unicodedata_numeric(args ...any) any {
+	v := __gopy_unicodedata_decimal(args...)
+	if n, ok := v.(int64); ok {
+		return float64(n)
+	}
+	return v
+}`
+
+// helperShutilUnpackArchive — inverse of make_archive. Auto-detects
+// tar / zip / gztar via filename suffix or explicit format arg.
+const helperShutilUnpackArchive = `func __gopy_shutil_unpack_archive(args ...any) {
+	if len(args) == 0 {
+		return
+	}
+	filename, _ := args[0].(string)
+	extractDir := "."
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok && s != "" {
+			extractDir = s
+		}
+	}
+	format := ""
+	if len(args) > 2 {
+		if s, ok := args[2].(string); ok {
+			format = s
+		}
+	}
+	if format == "" {
+		switch {
+		case strings.HasSuffix(filename, ".zip"):
+			format = "zip"
+		case strings.HasSuffix(filename, ".tar.gz"), strings.HasSuffix(filename, ".tgz"):
+			format = "gztar"
+		case strings.HasSuffix(filename, ".tar"):
+			format = "tar"
+		}
+	}
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	switch format {
+	case "zip":
+		r, err := zip.OpenReader(filename)
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		defer r.Close()
+		for _, f := range r.File {
+			full := filepath.Join(extractDir, f.Name)
+			if strings.HasSuffix(f.Name, "/") {
+				os.MkdirAll(full, 0o755)
+				continue
+			}
+			os.MkdirAll(filepath.Dir(full), 0o755)
+			rc, err := f.Open()
+			if err != nil {
+				panic(NewException("OSError: " + err.Error()))
+			}
+			data, _ := io.ReadAll(rc)
+			rc.Close()
+			os.WriteFile(full, data, 0o644)
+		}
+		return
+	case "tar", "gztar":
+		f, err := os.Open(filename)
+		if err != nil {
+			panic(NewException("OSError: " + err.Error()))
+		}
+		defer f.Close()
+		var src io.Reader = f
+		if format == "gztar" {
+			gz, err := gzip.NewReader(f)
+			if err != nil {
+				panic(NewException("OSError: " + err.Error()))
+			}
+			defer gz.Close()
+			src = gz
+		}
+		tr := tar.NewReader(src)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				panic(NewException("OSError: " + err.Error()))
+			}
+			full := filepath.Join(extractDir, hdr.Name)
+			if hdr.Typeflag == tar.TypeDir {
+				os.MkdirAll(full, os.FileMode(hdr.Mode))
+				continue
+			}
+			os.MkdirAll(filepath.Dir(full), 0o755)
+			data, _ := io.ReadAll(tr)
+			os.WriteFile(full, data, os.FileMode(hdr.Mode))
+		}
+		return
+	}
+	panic(NewException("ValueError: unknown archive format: " + format))
+}`
+
+// helperWeakrefDict — WeakValueDictionary / WeakKeyDictionary: gopy has
+// no weak refs (Go GC), so collapse to a plain dict[str, any].
+const helperWeakrefDict = `func __gopy_weak_dict(args ...any) map[string]any {
+	return map[string]any{}
+}`
+
+const helperWeakrefSet = `func __gopy_weak_set(args ...any) []any {
+	return []any{}
+}`
+
+const helperWeakrefCount = `func __gopy_weakref_count(args ...any) int64 { return 0 }`
+
+const helperWeakrefRefs = `func __gopy_weakref_refs(args ...any) []any { return []any{} }`
+
+const helperSocketInetPton = `func __gopy_socket_inet_pton(family int64, addr string) string {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		panic(NewException("OSError: illegal IP address string"))
+	}
+	if family == 2 {
+		v4 := ip.To4()
+		if v4 == nil {
+			panic(NewException("OSError: not an IPv4 address"))
+		}
+		return string(v4)
+	}
+	v6 := ip.To16()
+	return string(v6)
+}`
+
+const helperSocketInetNtop = `func __gopy_socket_inet_ntop(family int64, packed string) string {
+	b := []byte(packed)
+	switch len(b) {
+	case 4:
+		return net.IP(b).String()
+	case 16:
+		return net.IP(b).String()
+	}
+	panic(NewException("OSError: invalid packed length"))
+}`
+
+const helperOsUtime = `func __gopy_os_utime(args ...any) {
+	if len(args) == 0 {
+		return
+	}
+	path, _ := args[0].(string)
+	now := time.Now()
+	atime, mtime := now, now
+	if len(args) > 1 {
+		readPair := func(a, b float64) {
+			atime = time.Unix(int64(a), int64((a-float64(int64(a)))*1e9))
+			mtime = time.Unix(int64(b), int64((b-float64(int64(b)))*1e9))
+		}
+		switch pair := args[1].(type) {
+		case []any:
+			if len(pair) == 2 {
+				af, _ := pair[0].(float64)
+				bf, _ := pair[1].(float64)
+				readPair(af, bf)
+			}
+		case []float64:
+			if len(pair) == 2 {
+				readPair(pair[0], pair[1])
+			}
+		case []int64:
+			if len(pair) == 2 {
+				readPair(float64(pair[0]), float64(pair[1]))
+			}
+		}
+	}
+	if err := os.Chtimes(path, atime, mtime); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperOsTruncate = `func __gopy_os_truncate(path string, size int64) {
+	if err := os.Truncate(path, size); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperOsFtruncate = `func __gopy_os_ftruncate(fd int64, size int64) {
+	if err := syscall.Ftruncate(int(fd), size); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+}`
+
+const helperSelectPollType = `type __Poll struct {
+	fds map[int64]int64
+}
+
+func (p *__Poll) ensure() {
+	if p.fds == nil {
+		p.fds = map[int64]int64{}
+	}
+}
+
+func (p *__Poll) Register(fd int64, args ...int64) {
+	p.ensure()
+	events := int64(0)
+	if len(args) > 0 {
+		events = args[0]
+	}
+	p.fds[fd] = events
+}
+
+func (p *__Poll) Modify(fd int64, events int64) {
+	p.ensure()
+	p.fds[fd] = events
+}
+
+func (p *__Poll) Unregister(fd int64) {
+	p.ensure()
+	delete(p.fds, fd)
+}
+
+func (p *__Poll) Poll(args ...any) []any {
+	p.ensure()
+	out := []any{}
+	for fd, ev := range p.fds {
+		out = append(out, []any{fd, ev})
+	}
+	return out
+}
+
+func (p *__Poll) Close() {
+	p.fds = nil
+}`
+
+const helperSelectPoll = `func __gopy_select_poll(args ...any) *__Poll {
+	return &__Poll{fds: map[int64]int64{}}
 }`

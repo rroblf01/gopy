@@ -2426,6 +2426,7 @@ func (g *gen) emitTaggedOpenCM(call *ir.Call, varName string, body []ir.Stmt, fn
 	switch tag {
 	case "__TarFile":
 		g.addImport("archive/tar")
+		g.addImport("compress/gzip")
 		g.addImport("io")
 		g.addImport("os")
 		g.addImport("path/filepath")
@@ -7159,6 +7160,8 @@ var taggedMethodRename = map[string]map[string]string{
 		"extractall": "Extractall",
 		"extract":    "Extract",
 		"close":      "Close",
+		"add":        "Add",
+		"addfile":    "Addfile",
 	},
 	"__ZipFile": {
 		"namelist":   "Namelist",
@@ -7166,6 +7169,8 @@ var taggedMethodRename = map[string]map[string]string{
 		"infolist":   "Infolist",
 		"extractall": "Extractall",
 		"close":      "Close",
+		"writestr":   "Writestr",
+		"write":      "Write",
 	},
 	"__WaveRead": {
 		"getnchannels": "Getnchannels",
@@ -7223,6 +7228,14 @@ var taggedMethodRename = map[string]map[string]string{
 	"__PopenFile": {
 		"read":  "Read",
 		"close": "Close",
+	},
+	"__UUID": {},
+	"__Poll": {
+		"register":   "Register",
+		"unregister": "Unregister",
+		"modify":     "Modify",
+		"poll":       "Poll",
+		"close":      "Close",
 	},
 	"__Timer": {
 		"start":  "Start",
@@ -7480,6 +7493,13 @@ type taggedAttrInfo struct {
 var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 	"__DomDocument": {
 		"documentElement": {GoName: "DocumentElement", Ty: nil},
+	},
+	"__UUID": {
+		"hex":     {GoName: "Hex", Ty: &ir.Type{Kind: ir.TyStr}},
+		"bytes":   {GoName: "Bytes", Ty: &ir.Type{Kind: ir.TyStr}},
+		"urn":     {GoName: "Urn", Ty: &ir.Type{Kind: ir.TyStr}},
+		"version": {GoName: "Version", Ty: &ir.Type{Kind: ir.TyInt}},
+		"variant": {GoName: "Variant", Ty: &ir.Type{Kind: ir.TyStr}},
 	},
 	"__NamedTempFile": {
 		"name": {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
