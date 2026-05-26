@@ -14537,8 +14537,8 @@ const helperURLUrlunparse = `func __gopy_url_urlunparse(parts ...any) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	tup, ok := parts[0].([]any)
-	if !ok || len(tup) < 6 {
+	tup := __gopy_url_tup6(parts[0])
+	if len(tup) < 6 {
 		return ""
 	}
 	scheme, _ := tup[0].(string)
@@ -14564,12 +14564,26 @@ const helperURLUrlunparse = `func __gopy_url_urlunparse(parts ...any) string {
 	return out
 }`
 
-const helperURLUrlunsplit = `func __gopy_url_urlunsplit(parts ...any) string {
+const helperURLUrlunsplit = `func __gopy_url_tup6(v any) []any {
+	switch x := v.(type) {
+	case []any:
+		return x
+	case []string:
+		out := make([]any, len(x))
+		for i, s := range x {
+			out[i] = s
+		}
+		return out
+	}
+	return nil
+}
+
+func __gopy_url_urlunsplit(parts ...any) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	tup, ok := parts[0].([]any)
-	if !ok || len(tup) < 5 {
+	tup := __gopy_url_tup6(parts[0])
+	if len(tup) < 5 {
 		return ""
 	}
 	scheme, _ := tup[0].(string)

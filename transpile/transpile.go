@@ -7551,11 +7551,6 @@ var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 		"stdout": {GoName: "Stdout", Ty: nil, Tag: "__PopenStdout"},
 		"stderr": {GoName: "Stderr", Ty: nil, Tag: "__PopenStdout"},
 	},
-	"__NormalDist": {
-		"mean":     {GoName: "Mean", Ty: &ir.Type{Kind: ir.TyFloat}},
-		"stdev":    {GoName: "Stdev", Ty: &ir.Type{Kind: ir.TyFloat}},
-		"variance": {GoName: "Variance", Ty: &ir.Type{Kind: ir.TyFloat}},
-	},
 	"__DirEntry": {
 		"name": {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
 		"path": {GoName: "Path", Ty: &ir.Type{Kind: ir.TyStr}},
@@ -7651,6 +7646,11 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 		"tag":  {GoName: "Tag", Ty: &ir.Type{Kind: ir.TyStr}},
 		"text": {GoName: "Text", Ty: &ir.Type{Kind: ir.TyStr}},
 		"attrib": {GoName: "Attrib", Ty: &ir.Type{Kind: ir.TyDict, Key: &ir.Type{Kind: ir.TyStr}, Val: &ir.Type{Kind: ir.TyStr}}},
+	},
+	"__NormalDist": {
+		"mean":     {GoName: "Mean", Ty: &ir.Type{Kind: ir.TyFloat}},
+		"stdev":    {GoName: "Stdev", Ty: &ir.Type{Kind: ir.TyFloat}},
+		"variance": {GoName: "Variance", Ty: &ir.Type{Kind: ir.TyFloat}},
 	},
 }
 
