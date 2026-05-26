@@ -3001,13 +3001,45 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 				elemTy = t.Val
 			case TyStr:
 				elemTy = &Type{Kind: TyStr}
+			case TyTuple:
+				// `p[0]` / `p[1]` on a typed tuple with a literal index
+				// returns the per-position type. Non-literal indices fall
+				// back to TyAny (caller may still need a runtime assert).
+				if lit, ok := idx.(*IntLit); ok && lit.V >= 0 && int(lit.V) < len(t.Tuple) {
+					elemTy = t.Tuple[int(lit.V)]
+				}
 			}
 		}
 		return &Subscript{Value: val, Index: idx, Ty: elemTy}, nil
 	case "Tuple":
-		// Lowered as a list literal: same Go shape (slice), same access
-		// pattern. Trade-off: we lose Python's immutability semantics.
-		fallthrough
+		// Lowered as a list literal — same Go shape (`[]any`), same access
+		// pattern — but the outer Ty is TyTuple with one entry per element
+		// so subsequent Subscript[k] / unpacking sites can recover the
+		// per-position type. Trade-off: we lose Python's immutability
+		// semantics; per-position types compensate for the static-typing loss.
+		elts := n.Children("elts")
+		var elems []Expr
+		var pos []*Type
+		var common *Type
+		for _, e := range elts {
+			x, err := lowerExpr(e, sc)
+			if err != nil {
+				return nil, err
+			}
+			elems = append(elems, x)
+			et := x.TypeOf()
+			pos = append(pos, et)
+			if common == nil {
+				common = et
+			} else if !sameType(common, et) {
+				common = &Type{Kind: TyAny}
+			}
+		}
+		if common == nil {
+			common = &Type{Kind: TyAny}
+		}
+		tupleTy := &Type{Kind: TyTuple, Tuple: pos}
+		return &ListLit{Elems: elems, ElemTy: common, Ty: tupleTy}, nil
 	case "Set":
 		// `{1, 2, 3}` lowers to the same slice shape. Membership via
 		// `in` works because we walk the slice; uniqueness is not
