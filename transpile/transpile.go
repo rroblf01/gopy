@@ -7121,6 +7121,13 @@ var taggedMethodRename = map[string]map[string]string{
 		"reset":  "Reset",
 		"abort":  "Abort",
 	},
+	"__EmailParser": {
+		"parsestr":   "Parsestr",
+		"parsebytes": "Parsebytes",
+		"parse":      "Parse",
+		"feed":       "Feed",
+		"close":      "Close",
+	},
 	"__Popen": {
 		"wait":        "Wait",
 		"communicate": "Communicate",
@@ -7481,6 +7488,12 @@ var taggedMethodRetTag = map[string]map[string]string{
 		"match":     "__Match",
 		"search":    "__Match",
 		"fullmatch": "__Match",
+	},
+	"__EmailParser": {
+		"parsestr":   "__EmailMessage",
+		"parsebytes": "__EmailMessage",
+		"parse":      "__EmailMessage",
+		"close":      "__EmailMessage",
 	},
 	"__Datetime": {
 		"__add__": "__Datetime",

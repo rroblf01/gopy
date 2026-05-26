@@ -758,10 +758,10 @@ var stdlibModules = map[string]stdlibModule{
 			},
 			"parser": {
 				Funcs: map[string]stdlibFunc{
-					"Parser":       {GoFunc: "__gopy_email_parser_unused"},
-					"BytesParser":  {GoFunc: "__gopy_email_parser_unused"},
-					"FeedParser":   {GoFunc: "__gopy_email_parser_unused"},
-					"HeaderParser": {GoFunc: "__gopy_email_parser_unused"},
+					"Parser":       {GoFunc: "__gopy_email_parser_new", Helper: helperEmailParserNew, RetTag: "__EmailParser", ExtraHelpers: map[string]string{"__EmailParser": helperEmailParserType, "__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings", "io"}},
+					"BytesParser":  {GoFunc: "__gopy_email_parser_new", Helper: helperEmailParserNew, RetTag: "__EmailParser", ExtraHelpers: map[string]string{"__EmailParser": helperEmailParserType, "__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings", "io"}},
+					"FeedParser":   {GoFunc: "__gopy_email_parser_new", Helper: helperEmailParserNew, RetTag: "__EmailParser", ExtraHelpers: map[string]string{"__EmailParser": helperEmailParserType, "__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings", "io"}},
+					"HeaderParser": {GoFunc: "__gopy_email_parser_new", Helper: helperEmailParserNew, RetTag: "__EmailParser", ExtraHelpers: map[string]string{"__EmailParser": helperEmailParserType, "__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings", "io"}},
 				},
 			},
 			"message": {
@@ -7047,6 +7047,101 @@ func (m *__EmailMessage) As_string(args ...any) string {
 
 const helperEmailMessageNew = `func __gopy_email_message_new(args ...any) *__EmailMessage {
 	return &__EmailMessage{headers: map[string]string{}}
+}`
+
+// email.parser.Parser / HeaderParser / BytesParser / FeedParser collapse
+// to the same __EmailParser shim. RFC822 header parsing: lines until the
+// first blank line are folded into ordered headers (continuation lines
+// starting with whitespace append to the previous header value); the
+// remainder of the input is the payload. HeaderParser stops at the blank.
+const helperEmailParserType = `type __EmailParser struct {
+	headersOnly bool
+	buf         strings.Builder
+}
+
+func (p *__EmailParser) parseString(src string) *__EmailMessage {
+	m := &__EmailMessage{headers: map[string]string{}}
+	lines := strings.Split(src, "\n")
+	bodyStart := -1
+	curKey := ""
+	for i, raw := range lines {
+		line := strings.TrimRight(raw, "\r")
+		if line == "" {
+			bodyStart = i + 1
+			break
+		}
+		if (line[0] == ' ' || line[0] == '\t') && curKey != "" {
+			lk := strings.ToLower(curKey)
+			m.headers[lk] = m.headers[lk] + " " + strings.TrimSpace(line)
+			continue
+		}
+		colon := strings.IndexByte(line, ':')
+		if colon <= 0 {
+			continue
+		}
+		name := strings.TrimSpace(line[:colon])
+		value := strings.TrimSpace(line[colon+1:])
+		lk := strings.ToLower(name)
+		if _, ok := m.headers[lk]; !ok {
+			m.headerKeys = append(m.headerKeys, name)
+		}
+		m.headers[lk] = value
+		curKey = name
+	}
+	if !p.headersOnly && bodyStart >= 0 && bodyStart < len(lines) {
+		m.payload = strings.Join(lines[bodyStart:], "\n")
+	}
+	return m
+}
+
+func (p *__EmailParser) Parsestr(args ...any) *__EmailMessage {
+	if len(args) == 0 {
+		return &__EmailMessage{headers: map[string]string{}}
+	}
+	s, _ := args[0].(string)
+	return p.parseString(s)
+}
+
+func (p *__EmailParser) Parsebytes(args ...any) *__EmailMessage {
+	return p.Parsestr(args...)
+}
+
+func (p *__EmailParser) Parse(args ...any) *__EmailMessage {
+	if len(args) == 0 {
+		return &__EmailMessage{headers: map[string]string{}}
+	}
+	switch v := args[0].(type) {
+	case string:
+		return p.parseString(v)
+	case interface{ Read(args ...any) string }:
+		return p.parseString(v.Read())
+	}
+	if r, ok := args[0].(io.Reader); ok {
+		buf := make([]byte, 0, 4096)
+		tmp := make([]byte, 4096)
+		for {
+			n, err := r.Read(tmp)
+			if n > 0 {
+				buf = append(buf, tmp[:n]...)
+			}
+			if err != nil {
+				break
+			}
+		}
+		return p.parseString(string(buf))
+	}
+	return &__EmailMessage{headers: map[string]string{}}
+}
+
+func (p *__EmailParser) Feed(s string) { p.buf.WriteString(s) }
+func (p *__EmailParser) Close() *__EmailMessage {
+	out := p.parseString(p.buf.String())
+	p.buf.Reset()
+	return out
+}`
+
+const helperEmailParserNew = `func __gopy_email_parser_new(args ...any) *__EmailParser {
+	return &__EmailParser{}
 }`
 
 const helperGettextTranslationType = `type __GettextTranslation struct{}
