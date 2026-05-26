@@ -7128,6 +7128,15 @@ var taggedMethodRename = map[string]map[string]string{
 		"feed":       "Feed",
 		"close":      "Close",
 	},
+	"__HTMLParser": {
+		"feed":           "Feed",
+		"close":          "Close",
+		"reset":          "Reset",
+		"on_starttag":    "On_starttag",
+		"on_endtag":      "On_endtag",
+		"on_data":        "On_data",
+		"on_startendtag": "On_startendtag",
+	},
 	"__Popen": {
 		"wait":        "Wait",
 		"communicate": "Communicate",
@@ -7311,16 +7320,21 @@ var taggedMethodRename = map[string]map[string]string{
 		"close":      "Close",
 	},
 	"__EmailMessage": {
-		"set_payload":    "Set_payload",
-		"get_payload":    "Get_payload",
-		"get":            "Get",
-		"get_all":        "Get_all",
-		"add_header":     "Add_header",
-		"replace_header": "Replace_header",
-		"del_item":       "Del_item",
-		"keys":           "Keys",
-		"items":          "Items",
-		"as_string":      "As_string",
+		"set_payload":         "Set_payload",
+		"get_payload":         "Get_payload",
+		"get":                 "Get",
+		"get_all":             "Get_all",
+		"add_header":          "Add_header",
+		"replace_header":      "Replace_header",
+		"del_item":            "Del_item",
+		"keys":                "Keys",
+		"items":               "Items",
+		"as_string":           "As_string",
+		"attach":              "Attach",
+		"get_content_type":    "Get_content_type",
+		"get_content_maintype": "Get_content_maintype",
+		"get_content_subtype": "Get_content_subtype",
+		"is_multipart":        "Is_multipart",
 	},
 	"__GettextTranslation": {
 		"gettext":   "Gettext",
@@ -7430,10 +7444,14 @@ var taggedMethodRename = map[string]map[string]string{
 		"lt":      "Lt",
 	},
 	"__ArgParser": {
-		"add_argument":    "AddArgument",
-		"parse_args":      "ParseArgs",
-		"add_subparsers":  "Add_subparsers",
-		"add_parser":      "Add_parser",
+		"add_argument":                    "AddArgument",
+		"parse_args":                      "ParseArgs",
+		"add_subparsers":                  "Add_subparsers",
+		"add_parser":                      "Add_parser",
+		"add_mutually_exclusive_group":    "Add_mutually_exclusive_group",
+	},
+	"__ArgMutexGroup": {
+		"add_argument": "Add_argument",
 	},
 	"__ConfigParser": {
 		"read":        "Read",
@@ -7503,8 +7521,9 @@ var taggedMethodRetTag = map[string]map[string]string{
 		"replace": "__Date",
 	},
 	"__ArgParser": {
-		"add_subparsers": "__ArgParser",
-		"add_parser":     "__ArgParser",
+		"add_subparsers":                  "__ArgParser",
+		"add_parser":                      "__ArgParser",
+		"add_mutually_exclusive_group":    "__ArgMutexGroup",
 	},
 	"__Path": {
 		"absolute":    "__Path",
@@ -7948,11 +7967,15 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		g.writef(")")
 		return nil
 	}
-	if tag := g.exprTag(m.Recv); tag == "__ArgParser" && m.Method == "add_argument" {
+	if tag := g.exprTag(m.Recv); (tag == "__ArgParser" || tag == "__ArgMutexGroup") && m.Method == "add_argument" {
 		if err := g.expr(m.Recv); err != nil {
 			return err
 		}
-		g.writef(".AddArgument(")
+		method := "AddArgument"
+		if tag == "__ArgMutexGroup" {
+			method = "Add_argument"
+		}
+		g.writef(".%s(", method)
 		for i, a := range m.Args {
 			if i > 0 {
 				g.writef(", ")

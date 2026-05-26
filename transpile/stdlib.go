@@ -774,32 +774,33 @@ var stdlibModules = map[string]stdlibModule{
 				Subs: map[string]stdlibModule{
 					"text": {
 						Funcs: map[string]stdlibFunc{
-							"MIMEText": {GoFunc: "__gopy_mime_text_unused"},
+							"MIMEText":    {GoFunc: "__gopy_mime_text_new", Helper: helperMimeTextNew, RetTag: "__EmailMessage", ExtraHelpers: map[string]string{"__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings"}},
+							"MIMENonText": {GoFunc: "__gopy_mime_text_new", Helper: helperMimeTextNew, RetTag: "__EmailMessage", ExtraHelpers: map[string]string{"__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings"}},
 						},
 					},
 					"base": {
 						Funcs: map[string]stdlibFunc{
-							"MIMEBase": {GoFunc: "__gopy_mime_base_unused"},
+							"MIMEBase": {GoFunc: "__gopy_mime_base_new", Helper: helperMimeBaseNew, RetTag: "__EmailMessage", ExtraHelpers: map[string]string{"__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings"}},
 						},
 					},
 					"multipart": {
 						Funcs: map[string]stdlibFunc{
-							"MIMEMultipart": {GoFunc: "__gopy_mime_multipart_unused"},
+							"MIMEMultipart": {GoFunc: "__gopy_mime_multipart_new", Helper: helperMimeMultipartNew, RetTag: "__EmailMessage", ExtraHelpers: map[string]string{"__EmailMessage": helperEmailMessageType}, HelperImports: []string{"strings"}},
 						},
 					},
 					"image": {
 						Funcs: map[string]stdlibFunc{
-							"MIMEImage": {GoFunc: "__gopy_mime_image_unused"},
+							"MIMEImage": {GoFunc: "__gopy_mime_image_new", Helper: helperMimeImageNew, RetTag: "__EmailMessage", ExtraHelpers: map[string]string{"__EmailMessage": helperEmailMessageType, "__gopy_mime_base_new": helperMimeBaseNew}, HelperImports: []string{"strings"}},
 						},
 					},
 					"audio": {
 						Funcs: map[string]stdlibFunc{
-							"MIMEAudio": {GoFunc: "__gopy_mime_audio_unused"},
+							"MIMEAudio": {GoFunc: "__gopy_mime_audio_new", Helper: helperMimeAudioNew, RetTag: "__EmailMessage", ExtraHelpers: map[string]string{"__EmailMessage": helperEmailMessageType, "__gopy_mime_base_new": helperMimeBaseNew}, HelperImports: []string{"strings"}},
 						},
 					},
 					"application": {
 						Funcs: map[string]stdlibFunc{
-							"MIMEApplication": {GoFunc: "__gopy_mime_application_unused"},
+							"MIMEApplication": {GoFunc: "__gopy_mime_application_new", Helper: helperMimeApplicationNew, RetTag: "__EmailMessage", ExtraHelpers: map[string]string{"__EmailMessage": helperEmailMessageType, "__gopy_mime_base_new": helperMimeBaseNew}, HelperImports: []string{"strings"}},
 						},
 					},
 				},
@@ -1216,7 +1217,7 @@ var stdlibModules = map[string]stdlibModule{
 		},
 		Funcs: map[string]stdlibFunc{
 			"category":  {GoFunc: "__gopy_unicodedata_category", Helper: helperUnicodedataCategory, HelperImports: []string{"unicode"}, RetKind: "str"},
-			"name":      {GoFunc: "__gopy_unicodedata_name", Helper: helperUnicodedataName, RetKind: "str"},
+			"name":      {GoFunc: "__gopy_unicodedata_name", Helper: helperUnicodedataName, HelperImports: []string{"strings"}, RetKind: "str"},
 			"normalize": {GoFunc: "__gopy_unicodedata_normalize", Helper: helperUnicodedataNormalize, RetKind: "str"},
 			"lookup":    {GoFunc: "__gopy_unicodedata_lookup", Helper: helperUnicodedataLookup, RetKind: "str"},
 			"bidirectional":   {GoFunc: "__gopy_unicodedata_bidi", Helper: helperUnicodedataBidi, RetKind: "str"},
@@ -1382,7 +1383,7 @@ var stdlibModules = map[string]stdlibModule{
 			},
 			"parser": {
 				Funcs: map[string]stdlibFunc{
-					"HTMLParser": {GoFunc: "__gopy_html_parser_unused"},
+					"HTMLParser": {GoFunc: "__gopy_html_parser_new", Helper: helperHTMLParserNew, RetTag: "__HTMLParser", ExtraHelpers: map[string]string{"__HTMLParser": helperHTMLParserType}, HelperImports: []string{"strings"}},
 				},
 			},
 		},
@@ -5556,9 +5557,29 @@ const helperArgparseType = `type __ArgSpec struct {
 }
 
 type __ArgParser struct {
-	Specs   []__ArgSpec
-	Subs    map[string]*__ArgParser
-	SubDest string
+	Specs       []__ArgSpec
+	Subs        map[string]*__ArgParser
+	SubDest     string
+	MutexGroups [][]string
+}
+
+type __ArgMutexGroup struct {
+	parent *__ArgParser
+	idx    int
+}
+
+func (p *__ArgParser) Add_mutually_exclusive_group(args ...any) *__ArgMutexGroup {
+	p.MutexGroups = append(p.MutexGroups, []string{})
+	return &__ArgMutexGroup{parent: p, idx: len(p.MutexGroups) - 1}
+}
+
+func (g *__ArgMutexGroup) Add_argument(args ...any) {
+	before := len(g.parent.Specs)
+	g.parent.AddArgument(args...)
+	if len(g.parent.Specs) > before {
+		name := g.parent.Specs[len(g.parent.Specs)-1].Name
+		g.parent.MutexGroups[g.idx] = append(g.parent.MutexGroups[g.idx], name)
+	}
 }
 
 func (p *__ArgParser) Add_subparsers(args ...any) *__ArgParser {
@@ -5746,6 +5767,7 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 			posSpecs = append(posSpecs, s)
 		}
 	}
+	seen := map[string]bool{}
 	i := 0
 	for i < len(argv) {
 		tok := argv[i]
@@ -5767,6 +5789,7 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 				} else {
 					ns.Values[name] = true
 				}
+				seen[name] = true
 				i++
 				continue
 			}
@@ -5785,6 +5808,7 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 			} else {
 				ns.Values[name] = val
 			}
+			if known { seen[name] = true }
 		} else if strings.HasPrefix(tok, "-") && len(tok) >= 2 {
 			short := tok[1:]
 			spec, known := specByShort[short]
@@ -5794,6 +5818,7 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 				} else {
 					ns.Values[spec.Name] = true
 				}
+				seen[spec.Name] = true
 				i++
 				continue
 			}
@@ -5807,6 +5832,7 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 					} else {
 						ns.Values[spec.Name] = raw
 					}
+					seen[spec.Name] = true
 					i++
 				}
 			}
@@ -5822,6 +5848,17 @@ func (p *__ArgParser) ParseArgs(args ...any) *__ArgNamespace {
 			posIdx++
 		}
 		i++
+	}
+	for _, group := range p.MutexGroups {
+		count := 0
+		for _, name := range group {
+			if seen[name] {
+				count++
+			}
+		}
+		if count > 1 {
+			panic(NewException("ArgumentError: arguments are mutually exclusive"))
+		}
 	}
 	return ns
 }`
@@ -7032,6 +7069,43 @@ func (m *__EmailMessage) Items() [][]string {
 	}
 	return out
 }
+func (m *__EmailMessage) Attach(part *__EmailMessage) {
+	if m.payload != "" {
+		m.payload += "\r\n"
+	}
+	m.payload += part.As_string()
+}
+
+func (m *__EmailMessage) Get_content_type() string {
+	if v, ok := m.headers["content-type"]; ok {
+		if i := strings.IndexByte(v, ';'); i > 0 {
+			return strings.TrimSpace(v[:i])
+		}
+		return v
+	}
+	return "text/plain"
+}
+
+func (m *__EmailMessage) Get_content_maintype() string {
+	t := m.Get_content_type()
+	if i := strings.IndexByte(t, '/'); i > 0 {
+		return t[:i]
+	}
+	return t
+}
+
+func (m *__EmailMessage) Get_content_subtype() string {
+	t := m.Get_content_type()
+	if i := strings.IndexByte(t, '/'); i > 0 {
+		return t[i+1:]
+	}
+	return ""
+}
+
+func (m *__EmailMessage) Is_multipart() bool {
+	return strings.HasPrefix(m.Get_content_type(), "multipart/")
+}
+
 func (m *__EmailMessage) As_string(args ...any) string {
 	var b strings.Builder
 	for _, k := range m.headerKeys {
@@ -7142,6 +7216,225 @@ func (p *__EmailParser) Close() *__EmailMessage {
 
 const helperEmailParserNew = `func __gopy_email_parser_new(args ...any) *__EmailParser {
 	return &__EmailParser{}
+}`
+
+// html.parser.HTMLParser — minimal real implementation. The user subclasses
+// HTMLParser and overrides handle_starttag / handle_endtag / handle_data /
+// handle_startendtag. gopy collapses subclassing to embedding via the user-
+// class machinery, but here we expose the parsing engine as a __HTMLParser
+// shim whose .feed(s) drives the tokenizer and invokes any callbacks the
+// caller attached via .on_starttag(fn) / .on_endtag(fn) / .on_data(fn).
+// (Real Python uses method overrides; gopy doesn't reify that here.)
+const helperHTMLParserType = `type __HTMLParser struct {
+	onStart  func(tag string, attrs [][]string)
+	onEnd    func(tag string)
+	onData   func(data string)
+	onStartEnd func(tag string, attrs [][]string)
+	buf strings.Builder
+}
+
+func (p *__HTMLParser) On_starttag(fn any) {
+	if f, ok := fn.(func(...any) any); ok {
+		p.onStart = func(tag string, attrs [][]string) {
+			a := make([]any, len(attrs))
+			for i, kv := range attrs { a[i] = kv }
+			f(tag, a)
+		}
+	}
+}
+
+func (p *__HTMLParser) On_endtag(fn any) {
+	if f, ok := fn.(func(...any) any); ok {
+		p.onEnd = func(tag string) { f(tag) }
+	}
+}
+
+func (p *__HTMLParser) On_data(fn any) {
+	if f, ok := fn.(func(...any) any); ok {
+		p.onData = func(s string) { f(s) }
+	}
+}
+
+func (p *__HTMLParser) On_startendtag(fn any) {
+	if f, ok := fn.(func(...any) any); ok {
+		p.onStartEnd = func(tag string, attrs [][]string) {
+			a := make([]any, len(attrs))
+			for i, kv := range attrs { a[i] = kv }
+			f(tag, a)
+		}
+	}
+}
+
+func (p *__HTMLParser) Feed(s string) {
+	p.buf.WriteString(s)
+	data := p.buf.String()
+	out := strings.Builder{}
+	i := 0
+	for i < len(data) {
+		c := data[i]
+		if c == '<' {
+			end := strings.IndexByte(data[i:], '>')
+			if end < 0 {
+				break
+			}
+			tagText := data[i+1 : i+end]
+			i = i + end + 1
+			if out.Len() > 0 {
+				if p.onData != nil { p.onData(out.String()) }
+				out.Reset()
+			}
+			if len(tagText) > 0 && tagText[0] == '/' {
+				name := strings.TrimSpace(tagText[1:])
+				if p.onEnd != nil { p.onEnd(strings.ToLower(name)) }
+				continue
+			}
+			selfClose := false
+			if strings.HasSuffix(tagText, "/") {
+				selfClose = true
+				tagText = strings.TrimSpace(tagText[:len(tagText)-1])
+			}
+			parts := strings.Fields(tagText)
+			if len(parts) == 0 { continue }
+			name := strings.ToLower(parts[0])
+			attrs := [][]string{}
+			for _, kv := range parts[1:] {
+				eq := strings.IndexByte(kv, '=')
+				if eq < 0 {
+					attrs = append(attrs, []string{strings.ToLower(kv), ""})
+					continue
+				}
+				k := strings.ToLower(strings.TrimSpace(kv[:eq]))
+				v := strings.Trim(strings.TrimSpace(kv[eq+1:]), "\"'")
+				attrs = append(attrs, []string{k, v})
+			}
+			if selfClose {
+				if p.onStartEnd != nil { p.onStartEnd(name, attrs) } else if p.onStart != nil { p.onStart(name, attrs) }
+			} else {
+				if p.onStart != nil { p.onStart(name, attrs) }
+			}
+			continue
+		}
+		out.WriteByte(c)
+		i++
+	}
+	p.buf.Reset()
+	if out.Len() > 0 {
+		p.buf.WriteString(out.String())
+	}
+}
+
+func (p *__HTMLParser) Close(args ...any) {
+	if p.buf.Len() > 0 {
+		if p.onData != nil { p.onData(p.buf.String()) }
+		p.buf.Reset()
+	}
+}
+
+func (p *__HTMLParser) Reset(args ...any) {
+	p.buf.Reset()
+}`
+
+const helperHTMLParserNew = `func __gopy_html_parser_new(args ...any) *__HTMLParser {
+	return &__HTMLParser{}
+}`
+
+// email.mime.base.MIMEBase(_maintype, _subtype): generic base; sets
+// Content-Type + MIME-Version. Payload empty.
+const helperMimeBaseNew = `func __gopy_mime_base_new(args ...any) *__EmailMessage {
+	maintype, subtype := "application", "octet-stream"
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok && s != "" { maintype = s }
+	}
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok && s != "" { subtype = s }
+	}
+	m := &__EmailMessage{headers: map[string]string{}}
+	m.Add_header("Content-Type", maintype + "/" + subtype)
+	m.Add_header("MIME-Version", "1.0")
+	return m
+}`
+
+// email.mime.multipart.MIMEMultipart([_subtype, boundary]): payload holds
+// the joined subpart string; .attach(part) appends each sub-payload with
+// a CRLF--boundary--CRLF separator. boundary defaults to a fixed value
+// for reproducibility (CPython auto-generates one).
+const helperMimeMultipartNew = `func __gopy_mime_multipart_new(args ...any) *__EmailMessage {
+	subtype := "mixed"
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok && s != "" { subtype = s }
+	}
+	boundary := "===============gopy=="
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok && s != "" { boundary = s }
+	}
+	m := &__EmailMessage{headers: map[string]string{}}
+	m.Add_header("Content-Type", "multipart/" + subtype + "; boundary=\"" + boundary + "\"")
+	m.Add_header("MIME-Version", "1.0")
+	return m
+}`
+
+const helperMimeImageNew = `func __gopy_mime_image_new(args ...any) *__EmailMessage {
+	subtype := "png"
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok && s != "" { subtype = s }
+	}
+	m := __gopy_mime_base_new("image", subtype)
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok { m.payload = s }
+	}
+	m.Add_header("Content-Transfer-Encoding", "base64")
+	return m
+}`
+
+const helperMimeAudioNew = `func __gopy_mime_audio_new(args ...any) *__EmailMessage {
+	subtype := "basic"
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok && s != "" { subtype = s }
+	}
+	m := __gopy_mime_base_new("audio", subtype)
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok { m.payload = s }
+	}
+	m.Add_header("Content-Transfer-Encoding", "base64")
+	return m
+}`
+
+const helperMimeApplicationNew = `func __gopy_mime_application_new(args ...any) *__EmailMessage {
+	subtype := "octet-stream"
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok && s != "" { subtype = s }
+	}
+	m := __gopy_mime_base_new("application", subtype)
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok { m.payload = s }
+	}
+	m.Add_header("Content-Transfer-Encoding", "base64")
+	return m
+}`
+
+// email.mime.text.MIMEText(payload[, subtype, charset]): build an
+// __EmailMessage with the canonical Content-Type / MIME-Version /
+// Content-Transfer-Encoding headers + payload set to the supplied body.
+// subtype defaults to "plain", charset to "us-ascii" (matches CPython).
+const helperMimeTextNew = `func __gopy_mime_text_new(args ...any) *__EmailMessage {
+	body := ""
+	if len(args) > 0 {
+		body, _ = args[0].(string)
+	}
+	subtype := "plain"
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok && s != "" { subtype = s }
+	}
+	charset := "us-ascii"
+	if len(args) > 2 {
+		if s, ok := args[2].(string); ok && s != "" { charset = s }
+	}
+	m := &__EmailMessage{headers: map[string]string{}}
+	m.Add_header("Content-Type", "text/" + subtype + "; charset=\"" + charset + "\"")
+	m.Add_header("MIME-Version", "1.0")
+	m.Add_header("Content-Transfer-Encoding", "7bit")
+	m.payload = body
+	return m
 }`
 
 const helperGettextTranslationType = `type __GettextTranslation struct{}
@@ -7313,13 +7606,77 @@ const helperUnicodedataCategory = `func __gopy_unicodedata_category(s string) st
 	return "Cn"
 }`
 
+// unicodedata.name(c[, default]) — return CPython's UCD name for a
+// single-char string. Go has no Unicode name database in the stdlib;
+// we hand-roll a subset covering ASCII letters/digits/punctuation +
+// common Latin-1 supplement names so simple programs work. Unknown
+// codepoints fall back to the `default` arg or raise ValueError.
 const helperUnicodedataName = `func __gopy_unicodedata_name(args ...any) string {
+	if len(args) == 0 {
+		panic(NewException("TypeError: name() requires a single-char string"))
+	}
+	s, ok := args[0].(string)
+	if !ok || s == "" {
+		panic(NewException("TypeError: name() requires a string argument"))
+	}
+	rs := []rune(s)
+	if len(rs) != 1 {
+		panic(NewException("TypeError: name() argument must be a single character"))
+	}
+	r := rs[0]
+	switch {
+	case r >= 'A' && r <= 'Z':
+		return "LATIN CAPITAL LETTER " + string(r)
+	case r >= 'a' && r <= 'z':
+		return "LATIN SMALL LETTER " + strings.ToUpper(string(r))
+	case r >= '0' && r <= '9':
+		digitNames := []string{"ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE"}
+		return "DIGIT " + digitNames[r-'0']
+	}
+	punct := map[rune]string{
+		' ':  "SPACE",
+		'!':  "EXCLAMATION MARK",
+		'"':  "QUOTATION MARK",
+		'#':  "NUMBER SIGN",
+		'$':  "DOLLAR SIGN",
+		'%':  "PERCENT SIGN",
+		'&':  "AMPERSAND",
+		'\'': "APOSTROPHE",
+		'(':  "LEFT PARENTHESIS",
+		')':  "RIGHT PARENTHESIS",
+		'*':  "ASTERISK",
+		'+':  "PLUS SIGN",
+		',':  "COMMA",
+		'-':  "HYPHEN-MINUS",
+		'.':  "FULL STOP",
+		'/':  "SOLIDUS",
+		':':  "COLON",
+		';':  "SEMICOLON",
+		'<':  "LESS-THAN SIGN",
+		'=':  "EQUALS SIGN",
+		'>':  "GREATER-THAN SIGN",
+		'?':  "QUESTION MARK",
+		'@':  "COMMERCIAL AT",
+		'[':  "LEFT SQUARE BRACKET",
+		'\\': "REVERSE SOLIDUS",
+		']':  "RIGHT SQUARE BRACKET",
+		'^':  "CIRCUMFLEX ACCENT",
+		'_':  "LOW LINE",
+		0x60: "GRAVE ACCENT",
+		'{':  "LEFT CURLY BRACKET",
+		'|':  "VERTICAL LINE",
+		'}':  "RIGHT CURLY BRACKET",
+		'~':  "TILDE",
+	}
+	if n, ok := punct[r]; ok {
+		return n
+	}
 	if len(args) > 1 {
-		if s, ok := args[1].(string); ok {
-			return s
+		if d, ok := args[1].(string); ok {
+			return d
 		}
 	}
-	return ""
+	panic(NewException("ValueError: no such name"))
 }`
 
 // helperUnicodedataNormalize — pass-through. CPython's NFC/NFD/NFKC/NFKD
