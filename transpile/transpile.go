@@ -6741,24 +6741,41 @@ func (g *gen) call(c *ir.Call) error {
 		}
 	}
 	// Callable instance: `obj(args)` where obj is a class instance with
-	// __call__ defined dispatches to obj.Call(args).
+	// __call__ defined dispatches to obj.Call(args). Method params have
+	// `self` first; user-supplied positionals are matched against the
+	// remaining params, and any tail params with defaults get filled.
 	if t := g.effectiveType(c.Func); t != nil && t.Kind == ir.TyNamed {
 		if fn := g.lookupMethod(t.Name, "__call__"); fn != nil {
-			_ = fn
+			if len(c.Keywords) > 0 {
+				return fmt.Errorf("kwargs not supported on __call__")
+			}
 			if err := g.expr(c.Func); err != nil {
 				return err
 			}
 			g.writef(".Call(")
-			for i, a := range c.Args {
+			// Skip `self` — it's prepended by the receiver.
+			start := 0
+			if len(fn.Params) > 0 && (fn.Params[0].Name == "self" || fn.Params[0].Name == "cls") {
+				start = 1
+			}
+			callArgs := fn.Params[start:]
+			for i, p := range callArgs {
 				if i > 0 {
 					g.writef(", ")
 				}
-				if err := g.expr(a); err != nil {
-					return err
+				if i < len(c.Args) {
+					if err := g.expr(c.Args[i]); err != nil {
+						return err
+					}
+					continue
 				}
-			}
-			if len(c.Keywords) > 0 {
-				return fmt.Errorf("kwargs not supported on __call__")
+				if p.Default != nil {
+					if err := g.expr(p.Default); err != nil {
+						return err
+					}
+					continue
+				}
+				return fmt.Errorf("__call__: missing argument %q", p.Name)
 			}
 			g.writef(")")
 			return nil

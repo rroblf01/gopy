@@ -3565,14 +3565,19 @@ func lowerListComp(n parser.Node, sc *scope) (Expr, error) {
 		}
 		var cond Expr
 		if ifs := g.Children("ifs"); len(ifs) > 0 {
-			if len(ifs) > 1 {
-				return nil, fmt.Errorf("line %d: only one if-filter per generator supported", n.Lineno())
+			// Multiple if-filters AND together: `[x for x in xs if a if b]`
+			// == `[x for x in xs if a and b]`.
+			for _, ifNode := range ifs {
+				c, err := lowerExpr(ifNode, innerSc)
+				if err != nil {
+					return nil, err
+				}
+				if cond == nil {
+					cond = c
+				} else {
+					cond = &BoolOp{Op: "and", L: cond, R: c, Ty: &Type{Kind: TyBool}}
+				}
 			}
-			c, err := lowerExpr(ifs[0], innerSc)
-			if err != nil {
-				return nil, err
-			}
-			cond = c
 		}
 		gen := CompGen{Var: varName, Var2: varName2, Iter: iter, Cond: cond, ElemTy: elemTy}
 		if gi == 0 {
@@ -3670,14 +3675,19 @@ func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
 		}
 		var cond Expr
 		if ifs := g.Children("ifs"); len(ifs) > 0 {
-			if len(ifs) > 1 {
-				return nil, fmt.Errorf("line %d: only one if-filter per generator supported", n.Lineno())
+			// Multiple if-filters AND together: `[x for x in xs if a if b]`
+			// == `[x for x in xs if a and b]`.
+			for _, ifNode := range ifs {
+				c, err := lowerExpr(ifNode, innerSc)
+				if err != nil {
+					return nil, err
+				}
+				if cond == nil {
+					cond = c
+				} else {
+					cond = &BoolOp{Op: "and", L: cond, R: c, Ty: &Type{Kind: TyBool}}
+				}
 			}
-			c, err := lowerExpr(ifs[0], innerSc)
-			if err != nil {
-				return nil, err
-			}
-			cond = c
 		}
 		gen := CompGen{Var: varName, Var2: varName2, Iter: iter, Cond: cond, ElemTy: elemTy}
 		if gi == 0 {
