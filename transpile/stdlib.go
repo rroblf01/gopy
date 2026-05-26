@@ -566,7 +566,7 @@ var stdlibModules = map[string]stdlibModule{
 			"guess_type":      {GoFunc: "__gopy_mimetypes_guess", Helper: helperMimetypesGuess, HelperImports: []string{"mime", "path/filepath"}},
 			"guess_extension": {GoFunc: "__gopy_mimetypes_guess_ext", Helper: helperMimetypesGuessExt, HelperImports: []string{"mime"}, RetKind: "str"},
 			"guess_all_extensions": {GoFunc: "__gopy_mimetypes_guess_all", Helper: helperMimetypesGuessAll, HelperImports: []string{"mime"}},
-			"read_mime_types":      {GoFunc: "__gopy_mimetypes_read", Helper: helperMimetypesRead},
+			"read_mime_types":      {GoFunc: "__gopy_mimetypes_read", Helper: helperMimetypesRead, HelperImports: []string{"mime", "os", "strings"}},
 			"init":            {GoFunc: "__gopy_mimetypes_init", Helper: helperMimetypesInit},
 			"add_type":        {GoFunc: "__gopy_mimetypes_add", Helper: helperMimetypesAdd},
 			"MimeTypes":       {GoFunc: "__gopy_mimetypes_class_unused"},
@@ -903,7 +903,7 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"inspect": {
 		Funcs: map[string]stdlibFunc{
-			"signature":       {GoFunc: "__gopy_inspect_sig", Helper: helperInspectSig, RetKind: "str"},
+			"signature":       {GoFunc: "__gopy_inspect_sig", Helper: helperInspectSig, HelperImports: []string{"reflect", "strconv", "strings"}, RetKind: "str"},
 			"getsource":       {GoFunc: "__gopy_inspect_source", Helper: helperInspectSource, RetKind: "str"},
 			"getmembers":      {GoFunc: "__gopy_inspect_members", Helper: helperInspectMembers},
 			"isfunction":      {GoFunc: "__gopy_inspect_isfunc", Helper: helperInspectIsfunc, RetKind: "bool"},
@@ -1857,7 +1857,7 @@ var stdlibModules = map[string]stdlibModule{
 			"Condition":     {GoFunc: "__gopy_threading_cond_new", Helper: helperThreadingCond, RetTag: "__Condition", ExtraHelpers: map[string]string{"__Condition": helperCondType, "__Lock": helperLockType}, HelperImports: []string{"sync"}},
 			"Semaphore":     {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
 			"BoundedSemaphore": {GoFunc: "__gopy_threading_sem_new", Helper: helperThreadingSem, RetTag: "__Semaphore", ExtraHelpers: map[string]string{"__Semaphore": helperSemType}},
-			"Barrier":       {GoFunc: "__gopy_threading_barrier_unused"},
+			"Barrier":       {GoFunc: "__gopy_threading_barrier_new", Helper: helperThreadingBarrier, RetTag: "__Barrier", ExtraHelpers: map[string]string{"__Barrier": helperBarrierType}, HelperImports: []string{"sync"}},
 			"Thread":        {GoFunc: "__gopy_threading_thread_new", Helper: helperThreadingThread, RetTag: "__Thread", ExtraHelpers: map[string]string{"__Thread": helperThreadType}, HelperImports: []string{"sync", "time"}},
 			"Timer":         {GoFunc: "__gopy_threading_timer_new", Helper: helperThreadingTimer, RetTag: "__Timer", ExtraHelpers: map[string]string{"__Timer": helperTimerType}, HelperImports: []string{"time"}},
 			"local":         {GoFunc: "__gopy_threading_local_new", Helper: helperThreadingLocal, RetTag: "__Local", ExtraHelpers: map[string]string{"__Local": helperLocalType}, HelperImports: []string{"sync"}},
@@ -2762,8 +2762,8 @@ var stdlibModules = map[string]stdlibModule{
 			"PAX_FORMAT":     {GoExpr: "int64(2)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"open":      {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "compress/gzip", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
-			"TarFile":   {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "compress/gzip", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
+			"open":      {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "compress/bzip2", "compress/gzip", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
+			"TarFile":   {GoFunc: "__gopy_tarfile_open", Helper: helperTarFileType, HelperImports: []string{"archive/tar", "compress/bzip2", "compress/gzip", "io", "os", "path/filepath"}, RetTag: "__TarFile"},
 			"TarInfo":   {GoFunc: "__gopy_tarfile_unused"},
 			"is_tarfile": {GoFunc: "__gopy_tarfile_is", Helper: helperTarfileIs, HelperImports: []string{"archive/tar", "os"}, RetKind: "bool"},
 			"TarError":  {GoFunc: "__gopy_tarfile_unused"},
@@ -6914,7 +6914,27 @@ const helperCompareDigest = `func __gopy_compare_digest(a, b string) bool {
 
 // helperInspect* — gopy doesn't carry source / frame info, so all
 // inspection helpers return shape-compatible stubs.
-const helperInspectSig = `func __gopy_inspect_sig(args ...any) string { return "(...)" }`
+// inspect.signature(fn): introspect via reflect.Type to produce a
+// CPython-shaped "(arg0, arg1, ...)" string. Names lost at codegen time,
+// so positional placeholders only. Variadic uses "*args".
+const helperInspectSig = `func __gopy_inspect_sig(args ...any) string {
+	if len(args) == 0 {
+		return "()"
+	}
+	rt := reflect.TypeOf(args[0])
+	if rt == nil || rt.Kind() != reflect.Func {
+		return "(...)"
+	}
+	parts := []string{}
+	for i := 0; i < rt.NumIn(); i++ {
+		name := "arg" + strconv.Itoa(i)
+		if rt.IsVariadic() && i == rt.NumIn()-1 {
+			name = "*args"
+		}
+		parts = append(parts, name)
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}`
 const helperInspectSource = `func __gopy_inspect_source(args ...any) string { return "" }`
 const helperInspectMembers = `func __gopy_inspect_members(args ...any) [][]any { return [][]any{} }`
 const helperInspectIsfunc = `func __gopy_inspect_isfunc(args ...any) bool { return false }`
@@ -12019,6 +12039,9 @@ func __gopy_tarfile_open(path string, args ...string) *__TarFile {
 		defer gz.Close()
 		src = gz
 	}
+	if mode == "r:bz2" || mode == "r:bzip2" {
+		src = bzip2.NewReader(f)
+	}
 	tr := tar.NewReader(src)
 	tf := &__TarFile{}
 	for {
@@ -14478,8 +14501,43 @@ const helperMimetypesGuessAll = `func __gopy_mimetypes_guess_all(t string) []str
 	return exts
 }`
 
+// mimetypes.read_mime_types(path): parse a CPython-style mime.types file
+// (one `mime/type ext1 ext2 ...` line per entry, `#` comments). Each
+// extension gets registered with Go's `mime` package and the resulting
+// map[ext]type is returned. Missing file returns nil (CPython matches).
 const helperMimetypesRead = `func __gopy_mimetypes_read(args ...any) any {
-	return nil
+	if len(args) == 0 {
+		return nil
+	}
+	path, ok := args[0].(string)
+	if !ok {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		typ := fields[0]
+		for _, ext := range fields[1:] {
+			ext = "." + ext
+			out[ext] = typ
+			_ = mime.AddExtensionType(ext, typ)
+		}
+	}
+	return out
 }`
 
 // OS W* predicates + waitpid family. Linux exit-status layout:
@@ -14770,6 +14828,83 @@ const helperShutilChown = `func __gopy_shutil_chown(path string, args ...any) {
 	if err := os.Chown(path, uid, gid); err != nil {
 		panic(NewException("OSError: " + err.Error()))
 	}
+}`
+
+// threading.Barrier — synchronization point for N parties. Each Wait()
+// blocks until `parties` goroutines have called it, then all are released.
+// Reset() clears any waiters with a "BrokenBarrierError". Abort() flips
+// the broken flag so subsequent Wait() calls fail fast.
+const helperBarrierType = `type __Barrier struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	Parties   int64
+	NWaiting  int64
+	Broken    bool
+	gen       int64
+}
+
+func (b *__Barrier) Wait(args ...any) int64 {
+	b.mu.Lock()
+	if b.Broken {
+		b.mu.Unlock()
+		panic(NewException("BrokenBarrierError"))
+	}
+	gen := b.gen
+	b.NWaiting++
+	idx := b.Parties - b.NWaiting
+	if b.NWaiting >= b.Parties {
+		b.NWaiting = 0
+		b.gen++
+		b.cond.Broadcast()
+		b.mu.Unlock()
+		return idx
+	}
+	for b.gen == gen && !b.Broken {
+		b.cond.Wait()
+	}
+	broken := b.Broken
+	b.mu.Unlock()
+	if broken {
+		panic(NewException("BrokenBarrierError"))
+	}
+	return idx
+}
+
+func (b *__Barrier) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.NWaiting > 0 {
+		b.Broken = true
+		b.cond.Broadcast()
+	}
+	b.Broken = false
+	b.NWaiting = 0
+	b.gen++
+}
+
+func (b *__Barrier) Abort() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.Broken = true
+	b.cond.Broadcast()
+}`
+
+const helperThreadingBarrier = `func __gopy_threading_barrier_new(args ...any) *__Barrier {
+	parties := int64(1)
+	if len(args) > 0 {
+		switch v := args[0].(type) {
+		case int64:
+			parties = v
+		case int:
+			parties = int64(v)
+		}
+	}
+	if parties < 1 {
+		panic(NewException("ValueError: parties must be > 0"))
+	}
+	b := &__Barrier{Parties: parties}
+	b.cond = sync.NewCond(&b.mu)
+	return b
 }`
 
 // helperStatsMultimode mirrors statistics.multimode: return every value

@@ -2426,6 +2426,7 @@ func (g *gen) emitTaggedOpenCM(call *ir.Call, varName string, body []ir.Stmt, fn
 	switch tag {
 	case "__TarFile":
 		g.addImport("archive/tar")
+		g.addImport("compress/bzip2")
 		g.addImport("compress/gzip")
 		g.addImport("io")
 		g.addImport("os")
@@ -7115,6 +7116,11 @@ var taggedMethodRename = map[string]map[string]string{
 		"acquire": "Acquire",
 		"release": "Release",
 	},
+	"__Barrier": {
+		"wait":   "Wait",
+		"reset":  "Reset",
+		"abort":  "Abort",
+	},
 	"__Popen": {
 		"wait":        "Wait",
 		"communicate": "Communicate",
@@ -7648,6 +7654,11 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 		"tag":  {GoName: "Tag", Ty: &ir.Type{Kind: ir.TyStr}},
 		"text": {GoName: "Text", Ty: &ir.Type{Kind: ir.TyStr}},
 		"attrib": {GoName: "Attrib", Ty: &ir.Type{Kind: ir.TyDict, Key: &ir.Type{Kind: ir.TyStr}, Val: &ir.Type{Kind: ir.TyStr}}},
+	},
+	"__Barrier": {
+		"parties":  {GoName: "Parties", Ty: &ir.Type{Kind: ir.TyInt}},
+		"n_waiting": {GoName: "NWaiting", Ty: &ir.Type{Kind: ir.TyInt}},
+		"broken":   {GoName: "Broken", Ty: &ir.Type{Kind: ir.TyBool}},
 	},
 	"__NormalDist": {
 		"mean":     {GoName: "Mean", Ty: &ir.Type{Kind: ir.TyFloat}},
