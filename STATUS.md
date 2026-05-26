@@ -492,6 +492,11 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - **`pwd.getpwuid` / `pwd.getpwnam` / `grp.getgrgid` / `grp.getgrnam`** now scan `/etc/passwd` / `/etc/group` line-by-line and return the same tuple shape CPython surfaces (`(name, passwd, uid, gid, gecos, dir, shell)` and `(name, passwd, gid, members)`). Lookup miss raises `KeyError` via the prefix channel
 - **`html.parser.HTMLParser`** — stub
 - **`email.message.EmailMessage` / `email.message.Message`** — `__EmailMessage` shim with `add_header` / `replace_header` / `del_item` / `get(name[, default])` / `get_all` / `set_payload` / `get_payload` / `keys` / `items` / `as_string`. Header lookup is case-insensitive; insertion order is preserved. `email.parser` still stubs (no source-side parsing yet)
+- **`statistics.multimode(xs)`** real: returns every value tied for the highest count in first-seen order (matches CPython 3.8+). Empty input returns `[]`. Currently typed for `[]int64` only — float multimode would need an equivalent helper variant
+- **`itertools.combinations_with_replacement(iterable, r)`** unrolls `r` nested loops where each inner index starts at the previous one (not previous+1), so elements may repeat in non-decreasing order. Same r-must-be-literal-int restriction as `combinations`
+- **`functools.partialmethod(fn, *bound_args)`** aliased to `functools.partial` (gopy doesn't implement the descriptor protocol that distinguishes them at class-binding time; the call-site behaviour matches for plain `fn` usage)
+- **`json.JSONDecodeError`** registered as a stub class — `from json import JSONDecodeError` and `except json.JSONDecodeError:` parse, but constructor instantiation goes through the standard `NewException` channel
+- **`socket.gaierror` / `socket.herror` / `socket.timeout` / `socket.error`** registered as stub classes so import lines parse. Failures inside socket helpers continue to raise prefix-tagged `Exception` (e.g. `"gaierror: <host>"`) rather than the actual subclass instance
 - **`turtle`, `tkinter`, `curses`, `readline`** — UI / terminal modules not wired
 - **`ctypes`, `cffi`** — no FFI bridge
 - **`__future__` non-`annotations` features** — accepted as no-op but the feature isn't toggled

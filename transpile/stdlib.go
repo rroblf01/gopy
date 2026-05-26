@@ -263,8 +263,9 @@ var stdlibModules = map[string]stdlibModule{
 			"loads":      {GoFunc: "__gopy_json_loads", GoImport: "encoding/json", Helper: helperJSONLoads},
 			"load":       {GoFunc: "__gopy_json_load", GoImport: "encoding/json", Helper: helperJSONLoad, HelperImports: []string{"io"}},
 			"dump":       {GoFunc: "__gopy_json_dump", GoImport: "encoding/json", Helper: helperJSONDump, HelperImports: []string{"strings"}},
-			"JSONEncoder": {GoFunc: "__gopy_json_encoder_unused"},
-			"JSONDecoder": {GoFunc: "__gopy_json_decoder_unused"},
+			"JSONEncoder":      {GoFunc: "__gopy_json_encoder_unused"},
+			"JSONDecoder":      {GoFunc: "__gopy_json_decoder_unused"},
+			"JSONDecodeError":  {GoFunc: "__gopy_json_decode_err_unused"},
 		},
 	},
 	"math": {
@@ -1495,6 +1496,10 @@ var stdlibModules = map[string]stdlibModule{
 			"if_nameindex":     {GoFunc: "__gopy_socket_if_nameindex", Helper: helperSocketIfNameindex, HelperImports: []string{"net"}},
 			"if_indextoname":   {GoFunc: "__gopy_socket_if_indextoname", Helper: helperSocketIfIndextoname, HelperImports: []string{"net"}, RetKind: "str"},
 			"if_nametoindex":   {GoFunc: "__gopy_socket_if_nametoindex", Helper: helperSocketIfNametoindex, HelperImports: []string{"net"}, RetKind: "int"},
+			"gaierror": {GoFunc: "__gopy_socket_gaierror_unused"},
+			"herror":   {GoFunc: "__gopy_socket_herror_unused"},
+			"timeout":  {GoFunc: "__gopy_socket_timeout_unused"},
+			"error":    {GoFunc: "__gopy_socket_error_unused"},
 		},
 	},
 	"platform": {
@@ -1578,6 +1583,7 @@ var stdlibModules = map[string]stdlibModule{
 			// lives in transpile.go's call() builder.
 			"reduce":          {GoFunc: "__gopy_reduce_unused"},
 			"partial":         {GoFunc: "__gopy_partial", Helper: helperFunctoolsPartial, HelperImports: []string{"reflect"}},
+			"partialmethod":   {GoFunc: "__gopy_partial", Helper: helperFunctoolsPartial, HelperImports: []string{"reflect"}},
 			"cache":           {GoFunc: "__gopy_functools_cache", Helper: helperFunctoolsCache, HelperImports: []string{"fmt", "sync"}},
 			"cached_property": {GoFunc: "__gopy_cached_prop_unused"},
 			"wraps":           {GoFunc: "__gopy_wraps_unused"},
@@ -1673,7 +1679,8 @@ var stdlibModules = map[string]stdlibModule{
 			"accumulate":   {GoFunc: "__gopy_accumulate_unused"},
 			"takewhile":    {GoFunc: "__gopy_takewhile_unused"},
 			"dropwhile":    {GoFunc: "__gopy_dropwhile_unused"},
-			"combinations": {GoFunc: "__gopy_combinations_unused"},
+			"combinations":                  {GoFunc: "__gopy_combinations_unused"},
+			"combinations_with_replacement": {GoFunc: "__gopy_combinations_wr_unused"},
 			"product":      {GoFunc: "__gopy_product_unused"},
 			"groupby":      {GoFunc: "__gopy_groupby_unused"},
 			"permutations": {GoFunc: "__gopy_permutations_unused"},
@@ -1715,6 +1722,7 @@ var stdlibModules = map[string]stdlibModule{
 			"fmean":         {GoFunc: "__gopy_stats_mean", Helper: helperStatsMean, RetKind: "float"},
 			"median":        {GoFunc: "__gopy_stats_median", GoImport: "sort", Helper: helperStatsMedian, RetKind: "float"},
 			"mode":          {GoFunc: "__gopy_stats_mode", Helper: helperStatsMode, RetKind: "int"},
+			"multimode":     {GoFunc: "__gopy_stats_multimode", Helper: helperStatsMultimode},
 			"stdev":         {GoFunc: "__gopy_stats_stdev", GoImport: "math", Helper: helperStatsStdev, RetKind: "float"},
 			"pstdev":        {GoFunc: "__gopy_stats_pstdev", GoImport: "math", Helper: helperStatsPstdev, RetKind: "float"},
 			"variance":      {GoFunc: "__gopy_stats_variance", Helper: helperStatsVariance, RetKind: "float"},
@@ -14762,4 +14770,34 @@ const helperShutilChown = `func __gopy_shutil_chown(path string, args ...any) {
 	if err := os.Chown(path, uid, gid); err != nil {
 		panic(NewException("OSError: " + err.Error()))
 	}
+}`
+
+// helperStatsMultimode mirrors statistics.multimode: return every value
+// tied for the highest count, in first-seen order. Empty list when input
+// is empty (matches CPython 3.8+ behaviour).
+const helperStatsMultimode = `func __gopy_stats_multimode(xs []int64) []int64 {
+	if len(xs) == 0 {
+		return []int64{}
+	}
+	counts := map[int64]int{}
+	order := []int64{}
+	for _, v := range xs {
+		if _, ok := counts[v]; !ok {
+			order = append(order, v)
+		}
+		counts[v]++
+	}
+	best := 0
+	for _, v := range order {
+		if counts[v] > best {
+			best = counts[v]
+		}
+	}
+	out := []int64{}
+	for _, v := range order {
+		if counts[v] == best {
+			out = append(out, v)
+		}
+	}
+	return out
 }`

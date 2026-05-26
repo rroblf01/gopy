@@ -5949,6 +5949,8 @@ func (g *gen) call(c *ir.Call) error {
 				return g.builtinDropWhile(c)
 			case "itertools.combinations":
 				return g.builtinCombinations(c)
+			case "itertools.combinations_with_replacement":
+				return g.builtinCombinationsWithReplacement(c)
 			case "itertools.product":
 				return g.builtinProduct(c)
 			case "itertools.permutations":
@@ -13007,6 +13009,64 @@ func (g *gen) builtinCombinations(c *ir.Call) error {
 			g.writef("for __i%d := 0; __i%d < len(__src); __i%d++ {\n", k, k, k)
 		} else {
 			g.writef("for __i%d := __i%d + 1; __i%d < len(__src); __i%d++ {\n", k, k-1, k, k)
+		}
+		g.indent++
+	}
+	g.writeIndent()
+	g.writef("__out = append(__out, []%s{", elemGo)
+	for k := 0; k < r; k++ {
+		if k > 0 {
+			g.writef(", ")
+		}
+		g.writef("__src[__i%d]", k)
+	}
+	g.writef("})\n")
+	for k := 0; k < r; k++ {
+		g.indent--
+		g.writeIndent()
+		g.writef("}\n")
+	}
+	g.writeIndent()
+	g.writef("return __out\n")
+	g.indent--
+	g.writeIndent()
+	g.writef("}()")
+	return nil
+}
+
+// builtinCombinationsWithReplacement emits unrolled nested loops where
+// each inner index starts at the previous one (not previous+1), so
+// elements may repeat in non-decreasing index order.
+func (g *gen) builtinCombinationsWithReplacement(c *ir.Call) error {
+	if len(c.Args) != 2 {
+		return fmt.Errorf("combinations_with_replacement() takes (iterable, r)")
+	}
+	rLit, ok := c.Args[1].(*ir.IntLit)
+	if !ok || rLit.V < 1 {
+		return fmt.Errorf("combinations_with_replacement(): r must be a positive int literal")
+	}
+	r := int(rLit.V)
+	elem, err := g.listElemTypeOfG(c.Args[0])
+	if err != nil {
+		return fmt.Errorf("combinations_with_replacement(): %w", err)
+	}
+	elemGo := g.goType(elem)
+	g.writef("func() [][]%s {\n", elemGo)
+	g.indent++
+	g.writeIndent()
+	g.writef("__src := ")
+	if err := g.expr(c.Args[0]); err != nil {
+		return err
+	}
+	g.writef("\n")
+	g.writeIndent()
+	g.writef("__out := [][]%s{}\n", elemGo)
+	for k := 0; k < r; k++ {
+		g.writeIndent()
+		if k == 0 {
+			g.writef("for __i%d := 0; __i%d < len(__src); __i%d++ {\n", k, k, k)
+		} else {
+			g.writef("for __i%d := __i%d; __i%d < len(__src); __i%d++ {\n", k, k-1, k, k)
 		}
 		g.indent++
 	}
