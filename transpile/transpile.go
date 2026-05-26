@@ -7140,6 +7140,27 @@ func (g *gen) call(c *ir.Call) error {
 // keywords feed Kwarg (**kwargs). Missing trailing positionals are filled
 // from each parameter's Default, evaluated at the call site.
 func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
+	// Splat over fixed params: `f(*xs)` against `def f(a, b, c)` expands to
+	// `f(xs[0], xs[1], xs[2])`. xs is re-evaluated per access — callers
+	// passing side-effecting expressions should hoist to a local first.
+	// Only triggers when the only positional arg is a single Starred and
+	// the callee has no *args sink.
+	if len(c.Args) == 1 && fn.Vararg == nil {
+		if st, ok := c.Args[0].(*ir.Starred); ok {
+			n := len(fn.Params)
+			expanded := make([]ir.Expr, n)
+			for i := 0; i < n; i++ {
+				expanded[i] = &ir.Subscript{
+					Value: st.Value,
+					Index: &ir.IntLit{V: int64(i)},
+					Ty:    fn.Params[i].Ty,
+				}
+			}
+			c2 := *c
+			c2.Args = expanded
+			c = &c2
+		}
+	}
 	if len(c.Args) > len(fn.Params) && fn.Vararg == nil {
 		return fmt.Errorf("%s: too many positional arguments (got %d, expected %d)", fn.Name, len(c.Args), len(fn.Params))
 	}
