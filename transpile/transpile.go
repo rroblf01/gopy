@@ -504,6 +504,7 @@ type gen struct {
 	funcs          map[string]*ir.Func             // free function name → decl (for kwarg/default resolution)
 	methods        map[string]map[string]*ir.Func  // class name → method name → method decl
 	needsException bool                 // module references the builtin Exception type
+	preDeclaredLocalFns map[string]bool // nested function names already forward-declared in the current block
 	currentClass   *ir.Class            // set while emitting a method body, used for super()
 	helpers        map[string]string    // inline runtime helpers emitted once at module end
 	currentFn      *ir.Func             // current function being emitted (used for multi-return Return)
@@ -928,12 +929,95 @@ func (g *gen) generatorFn(fn *ir.Func) error {
 }
 
 func (g *gen) stmts(ss []ir.Stmt) error {
+	// Pre-pass: forward-declare every nested function in this block so
+	// they can reference each other in any textual order (mutual
+	// recursion + forward calls). The body assignment for each
+	// LocalFunc is emitted later, in source order, with the var-decl
+	// suppressed via g.preDeclaredLocalFns.
+	predeclared := map[string]bool{}
+	for _, s := range ss {
+		if lf, ok := s.(*ir.LocalFunc); ok && lf.Fn != nil && lf.Fn.Name != "" {
+			if predeclared[lf.Fn.Name] {
+				continue
+			}
+			predeclared[lf.Fn.Name] = true
+			// Register in g.funcs ahead of body emission so sibling
+			// nested funcs see each other's return types when their
+			// bodies are lowered (forward calls, mutual recursion).
+			g.funcs[lf.Fn.Name] = lf.Fn
+			g.writeIndent()
+			g.writef("var %s %s\n", lf.Fn.Name, g.funcLitSig(lf.Fn))
+			g.writeIndent()
+			g.writef("_ = %s\n", lf.Fn.Name)
+		}
+	}
+	prev := g.preDeclaredLocalFns
+	if g.preDeclaredLocalFns == nil {
+		g.preDeclaredLocalFns = map[string]bool{}
+	}
+	for k := range predeclared {
+		g.preDeclaredLocalFns[k] = true
+	}
+	defer func() {
+		// Remove only the names we added so nested scopes don't leak.
+		for k := range predeclared {
+			delete(g.preDeclaredLocalFns, k)
+		}
+		if prev == nil && len(g.preDeclaredLocalFns) == 0 {
+			g.preDeclaredLocalFns = nil
+		}
+	}()
 	for _, s := range ss {
 		if err := g.stmt(s); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// funcLitSig builds the Go function-type expression used in `var name <sig>`
+// forward declarations and `name = <sig> { body }` bodies.
+func (g *gen) funcLitSig(fn *ir.Func) string {
+	var sigB strings.Builder
+	sigB.WriteString("func(")
+	for i, p := range fn.Params {
+		if i > 0 {
+			sigB.WriteString(", ")
+		}
+		fmt.Fprintf(&sigB, "%s %s", p.Name, g.goType(p.Ty))
+	}
+	if fn.Vararg != nil {
+		if len(fn.Params) > 0 {
+			sigB.WriteString(", ")
+		}
+		elemGo := "any"
+		if fn.Vararg.Ty != nil && fn.Vararg.Ty.Elem != nil && fn.Vararg.Ty.Elem.Kind != ir.TyUnknown && fn.Vararg.Ty.Elem.Kind != ir.TyAny {
+			elemGo = g.goType(fn.Vararg.Ty.Elem)
+		}
+		fmt.Fprintf(&sigB, "%s []%s", fn.Vararg.Name, elemGo)
+	}
+	if fn.Kwarg != nil {
+		if len(fn.Params) > 0 || fn.Vararg != nil {
+			sigB.WriteString(", ")
+		}
+		fmt.Fprintf(&sigB, "%s map[string]any", fn.Kwarg.Name)
+	}
+	sigB.WriteString(")")
+	if fn.Ret != nil && fn.Ret.Kind != ir.TyUnknown && fn.Ret.Kind != ir.TyNone {
+		if fn.Ret.Kind == ir.TyTuple {
+			sigB.WriteString(" (")
+			for i, t := range fn.Ret.Tuple {
+				if i > 0 {
+					sigB.WriteString(", ")
+				}
+				fmt.Fprintf(&sigB, "%s", g.goType(t))
+			}
+			sigB.WriteString(")")
+		} else {
+			fmt.Fprintf(&sigB, " %s", g.goType(fn.Ret))
+		}
+	}
+	return sigB.String()
 }
 
 func (g *gen) stmt(s ir.Stmt) error {
@@ -1014,6 +1098,15 @@ func (g *gen) stmt(s ir.Stmt) error {
 				g.localVarTypes[x.Target] = vt
 			} else if st := g.stdlibCallRetType(x.Value); st != nil && st.Kind != ir.TyUnknown {
 				g.localVarTypes[x.Target] = st
+			} else if attr, ok := x.Value.(*ir.Attribute); ok {
+				// `c = EnumClass.MEMBER` — propagate the enum's type so
+				// later `.name` / `.value` access on c routes through the
+				// enum-aware attribute codegen.
+				if recv, ok := attr.Recv.(*ir.Name); ok {
+					if cls, ok := g.classes[recv.N]; ok && cls.IsEnum {
+						g.localVarTypes[x.Target] = &ir.Type{Kind: ir.TyNamed, Name: cls.Name}
+					}
+				}
 			}
 		}
 		g.writeIndent()
@@ -2934,13 +3027,17 @@ func (g *gen) localFunc(lf *ir.LocalFunc) error {
 	signature := sigB.String()
 
 	// `var name func(...) ret` — declared first so the closure body can
-	// recurse into itself.
-	g.writeIndent()
-	// Strip the leading "func" since `var name func(...) ret` needs the
-	// signature in func-type form already; signature starts with "func(...)".
-	g.writef("var %s %s\n", fn.Name, signature)
-	g.writeIndent()
-	g.writef("_ = %s\n", fn.Name)
+	// recurse into itself. Skip when the enclosing `stmts` pre-pass
+	// already emitted forward declarations (used to make mutual
+	// recursion / forward calls between sibling nested funcs work).
+	if !g.preDeclaredLocalFns[fn.Name] {
+		g.writeIndent()
+		// Strip the leading "func" since `var name func(...) ret` needs the
+		// signature in func-type form already; signature starts with "func(...)".
+		g.writef("var %s %s\n", fn.Name, signature)
+		g.writeIndent()
+		g.writef("_ = %s\n", fn.Name)
+	}
 	g.writeIndent()
 	g.writef("%s = %s {\n", fn.Name, signature)
 	g.indent++
@@ -5382,7 +5479,18 @@ func (g *gen) expr(e ir.Expr) error {
 		// Go has no expression-level if; wrap both branches in an IIFE
 		// whose return type comes from the inferred IR type. Branches must
 		// share a static type (or `any`) for Go to compile the function.
-		ret := g.goType(x.Ty)
+		// When the IR couldn't pin a type (typical for user-function
+		// calls that hadn't been registered at lower time), inspect each
+		// branch's userCallRetType at codegen time.
+		retTy := x.Ty
+		if retTy == nil || retTy.Kind == ir.TyUnknown || retTy.Kind == ir.TyAny {
+			if t := g.userCallRetType(x.Then); t != nil && t.Kind != ir.TyUnknown {
+				retTy = t
+			} else if t := g.userCallRetType(x.Else); t != nil && t.Kind != ir.TyUnknown {
+				retTy = t
+			}
+		}
+		ret := g.goType(retTy)
 		if ret == "" {
 			ret = "any"
 		}
