@@ -4824,6 +4824,43 @@ func (g *gen) expr(e ir.Expr) error {
 				return nil
 			}
 		}
+		// Lexicographic list comparison: Python compares slices element-
+		// wise. Go forbids `<` on slices, so emit an IIFE that walks both
+		// in parallel and short-circuits on the first inequality.
+		if x.Op == "<" || x.Op == "<=" || x.Op == ">" || x.Op == ">=" {
+			lTy := g.effectiveType(x.L)
+			rTy := g.effectiveType(x.R)
+			if lTy != nil && rTy != nil && lTy.Kind == ir.TyList && rTy.Kind == ir.TyList {
+				elemGo := g.goType(lTy.Elem)
+				strict := x.Op == "<" || x.Op == ">"
+				flipped := x.Op == ">" || x.Op == ">="
+				g.writef("func() bool { __a, __b := ")
+				if flipped {
+					if err := g.expr(x.R); err != nil {
+						return err
+					}
+					g.writef(", ")
+					if err := g.expr(x.L); err != nil {
+						return err
+					}
+				} else {
+					if err := g.expr(x.L); err != nil {
+						return err
+					}
+					g.writef(", ")
+					if err := g.expr(x.R); err != nil {
+						return err
+					}
+				}
+				g.writef("; __n := len(__a); if len(__b) < __n { __n = len(__b) }; for __i := 0; __i < __n; __i++ { var __ax, __bx %s = __a[__i], __b[__i]; if __ax < __bx { return true }; if __ax > __bx { return false } }; ", elemGo)
+				if strict {
+					g.writef("return len(__a) < len(__b) }()")
+				} else {
+					g.writef("return len(__a) <= len(__b) }()")
+				}
+				return nil
+			}
+		}
 		g.writef("(")
 		if err := g.expr(x.L); err != nil {
 			return err
@@ -14686,13 +14723,21 @@ func (g *gen) stringMethod(m *ir.MethodCall) (bool, error) {
 		g.writef(")")
 		return true, nil
 	case "splitlines":
-		if len(m.Args) != 0 {
-			return true, fmt.Errorf("str.splitlines() takes no arguments")
+		if len(m.Args) > 1 {
+			return true, fmt.Errorf("str.splitlines() takes 0 or 1 arguments")
 		}
 		g.helpers["__gopy_str_splitlines"] = helperStrSplitlines
 		g.writef("__gopy_str_splitlines(")
 		if err := g.expr(m.Recv); err != nil {
 			return true, err
+		}
+		g.writef(", ")
+		if len(m.Args) == 1 {
+			if err := g.expr(m.Args[0]); err != nil {
+				return true, err
+			}
+		} else {
+			g.writef("false")
 		}
 		g.writef(")")
 		return true, nil
@@ -15620,25 +15665,34 @@ const helperStrExpandtabs = `func __gopy_str_expandtabs(s string, tabsize int64)
 
 // helperStrSplitlines mirrors Python's str.splitlines: splits on \n, \r,
 // \r\n, \v, \f and drops trailing empty element from a final newline.
-const helperStrSplitlines = `func __gopy_str_splitlines(s string) []string {
+const helperStrSplitlines = `func __gopy_str_splitlines(s string, keepends bool) []string {
 	var out []string
 	cur := ""
 	i := 0
 	for i < len(s) {
 		c := s[i]
 		if c == '\n' || c == '\v' || c == '\f' {
+			if keepends {
+				cur += string(c)
+			}
 			out = append(out, cur)
 			cur = ""
 			i++
 			continue
 		}
 		if c == '\r' {
-			out = append(out, cur)
-			cur = ""
+			if keepends {
+				cur += string(c)
+			}
 			i++
 			if i < len(s) && s[i] == '\n' {
+				if keepends {
+					cur += string(s[i])
+				}
 				i++
 			}
+			out = append(out, cur)
+			cur = ""
 			continue
 		}
 		cur += string(c)

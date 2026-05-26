@@ -27,7 +27,8 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - Set literals `{1, 2, 3}` — lower to the same slice shape; `in` / `not in` work, uniqueness not enforced. `set.add(x)` now dedups (contains-check + conditional `append`) and `set.discard(x)` removes if present (search + slice-out). Both rewrites require the receiver to be addressable
 - `in` / `not in` operators on strings (`strings.Contains`), dicts (comma-ok lookup), and lists (inline scan with element-type cast)
 - Augmented list concat (`xs += ys`) → `append(xs, ys...)`
-- String methods: `.upper()`, `.lower()`, `.strip([chars])`, `.lstrip([chars])`, `.rstrip([chars])`, `.split([sep])`, `sep.join(parts)`, `.replace(old, new)`, `.startswith(s)`, `.endswith(s)`, `.find(s)`, `.count(sub)`, `.title()`, `.capitalize()`, `.center(width[, fillchar])`, `.ljust(width[, fillchar])`, `.rjust(width[, fillchar])`, `.zfill(width)` — chained calls infer through return types
+- String methods: `.upper()`, `.lower()`, `.strip([chars])`, `.lstrip([chars])`, `.rstrip([chars])`, `.split([sep])`, `sep.join(parts)`, `.replace(old, new)`, `.startswith(s)`, `.endswith(s)`, `.find(s)`, `.count(sub)`, `.title()`, `.capitalize()`, `.center(width[, fillchar])`, `.ljust(width[, fillchar])`, `.rjust(width[, fillchar])`, `.zfill(width)`, `.splitlines([keepends])` — chained calls infer through return types
+- List lexicographic comparison (`<`, `<=`, `>`, `>=`) for typed lists now emits an IIFE that walks both slices in parallel and short-circuits on the first inequality (longer-wins tiebreak matches CPython). `==` / `!=` continue to route through `reflect.DeepEqual`
 - Type inference of user-function and user-method return types: `b = make_box(7)` propagates the declared `Box` return type onto `b` so `b.method()` dispatches correctly without an annotation
 - `break` and `continue` inside loops
 - Ternary expression: `x if cond else y`
