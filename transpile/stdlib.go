@@ -108,6 +108,7 @@ var stdlibModules = map[string]stdlibModule{
 			"getegid":   {GoFunc: "__gopy_os_getegid", GoImport: "os", Helper: helperOsGetegid, RetKind: "int"},
 			"getlogin":  {GoFunc: "__gopy_os_getlogin", GoImport: "os", Helper: helperOsGetlogin, HelperImports: []string{"os/user"}, RetKind: "str"},
 			"system":    {GoFunc: "__gopy_os_system", Helper: helperOsSystem, HelperImports: []string{"os/exec", "os"}, RetKind: "int"},
+			"popen":     {GoFunc: "__gopy_os_popen", Helper: helperOsPopen, RetTag: "__PopenFile", ExtraHelpers: map[string]string{"__PopenFile": helperOsPopenType}, HelperImports: []string{"os/exec", "io", "bytes"}},
 			"fspath":    {GoFunc: "__gopy_os_fspath", Helper: helperOsFspath, ExtraHelpers: map[string]string{"__Path": helperPathType}, HelperImports: []string{"os", "path/filepath", "fmt"}, RetKind: "str"},
 			"uname":     {GoFunc: "__gopy_os_uname", Helper: helperOsUname, HelperImports: []string{"os", "runtime"}},
 			"statvfs":   {GoFunc: "__gopy_os_statvfs", Helper: helperOsStatvfs, HelperImports: []string{"syscall"}},
@@ -267,6 +268,10 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"hashlib": {
+		Attrs: map[string]stdlibAttr{
+			"algorithms_guaranteed": {GoExpr: `[]string{"md5", "sha1", "sha224", "sha256", "sha384", "sha512", "blake2b", "blake2s", "sha3_224", "sha3_256", "sha3_384", "sha3_512", "shake_128", "shake_256"}`},
+			"algorithms_available":  {GoExpr: `[]string{"md5", "sha1", "sha224", "sha256", "sha384", "sha512"}`},
+		},
 		Funcs: map[string]stdlibFunc{
 			"sha256": {GoFunc: "__gopy_hashlib_sha256", GoImport: "crypto/sha256", Helper: helperHashlibSha256, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/md5", "crypto/sha1", "crypto/sha512"}},
 			"md5":    {GoFunc: "__gopy_hashlib_md5", GoImport: "crypto/md5", Helper: helperHashlibMd5, RetTag: "__Hasher", ExtraHelpers: map[string]string{"__Hasher": helperHasherType}, HelperImports: []string{"encoding/hex", "crypto/sha256", "crypto/sha1", "crypto/sha512"}},
@@ -1386,12 +1391,12 @@ var stdlibModules = map[string]stdlibModule{
 			// reduce uses an inline lambda for the binary op; dispatch
 			// lives in transpile.go's call() builder.
 			"reduce":          {GoFunc: "__gopy_reduce_unused"},
-			"partial":         {GoFunc: "__gopy_partial_unused"},
+			"partial":         {GoFunc: "__gopy_partial", Helper: helperFunctoolsPartial, HelperImports: []string{"reflect"}},
 			"cache":           {GoFunc: "__gopy_cache_unused"},
 			"cached_property": {GoFunc: "__gopy_cached_prop_unused"},
 			"wraps":           {GoFunc: "__gopy_wraps_unused"},
 			"singledispatch":  {GoFunc: "__gopy_singledispatch_unused"},
-			"cmp_to_key":      {GoFunc: "__gopy_cmp_to_key_unused"},
+			"cmp_to_key":      {GoFunc: "__gopy_cmp_to_key", Helper: helperFunctoolsCmpToKey},
 			"total_ordering":  {GoFunc: "__gopy_total_ordering", Helper: helperFunctoolsTotalOrdering},
 			"update_wrapper":  {GoFunc: "__gopy_update_wrapper", Helper: helperFunctoolsUpdateWrapper},
 			"lru_cache":       {GoFunc: "__gopy_lru_cache_unused"},
@@ -1495,6 +1500,7 @@ var stdlibModules = map[string]stdlibModule{
 			"zip_longest":  {GoFunc: "__gopy_zip_longest_unused"},
 			"pairwise":     {GoFunc: "__gopy_pairwise_unused"},
 			"batched":      {GoFunc: "__gopy_batched_unused"},
+			"tee":          {GoFunc: "__gopy_itertools_tee", Helper: helperItertoolsTee},
 		},
 	},
 	"random": {
@@ -12987,4 +12993,203 @@ func __gopy_int_to_str(n int64) string {
 		return "-" + string(digits)
 	}
 	return string(digits)
+}`
+
+// helperFunctoolsPartial — partial(fn, *bound_args) returns a callable
+// that, when invoked, prepends the bound positional args to the runtime
+// ones. Uses reflect so it works with concrete-typed Go functions (user
+// fns transpiled with int64/float64/string signatures), not just
+// any-shaped lambdas.
+const helperFunctoolsPartial = `func __gopy_partial(args ...any) func(...any) any {
+	if len(args) == 0 {
+		return func(...any) any { return nil }
+	}
+	fn := args[0]
+	bound := args[1:]
+	return func(rest ...any) any {
+		combined := make([]any, 0, len(bound)+len(rest))
+		combined = append(combined, bound...)
+		combined = append(combined, rest...)
+		switch f := fn.(type) {
+		case func(...any) any:
+			return f(combined...)
+		case func(any) any:
+			if len(combined) > 0 {
+				return f(combined[0])
+			}
+			return f(nil)
+		case func(any, any) any:
+			a := any(nil)
+			b := any(nil)
+			if len(combined) > 0 {
+				a = combined[0]
+			}
+			if len(combined) > 1 {
+				b = combined[1]
+			}
+			return f(a, b)
+		}
+		rv := reflect.ValueOf(fn)
+		if !rv.IsValid() || rv.Kind() != reflect.Func {
+			return nil
+		}
+		ft := rv.Type()
+		in := make([]reflect.Value, 0, len(combined))
+		for i := 0; i < ft.NumIn() && i < len(combined); i++ {
+			want := ft.In(i)
+			v := reflect.ValueOf(combined[i])
+			if v.IsValid() && v.Type().ConvertibleTo(want) {
+				in = append(in, v.Convert(want))
+			} else if v.IsValid() {
+				in = append(in, v)
+			} else {
+				in = append(in, reflect.Zero(want))
+			}
+		}
+		out := rv.Call(in)
+		if len(out) == 0 {
+			return nil
+		}
+		return out[0].Interface()
+	}
+}`
+
+// helperFunctoolsCmpToKey — wraps a cmp-style fn (returns -1/0/1) into a
+// key-style fn that returns a sortable wrapper. gopy uses sort.SliceStable
+// inside sorted(); the result here is a callable that yields a *cmpKey
+// object whose < operator delegates to cmp. Implementation: closure
+// captures cmp; key(x) returns []any{x, cmp} which the sorted-with-key
+// path inspects to call cmp.
+const helperFunctoolsCmpToKey = `func __gopy_cmp_to_key(args ...any) func(...any) any {
+	if len(args) == 0 {
+		return func(...any) any { return nil }
+	}
+	cmp := args[0]
+	return func(rest ...any) any {
+		var x any
+		if len(rest) > 0 {
+			x = rest[0]
+		}
+		return []any{"__cmpkey__", x, cmp}
+	}
+}`
+
+// helperItertoolsTee — eagerly materialize the iterable into n copies.
+// Each copy is a []any independent of the source. Default n=2.
+const helperItertoolsTee = `func __gopy_itertools_tee(args ...any) []any {
+	if len(args) == 0 {
+		return []any{}
+	}
+	n := int64(2)
+	if len(args) > 1 {
+		switch v := args[1].(type) {
+		case int64:
+			n = v
+		case int:
+			n = int64(v)
+		case int32:
+			n = int64(v)
+		}
+	}
+	asSlice := func(v any) []any {
+		switch x := v.(type) {
+		case []any:
+			out := make([]any, len(x))
+			copy(out, x)
+			return out
+		case []int64:
+			out := make([]any, len(x))
+			for i, e := range x {
+				out[i] = e
+			}
+			return out
+		case []string:
+			out := make([]any, len(x))
+			for i, e := range x {
+				out[i] = e
+			}
+			return out
+		case []float64:
+			out := make([]any, len(x))
+			for i, e := range x {
+				out[i] = e
+			}
+			return out
+		case []bool:
+			out := make([]any, len(x))
+			for i, e := range x {
+				out[i] = e
+			}
+			return out
+		case string:
+			out := make([]any, 0, len(x))
+			for _, r := range x {
+				out = append(out, string(r))
+			}
+			return out
+		}
+		return []any{}
+	}
+	src := asSlice(args[0])
+	out := make([]any, n)
+	for i := int64(0); i < n; i++ {
+		cp := make([]any, len(src))
+		copy(cp, src)
+		out[i] = cp
+	}
+	return out
+}`
+
+// helperOsPopenType — file-like wrapper around an exec.Cmd whose stdout
+// streams into a buffer. .read() returns everything captured; .close()
+// waits for the child to exit and returns the exit status.
+const helperOsPopenType = `type __PopenFile struct {
+	cmd    *exec.Cmd
+	stdout *bytes.Buffer
+	done   bool
+	status int64
+}
+
+func (p *__PopenFile) Read(args ...int64) string {
+	if !p.done {
+		p.cmd.Wait()
+		p.done = true
+		if p.cmd.ProcessState != nil {
+			p.status = int64(p.cmd.ProcessState.ExitCode())
+		}
+	}
+	return p.stdout.String()
+}
+
+func (p *__PopenFile) Close() int64 {
+	if !p.done {
+		p.cmd.Wait()
+		p.done = true
+		if p.cmd.ProcessState != nil {
+			p.status = int64(p.cmd.ProcessState.ExitCode())
+		}
+	}
+	if p.status == 0 {
+		return 0
+	}
+	return p.status
+}`
+
+const helperOsPopen = `func __gopy_os_popen(args ...string) *__PopenFile {
+	if len(args) == 0 {
+		return &__PopenFile{stdout: &bytes.Buffer{}}
+	}
+	cmd := exec.Command("/bin/sh", "-c", args[0])
+	buf := &bytes.Buffer{}
+	cmd.Stdout = buf
+	stderr, _ := cmd.StderrPipe()
+	if err := cmd.Start(); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	if stderr != nil {
+		go func() {
+			io.Copy(io.Discard, stderr)
+		}()
+	}
+	return &__PopenFile{cmd: cmd, stdout: buf}
 }`

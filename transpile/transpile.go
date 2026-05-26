@@ -7220,6 +7220,10 @@ var taggedMethodRename = map[string]map[string]string{
 		"fileno":         "Fileno",
 		"server_address": "Server_address",
 	},
+	"__PopenFile": {
+		"read":  "Read",
+		"close": "Close",
+	},
 	"__Timer": {
 		"start":  "Start",
 		"cancel": "Cancel",
