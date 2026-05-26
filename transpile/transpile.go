@@ -2092,12 +2092,13 @@ func (g *gen) delStmt(d *ir.Del) error {
 				continue
 			}
 			if recvTy != nil && recvTy.Kind == ir.TyList {
-				// xs = append(xs[:i], xs[i+1:]...)
-				name, ok := x.Value.(*ir.Name)
-				if !ok {
-					return fmt.Errorf("del on list slice requires a Name target")
+				// xs = append(xs[:i], xs[i+1:]...)  — also works for
+				// nested subscripts like `del d[k][i]`, where the LHS
+				// re-emits as `d[k]` on both sides of the assignment.
+				if err := g.expr(x.Value); err != nil {
+					return err
 				}
-				g.writef("%s = append(", name.N)
+				g.writef(" = append(")
 				if err := g.expr(x.Value); err != nil {
 					return err
 				}

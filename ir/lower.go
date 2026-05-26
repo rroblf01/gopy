@@ -2722,6 +2722,16 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 			if err != nil {
 				return nil, err
 			}
+			// `f(*xs)` expands inline when xs is a list literal with
+			// known length. For Name/Subscript spreads we keep the
+			// Starred node and let codegen route through a variadic
+			// helper if the callee accepts one.
+			if st, ok := x.(*Starred); ok {
+				if ll, ok := st.Value.(*ListLit); ok {
+					args = append(args, ll.Elems...)
+					continue
+				}
+			}
 			args = append(args, x)
 		}
 		var kws []Keyword
@@ -3885,9 +3895,14 @@ func lowerMatchPattern(p parser.Node, sc *scope) ([]Expr, error) {
 // WithCM IR node; codegen resolves the dunder methods.
 func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 	items := n.Children("items")
-	if len(items) != 1 {
-		return nil, fmt.Errorf("line %d: multi-item `with` not supported (F4)", n.Lineno())
+	if len(items) == 0 {
+		return nil, fmt.Errorf("line %d: empty `with` statement", n.Lineno())
 	}
+	bodyNodes := n.Children("body")
+	return lowerWithItems(n.Lineno(), items, bodyNodes, sc)
+}
+
+func lowerWithItems(lineno int, items []parser.Node, bodyNodes []parser.Node, sc *scope) (Stmt, error) {
 	item := items[0]
 	ctx := item.Child("context_expr")
 	// Generic context-manager path: anything other than `open(...)`.
@@ -3917,7 +3932,7 @@ func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 				innerSc.declare(varName, &Type{Kind: TyUnknown})
 			}
 		}
-		body, err := lowerBody(n.Children("body"), innerSc)
+		body, err := withItemBody(lineno, items, bodyNodes, innerSc)
 		if err != nil {
 			return nil, err
 		}
@@ -3925,7 +3940,7 @@ func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 	}
 	args := ctx.Children("args")
 	if len(args) < 1 || len(args) > 2 {
-		return nil, fmt.Errorf("line %d: open() takes 1 or 2 positional args", n.Lineno())
+		return nil, fmt.Errorf("line %d: open() takes 1 or 2 positional args", lineno)
 	}
 	pathE, err := lowerExpr(args[0], sc)
 	if err != nil {
@@ -3934,7 +3949,7 @@ func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 	mode := "r"
 	if len(args) == 2 {
 		if args[1].Type() != "Constant" {
-			return nil, fmt.Errorf("line %d: open() mode must be a string literal", n.Lineno())
+			return nil, fmt.Errorf("line %d: open() mode must be a string literal", lineno)
 		}
 		s, _ := args[1]["value"].(string)
 		normalized := s
@@ -3945,23 +3960,37 @@ func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 			normalized = "w"
 		}
 		if normalized != "r" && normalized != "w" {
-			return nil, fmt.Errorf("line %d: open() mode %q not supported (F4: only \"r\" or \"w\")", n.Lineno(), s)
+			return nil, fmt.Errorf("line %d: open() mode %q not supported (F4: only \"r\" or \"w\")", lineno, s)
 		}
 		mode = normalized
 	}
 	asNode := item.Child("optional_vars")
 	if asNode == nil || asNode.Type() != "Name" {
-		return nil, fmt.Errorf("line %d: `with open(...) as <name>` required", n.Lineno())
+		return nil, fmt.Errorf("line %d: `with open(...) as <name>` required", lineno)
 	}
 	varName := asNode.Str("id")
 	innerSc := &scope{vars: copyVars(sc.vars)}
 	// File handle type tracked as a named type; codegen knows what to emit.
 	innerSc.declare(varName, &Type{Kind: TyNamed, Name: "__gopy_file"})
-	body, err := lowerBody(n.Children("body"), innerSc)
+	body, err := withItemBody(lineno, items, bodyNodes, innerSc)
 	if err != nil {
 		return nil, err
 	}
 	return &WithFile{VarName: varName, Path: pathE, Mode: mode, Body: body}, nil
+}
+
+// withItemBody returns the body for the current `with` item. If more
+// items remain, it lowers them as a nested With statement wrapping the
+// real body; otherwise it lowers the actual body statements.
+func withItemBody(lineno int, items []parser.Node, bodyNodes []parser.Node, sc *scope) ([]Stmt, error) {
+	if len(items) > 1 {
+		inner, err := lowerWithItems(lineno, items[1:], bodyNodes, sc)
+		if err != nil {
+			return nil, err
+		}
+		return []Stmt{inner}, nil
+	}
+	return lowerBody(bodyNodes, sc)
 }
 
 // lowerFor handles two shapes:
