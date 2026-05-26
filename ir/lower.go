@@ -3937,10 +3937,17 @@ func lowerWith(n parser.Node, sc *scope) (Stmt, error) {
 			return nil, fmt.Errorf("line %d: open() mode must be a string literal", n.Lineno())
 		}
 		s, _ := args[1]["value"].(string)
-		if s != "r" && s != "w" {
+		normalized := s
+		switch s {
+		case "r", "rb", "rt":
+			normalized = "r"
+		case "w", "wb", "wt":
+			normalized = "w"
+		}
+		if normalized != "r" && normalized != "w" {
 			return nil, fmt.Errorf("line %d: open() mode %q not supported (F4: only \"r\" or \"w\")", n.Lineno(), s)
 		}
-		mode = s
+		mode = normalized
 	}
 	asNode := item.Child("optional_vars")
 	if asNode == nil || asNode.Type() != "Name" {

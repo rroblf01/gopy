@@ -2440,6 +2440,11 @@ func (g *gen) emitTaggedOpenCM(call *ir.Call, varName string, body []ir.Stmt, fn
 	case "__WaveRead":
 		g.addImport("os")
 		g.helpers["__WaveRead"] = helperWaveReadType
+	case "__Bz2File":
+		g.addImport("compress/bzip2")
+		g.addImport("io")
+		g.addImport("os")
+		g.helpers["__Bz2File"] = helperBz2FileType
 	}
 	g.writeIndent()
 	g.writef("func() {\n")
@@ -2722,6 +2727,8 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitTaggedOpenCM(call, w.VarName, w.Body, "__gopy_zipfile_open", "__ZipFile")
 			case "wave.open":
 				return g.emitTaggedOpenCM(call, w.VarName, w.Body, "__gopy_wave_open", "__WaveRead")
+			case "bz2.open", "bz2.BZ2File":
+				return g.emitTaggedOpenCM(call, w.VarName, w.Body, "__gopy_bz2_open_read", "__Bz2File")
 			}
 		}
 	}
@@ -2748,6 +2755,8 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitTaggedOpenCM(synth, w.VarName, w.Body, "__gopy_zipfile_open", "__ZipFile")
 			case "wave.open":
 				return g.emitTaggedOpenCM(synth, w.VarName, w.Body, "__gopy_wave_open", "__WaveRead")
+			case "bz2.open", "bz2.BZ2File":
+				return g.emitTaggedOpenCM(synth, w.VarName, w.Body, "__gopy_bz2_open_read", "__Bz2File")
 			}
 		}
 	}
@@ -7172,6 +7181,45 @@ var taggedMethodRename = map[string]map[string]string{
 		"tell":         "Tell",
 		"close":        "Close",
 	},
+	"__Bz2File": {
+		"read":      "Read",
+		"readline":  "Readline",
+		"readlines": "Readlines",
+		"close":     "Close",
+	},
+	"__SimpleCookie": {
+		"set":    "Set",
+		"get":    "Get",
+		"keys":   "Keys",
+		"values": "Values",
+		"output": "Output",
+		"load":   "Load",
+	},
+	"__SequenceMatcher": {
+		"ratio":                "Ratio",
+		"quick_ratio":          "Quick_ratio",
+		"real_quick_ratio":     "Real_quick_ratio",
+		"get_matching_blocks":  "Get_matching_blocks",
+		"set_seqs":             "Set_seqs",
+		"set_seq1":             "Set_seq1",
+		"set_seq2":             "Set_seq2",
+	},
+	"__Scheduler": {
+		"enter":    "Enter",
+		"enterabs": "Enterabs",
+		"cancel":   "Cancel",
+		"run":      "Run",
+		"empty":    "Empty",
+		"queue":    "Queue",
+	},
+	"__TCPServer": {
+		"serve_forever":  "Serve_forever",
+		"handle_request": "Handle_request",
+		"shutdown":       "Shutdown",
+		"server_close":   "Server_close",
+		"fileno":         "Fileno",
+		"server_address": "Server_address",
+	},
 	"__Timer": {
 		"start":  "Start",
 		"cancel": "Cancel",
@@ -7473,23 +7521,28 @@ var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 // `recv[k]`, `recv[k] = v`, `del recv[k]`, `k in recv`, `len(recv)`
 // on tagged stdlib receivers to the matching Go method on the shim.
 var taggedSubscriptGet = map[string]string{
-	"__Shelf": "Get",
+	"__Shelf":        "Get",
+	"__SimpleCookie": "Get",
 }
 
 var taggedSubscriptSet = map[string]string{
-	"__Shelf": "Set",
+	"__Shelf":        "Set",
+	"__SimpleCookie": "Set",
 }
 
 var taggedSubscriptDel = map[string]string{
-	"__Shelf": "Delete",
+	"__Shelf":        "Delete",
+	"__SimpleCookie": "Delete",
 }
 
 var taggedContains = map[string]string{
-	"__Shelf": "Contains",
+	"__Shelf":        "Contains",
+	"__SimpleCookie": "Contains",
 }
 
 var taggedLen = map[string]string{
-	"__Shelf": "Len",
+	"__Shelf":        "Len",
+	"__SimpleCookie": "Len",
 }
 
 var taggedAttrs = map[string]map[string]taggedAttrInfo{

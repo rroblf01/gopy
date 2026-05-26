@@ -96,6 +96,7 @@ var stdlibModules = map[string]stdlibModule{
 			"rmdir":     {GoFunc: "__gopy_os_rmdir", GoImport: "os", Helper: helperOsRmdir},
 			"cpu_count": {GoFunc: "__gopy_os_cpu_count", Helper: helperOsCPUCount, HelperImports: []string{"runtime"}, RetKind: "int"},
 			"urandom":   {GoFunc: "__gopy_os_urandom", Helper: helperOsUrandom, HelperImports: []string{"crypto/rand"}, RetKind: "str"},
+			"getrandom": {GoFunc: "__gopy_os_getrandom", Helper: helperOsGetrandom, ExtraHelpers: map[string]string{"__gopy_os_urandom": helperOsUrandom}, HelperImports: []string{"crypto/rand"}, RetKind: "str"},
 			"walk":      {GoFunc: "__gopy_os_walk", Helper: helperOsWalk, HelperImports: []string{"os", "path/filepath"}},
 			"scandir":   {GoFunc: "__gopy_os_scandir", Helper: helperOsScandir, ExtraHelpers: map[string]string{"__DirEntry": helperDirEntryType}, HelperImports: []string{"os"}},
 			"chdir":     {GoFunc: "os.Chdir", GoImport: "os"},
@@ -420,6 +421,7 @@ var stdlibModules = map[string]stdlibModule{
 			"disk_usage":        {GoFunc: "__gopy_shutil_diskusage", Helper: helperShutilDiskUsage},
 			"get_terminal_size": {GoFunc: "__gopy_shutil_terminal_size", Helper: helperShutilTerminalSize},
 			"make_archive":      {GoFunc: "__gopy_shutil_make_archive", Helper: helperShutilMakeArchive, HelperImports: []string{"archive/tar", "archive/zip", "compress/gzip", "io", "os", "path/filepath"}, RetKind: "str"},
+			"copyfileobj":       {GoFunc: "__gopy_shutil_copyfileobj", Helper: helperShutilCopyfileobj, HelperImports: []string{"io", "os"}, RetKind: "int"},
 		},
 	},
 	"tempfile": {
@@ -562,9 +564,9 @@ var stdlibModules = map[string]stdlibModule{
 			},
 			"cookies": {
 				Funcs: map[string]stdlibFunc{
-					"SimpleCookie":   {GoFunc: "__gopy_http_cookie_unused"},
+					"SimpleCookie":   {GoFunc: "__gopy_http_cookie_new", Helper: helperHTTPCookieNew, RetTag: "__SimpleCookie", ExtraHelpers: map[string]string{"__SimpleCookie": helperHTTPCookieType}, HelperImports: []string{"strings"}},
 					"Morsel":         {GoFunc: "__gopy_http_cookie_unused"},
-					"BaseCookie":     {GoFunc: "__gopy_http_cookie_unused"},
+					"BaseCookie":     {GoFunc: "__gopy_http_cookie_new", Helper: helperHTTPCookieNew, RetTag: "__SimpleCookie", ExtraHelpers: map[string]string{"__SimpleCookie": helperHTTPCookieType}, HelperImports: []string{"strings"}},
 					"CookieError":    {GoFunc: "__gopy_http_cookie_unused"},
 				},
 			},
@@ -950,6 +952,26 @@ var stdlibModules = map[string]stdlibModule{
 			"S_IRWXU":  {GoExpr: "int64(0o700)"},
 			"S_IRWXG":  {GoExpr: "int64(0o070)"},
 			"S_IRWXO":  {GoExpr: "int64(0o007)"},
+			"ST_MODE":  {GoExpr: "int64(0)"},
+			"ST_INO":   {GoExpr: "int64(1)"},
+			"ST_DEV":   {GoExpr: "int64(2)"},
+			"ST_NLINK": {GoExpr: "int64(3)"},
+			"ST_UID":   {GoExpr: "int64(4)"},
+			"ST_GID":   {GoExpr: "int64(5)"},
+			"ST_SIZE":  {GoExpr: "int64(6)"},
+			"ST_ATIME": {GoExpr: "int64(7)"},
+			"ST_MTIME": {GoExpr: "int64(8)"},
+			"ST_CTIME": {GoExpr: "int64(9)"},
+			"UF_NODUMP":     {GoExpr: "int64(0x01)"},
+			"UF_IMMUTABLE":  {GoExpr: "int64(0x02)"},
+			"UF_APPEND":     {GoExpr: "int64(0x04)"},
+			"UF_OPAQUE":     {GoExpr: "int64(0x08)"},
+			"UF_NOUNLINK":   {GoExpr: "int64(0x10)"},
+			"SF_ARCHIVED":   {GoExpr: "int64(0x10000)"},
+			"SF_IMMUTABLE":  {GoExpr: "int64(0x20000)"},
+			"SF_APPEND":     {GoExpr: "int64(0x40000)"},
+			"SF_NOUNLINK":   {GoExpr: "int64(0x100000)"},
+			"SF_SNAPSHOT":   {GoExpr: "int64(0x200000)"},
 		},
 		Funcs: map[string]stdlibFunc{
 			"S_ISREG":  {GoFunc: "__gopy_stat_isreg", Helper: helperStatIsreg, RetKind: "bool"},
@@ -1139,6 +1161,9 @@ var stdlibModules = map[string]stdlibModule{
 			"signal":     {GoFunc: "__gopy_signal_signal", Helper: helperSignalSignal, HelperImports: []string{"os", "os/signal", "sync", "syscall"}},
 			"getsignal":  {GoFunc: "__gopy_signal_getsignal", Helper: helperSignalSignal, HelperImports: []string{"os", "os/signal", "sync", "syscall"}},
 			"set_wakeup_fd": {GoFunc: "__gopy_signal_noop_int", Helper: helperSignalSignal, HelperImports: []string{"os", "os/signal", "sync", "syscall"}, RetKind: "int"},
+			"alarm":      {GoFunc: "__gopy_signal_alarm", Helper: helperSignalAlarm, HelperImports: []string{"time", "syscall", "os"}, RetKind: "int"},
+			"setitimer":  {GoFunc: "__gopy_signal_setitimer", Helper: helperSignalSetitimer},
+			"getitimer":  {GoFunc: "__gopy_signal_getitimer", Helper: helperSignalGetitimer},
 		},
 	},
 	"atexit": {
@@ -1165,7 +1190,7 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"run":             {GoFunc: "__gopy_asyncio_run_unused"},
 			"sleep":           {GoFunc: "__gopy_asyncio_sleep_unused"},
-			"gather":          {GoFunc: "__gopy_asyncio_gather_unused"},
+			"gather":          {GoFunc: "__gopy_asyncio_gather", Helper: helperAsyncioGather},
 			"create_task":     {GoFunc: "__gopy_asyncio_create_task_unused"},
 			"wait":            {GoFunc: "__gopy_asyncio_wait_unused"},
 			"wait_for":        {GoFunc: "__gopy_asyncio_wait_for_unused"},
@@ -1283,6 +1308,7 @@ var stdlibModules = map[string]stdlibModule{
 			"gethostname":   {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
 			"getfqdn":       {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
 			"gethostbyname": {GoFunc: "__gopy_socket_gethostbyname", Helper: helperSocketGethostbyname, HelperImports: []string{"net"}, RetKind: "str"},
+			"gethostbyname_ex": {GoFunc: "__gopy_socket_gethostbyname_ex", Helper: helperSocketGethostbynameEx, HelperImports: []string{"net", "strings"}},
 			"gethostbyaddr": {GoFunc: "__gopy_socket_gethostbyaddr", Helper: helperSocketGethostbyaddr, HelperImports: []string{"net"}},
 			"inet_aton":     {GoFunc: "__gopy_socket_inet_aton", Helper: helperSocketInetAton, HelperImports: []string{"net"}, RetKind: "str"},
 			"inet_ntoa":     {GoFunc: "__gopy_socket_inet_ntoa", Helper: helperSocketInetNtoa, HelperImports: []string{"net"}, RetKind: "str"},
@@ -1707,6 +1733,7 @@ var stdlibModules = map[string]stdlibModule{
 			"get_close_matches": {GoFunc: "__gopy_difflib_close", Helper: helperDifflibClose, HelperImports: []string{"sort", "strings"}},
 			"unified_diff":      {GoFunc: "__gopy_difflib_unified", Helper: helperDifflibUnified, HelperImports: []string{"fmt"}},
 			"ndiff":             {GoFunc: "__gopy_difflib_ndiff", Helper: helperDifflibNdiff},
+			"SequenceMatcher":   {GoFunc: "__gopy_difflib_sm_new", Helper: helperDifflibSMNew, RetTag: "__SequenceMatcher", ExtraHelpers: map[string]string{"__SequenceMatcher": helperDifflibSMType}},
 		},
 	},
 	"filecmp": {
@@ -1915,9 +1942,9 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"socketserver": {
 		Funcs: map[string]stdlibFunc{
-			"TCPServer":             {GoFunc: "__gopy_socketserver_unused"},
+			"TCPServer":             {GoFunc: "__gopy_socketserver_tcp_new", Helper: helperSocketServerTCPNew, RetTag: "__TCPServer", ExtraHelpers: map[string]string{"__TCPServer": helperSocketServerTCPType}, HelperImports: []string{"net", "sync"}},
 			"UDPServer":             {GoFunc: "__gopy_socketserver_unused"},
-			"ThreadingTCPServer":    {GoFunc: "__gopy_socketserver_unused"},
+			"ThreadingTCPServer":    {GoFunc: "__gopy_socketserver_tcp_new", Helper: helperSocketServerTCPNew, RetTag: "__TCPServer", ExtraHelpers: map[string]string{"__TCPServer": helperSocketServerTCPType}, HelperImports: []string{"net", "sync"}},
 			"ThreadingUDPServer":    {GoFunc: "__gopy_socketserver_unused"},
 			"ForkingTCPServer":      {GoFunc: "__gopy_socketserver_unused"},
 			"ForkingUDPServer":      {GoFunc: "__gopy_socketserver_unused"},
@@ -2249,8 +2276,8 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"compress":   {GoFunc: "__gopy_bz2_compress_unused"},
 			"decompress": {GoFunc: "__gopy_bz2_decompress", Helper: helperBz2Decompress, HelperImports: []string{"compress/bzip2", "bytes", "io"}, RetKind: "str"},
-			"open":       {GoFunc: "__gopy_bz2_open_unused"},
-			"BZ2File":    {GoFunc: "__gopy_bz2_file_unused"},
+			"open":       {GoFunc: "__gopy_bz2_open_marker"},
+			"BZ2File":    {GoFunc: "__gopy_bz2_file_marker"},
 			"BZ2Compressor": {GoFunc: "__gopy_bz2_comp_unused"},
 			"BZ2Decompressor": {GoFunc: "__gopy_bz2_decomp_unused"},
 		},
@@ -2311,10 +2338,10 @@ var stdlibModules = map[string]stdlibModule{
 			"version": {GoExpr: "int64(5)"},
 		},
 		Funcs: map[string]stdlibFunc{
-			"dump":  {GoFunc: "__gopy_marshal_unused"},
-			"dumps": {GoFunc: "__gopy_marshal_unused"},
-			"load":  {GoFunc: "__gopy_marshal_unused"},
-			"loads": {GoFunc: "__gopy_marshal_unused"},
+			"dump":  {GoFunc: "__gopy_marshal_dump", Helper: helperMarshalDump, HelperImports: []string{"encoding/json"}},
+			"dumps": {GoFunc: "__gopy_marshal_dumps", Helper: helperMarshalDumps, HelperImports: []string{"encoding/json"}, RetKind: "str"},
+			"load":  {GoFunc: "__gopy_marshal_load", Helper: helperMarshalLoad, HelperImports: []string{"encoding/json", "io"}},
+			"loads": {GoFunc: "__gopy_marshal_loads", Helper: helperMarshalLoads, HelperImports: []string{"encoding/json"}},
 		},
 	},
 	"dbm": {
@@ -2392,7 +2419,7 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"fcntl":  {GoFunc: "__gopy_fcntl_unused"},
 			"ioctl":  {GoFunc: "__gopy_fcntl_unused"},
-			"flock":  {GoFunc: "__gopy_fcntl_unused"},
+			"flock":  {GoFunc: "__gopy_fcntl_flock", Helper: helperFcntlFlock, HelperImports: []string{"syscall"}},
 			"lockf":  {GoFunc: "__gopy_fcntl_unused"},
 		},
 	},
@@ -2626,7 +2653,7 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"sched": {
 		Funcs: map[string]stdlibFunc{
-			"scheduler": {GoFunc: "__gopy_sched_unused"},
+			"scheduler": {GoFunc: "__gopy_sched_new", Helper: helperSchedNew, RetTag: "__Scheduler", ExtraHelpers: map[string]string{"__Scheduler": helperSchedType}, HelperImports: []string{"sort", "time"}},
 		},
 	},
 	"select": {
@@ -2730,7 +2757,7 @@ var stdlibModules = map[string]stdlibModule{
 	},
 	"tomllib": {
 		Funcs: map[string]stdlibFunc{
-			"load":          {GoFunc: "__gopy_tomllib_unused"},
+			"load":          {GoFunc: "__gopy_tomllib_load", Helper: helperTomllibLoad, ExtraHelpers: map[string]string{"__gopy_tomllib_loads": helperTomllibLoads, "__gopy_tomllib_value": "", "__gopy_tomllib_split": ""}, HelperImports: []string{"io", "strconv", "strings"}},
 			"loads":         {GoFunc: "__gopy_tomllib_loads", Helper: helperTomllibLoads, HelperImports: []string{"strconv", "strings"}},
 			"TOMLDecodeError": {GoFunc: "__gopy_tomllib_unused"},
 		},
@@ -12242,4 +12269,722 @@ const helperShutilMakeArchive = `func __gopy_shutil_make_archive(base string, fo
 		return out
 	}
 	panic(NewException("ValueError: unknown archive format: " + format))
+}`
+
+// helperBz2FileType — bz2 reader analog of __GzipFile. Reads compressed
+// bytes eagerly via compress/bzip2 (Go has no writer for bz2). Methods
+// match the Read API: Read([n]), Readline([n]), Readlines(), Close().
+const helperBz2FileType = `type __Bz2File struct {
+	buf []byte
+	pos int
+}
+
+func (b *__Bz2File) Read(args ...int64) string {
+	n := int64(-1)
+	if len(args) > 0 {
+		n = args[0]
+	}
+	if n < 0 || b.pos+int(n) > len(b.buf) {
+		out := string(b.buf[b.pos:])
+		b.pos = len(b.buf)
+		return out
+	}
+	out := string(b.buf[b.pos : b.pos+int(n)])
+	b.pos += int(n)
+	return out
+}
+
+func (b *__Bz2File) Readline(args ...int64) string {
+	if b.pos >= len(b.buf) {
+		return ""
+	}
+	start := b.pos
+	for b.pos < len(b.buf) && b.buf[b.pos] != '\n' {
+		b.pos++
+	}
+	if b.pos < len(b.buf) {
+		b.pos++
+	}
+	return string(b.buf[start:b.pos])
+}
+
+func (b *__Bz2File) Readlines() []string {
+	rest := b.Read()
+	if rest == "" {
+		return []string{}
+	}
+	out := []string{}
+	cur := ""
+	for _, ch := range rest {
+		cur += string(ch)
+		if ch == '\n' {
+			out = append(out, cur)
+			cur = ""
+		}
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
+
+func (b *__Bz2File) Close() {}
+
+func __gopy_bz2_open_read(path string, args ...string) *__Bz2File {
+	f, err := os.Open(path)
+	if err != nil {
+		panic(NewException("FileNotFoundError: " + err.Error()))
+	}
+	defer f.Close()
+	r := bzip2.NewReader(f)
+	data, err := io.ReadAll(r)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return &__Bz2File{buf: data}
+}`
+
+// helperHTTPCookieType — SimpleCookie shim backed by an ordered slice
+// of (key, value) pairs. Set / Get / Output / Load / Keys map onto the
+// CPython equivalents. Output produces canonical `Set-Cookie:` lines.
+const helperHTTPCookieType = `type __SimpleCookie struct {
+	keys   []string
+	values map[string]string
+}
+
+func (c *__SimpleCookie) ensure() {
+	if c.values == nil {
+		c.values = map[string]string{}
+	}
+}
+
+func (c *__SimpleCookie) Set(k, v string) {
+	c.ensure()
+	if _, ok := c.values[k]; !ok {
+		c.keys = append(c.keys, k)
+	}
+	c.values[k] = v
+}
+
+func (c *__SimpleCookie) Get(k string, args ...any) string {
+	c.ensure()
+	if v, ok := c.values[k]; ok {
+		return v
+	}
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func (c *__SimpleCookie) Contains(k string) bool {
+	c.ensure()
+	_, ok := c.values[k]
+	return ok
+}
+
+func (c *__SimpleCookie) Len() int64 {
+	c.ensure()
+	return int64(len(c.values))
+}
+
+func (c *__SimpleCookie) Delete(k string) {
+	c.ensure()
+	if _, ok := c.values[k]; ok {
+		delete(c.values, k)
+		out := c.keys[:0]
+		for _, kk := range c.keys {
+			if kk != k {
+				out = append(out, kk)
+			}
+		}
+		c.keys = out
+	}
+}
+
+func (c *__SimpleCookie) Keys() []string {
+	c.ensure()
+	out := make([]string, len(c.keys))
+	copy(out, c.keys)
+	return out
+}
+
+func (c *__SimpleCookie) Values() []string {
+	c.ensure()
+	out := make([]string, 0, len(c.keys))
+	for _, k := range c.keys {
+		out = append(out, c.values[k])
+	}
+	return out
+}
+
+func (c *__SimpleCookie) Output(args ...string) string {
+	c.ensure()
+	sep := "\r\n"
+	prefix := "Set-Cookie: "
+	if len(args) > 0 {
+		prefix = args[0]
+	}
+	parts := []string{}
+	for _, k := range c.keys {
+		parts = append(parts, prefix+k+"="+c.values[k])
+	}
+	return strings.Join(parts, sep)
+}
+
+func (c *__SimpleCookie) Load(raw string) {
+	c.ensure()
+	for _, chunk := range strings.Split(raw, ";") {
+		chunk = strings.TrimSpace(chunk)
+		if chunk == "" {
+			continue
+		}
+		eq := strings.Index(chunk, "=")
+		if eq < 0 {
+			continue
+		}
+		k := strings.TrimSpace(chunk[:eq])
+		v := strings.TrimSpace(chunk[eq+1:])
+		c.Set(k, v)
+	}
+}`
+
+const helperHTTPCookieNew = `func __gopy_http_cookie_new(args ...any) *__SimpleCookie {
+	c := &__SimpleCookie{values: map[string]string{}}
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok && s != "" {
+			c.Load(s)
+		}
+	}
+	return c
+}`
+
+// helperDifflibSMType — SequenceMatcher analog. Tracks two strings
+// and exposes ratio() / quick_ratio() / get_matching_blocks() / a / b.
+// ratio uses the gestalt approximation (matching chars / total chars),
+// matches CPython's behavior closely enough for small inputs.
+const helperDifflibSMType = `type __SequenceMatcher struct {
+	a string
+	b string
+}
+
+func (s *__SequenceMatcher) Set_seqs(a, b string) {
+	s.a = a
+	s.b = b
+}
+
+func (s *__SequenceMatcher) Set_seq1(a string) { s.a = a }
+func (s *__SequenceMatcher) Set_seq2(b string) { s.b = b }
+
+func __gopy_sm_lcs(a, b string) int {
+	if a == "" || b == "" {
+		return 0
+	}
+	m := len(a)
+	n := len(b)
+	prev := make([]int, n+1)
+	cur := make([]int, n+1)
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if a[i-1] == b[j-1] {
+				cur[j] = prev[j-1] + 1
+			} else if prev[j] > cur[j-1] {
+				cur[j] = prev[j]
+			} else {
+				cur[j] = cur[j-1]
+			}
+		}
+		prev, cur = cur, prev
+		for j := range cur {
+			cur[j] = 0
+		}
+	}
+	return prev[n]
+}
+
+func (s *__SequenceMatcher) Ratio() float64 {
+	if s.a == "" && s.b == "" {
+		return 1.0
+	}
+	total := len(s.a) + len(s.b)
+	if total == 0 {
+		return 0.0
+	}
+	m := __gopy_sm_lcs(s.a, s.b)
+	return float64(2*m) / float64(total)
+}
+
+func (s *__SequenceMatcher) Quick_ratio() float64 {
+	return s.Ratio()
+}
+
+func (s *__SequenceMatcher) Real_quick_ratio() float64 {
+	la := len(s.a)
+	lb := len(s.b)
+	if la == 0 && lb == 0 {
+		return 1.0
+	}
+	total := la + lb
+	if total == 0 {
+		return 0.0
+	}
+	minLen := la
+	if lb < minLen {
+		minLen = lb
+	}
+	return float64(2*minLen) / float64(total)
+}
+
+func (s *__SequenceMatcher) Get_matching_blocks() []any {
+	return []any{[]any{int64(0), int64(0), int64(__gopy_sm_lcs(s.a, s.b))}, []any{int64(len(s.a)), int64(len(s.b)), int64(0)}}
+}`
+
+const helperDifflibSMNew = `func __gopy_difflib_sm_new(args ...any) *__SequenceMatcher {
+	s := &__SequenceMatcher{}
+	if len(args) >= 3 {
+		if a, ok := args[1].(string); ok {
+			s.a = a
+		}
+		if b, ok := args[2].(string); ok {
+			s.b = b
+		}
+	} else if len(args) >= 2 {
+		if a, ok := args[0].(string); ok {
+			s.a = a
+		}
+		if b, ok := args[1].(string); ok {
+			s.b = b
+		}
+	}
+	return s
+}`
+
+// helperMarshalDumps — JSON-backed marshal (not CPython wire-compatible).
+const helperMarshalDumps = `func __gopy_marshal_dumps(args ...any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(args[0])
+	if err != nil {
+		panic(NewException("ValueError: marshal.dumps: " + err.Error()))
+	}
+	return string(b)
+}`
+
+const helperMarshalLoads = `func __gopy_marshal_loads(args ...any) any {
+	if len(args) == 0 {
+		return nil
+	}
+	s, ok := args[0].(string)
+	if !ok {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		panic(NewException("ValueError: marshal.loads: " + err.Error()))
+	}
+	return v
+}`
+
+const helperMarshalDump = `func __gopy_marshal_dump(args ...any) {
+	if len(args) < 2 {
+		return
+	}
+	b, err := json.Marshal(args[0])
+	if err != nil {
+		panic(NewException("ValueError: marshal.dump: " + err.Error()))
+	}
+	switch w := args[1].(type) {
+	case interface{ Write(string) int64 }:
+		w.Write(string(b))
+	case interface{ Write([]byte) (int, error) }:
+		w.Write(b)
+	}
+}`
+
+const helperMarshalLoad = `func __gopy_marshal_load(args ...any) any {
+	if len(args) == 0 {
+		return nil
+	}
+	var data []byte
+	switch r := args[0].(type) {
+	case interface{ Read(args ...int64) string }:
+		data = []byte(r.Read())
+	case io.Reader:
+		buf := make([]byte, 0, 4096)
+		tmp := make([]byte, 4096)
+		for {
+			n, err := r.Read(tmp)
+			if n > 0 {
+				buf = append(buf, tmp[:n]...)
+			}
+			if err != nil {
+				break
+			}
+		}
+		data = buf
+	}
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		panic(NewException("ValueError: marshal.load: " + err.Error()))
+	}
+	return v
+}`
+
+// helperFcntlFlock — wraps syscall.Flock for shared / exclusive locks.
+const helperFcntlFlock = `func __gopy_fcntl_flock(fd, op int64) int64 {
+	if err := syscall.Flock(int(fd), int(op)); err != nil {
+		panic(NewException("OSError: flock: " + err.Error()))
+	}
+	return 0
+}`
+
+// helperSignalAlarm — fires SIGALRM after n seconds via time.AfterFunc.
+// Returns the previously scheduled remaining seconds (always 0 here —
+// gopy doesn't track a prior timer beyond cancellation).
+const helperSignalAlarm = `var __gopy_alarm_timer *time.Timer
+
+func __gopy_signal_alarm(n int64) int64 {
+	if __gopy_alarm_timer != nil {
+		__gopy_alarm_timer.Stop()
+		__gopy_alarm_timer = nil
+	}
+	if n <= 0 {
+		return 0
+	}
+	__gopy_alarm_timer = time.AfterFunc(time.Duration(n)*time.Second, func() {
+		p, err := os.FindProcess(os.Getpid())
+		if err == nil {
+			p.Signal(syscall.SIGALRM)
+		}
+	})
+	return 0
+}`
+
+const helperSignalSetitimer = `func __gopy_signal_setitimer(which int64, args ...any) []any {
+	return []any{float64(0), float64(0)}
+}`
+
+const helperSignalGetitimer = `func __gopy_signal_getitimer(which int64) []any {
+	return []any{float64(0), float64(0)}
+}`
+
+// helperOsGetrandom — alias os.urandom semantics. The flags arg is ignored.
+const helperOsGetrandom = `func __gopy_os_getrandom(n int64, args ...int64) string {
+	return __gopy_os_urandom(n)
+}`
+
+// helperShutilCopyfileobj — stream-copies bytes from src to dst. Both
+// can be *os.File or any wrapper exposing Read([n]) / Write(s). Returns
+// total bytes copied.
+const helperShutilCopyfileobj = `func __gopy_shutil_copyfileobj(args ...any) int64 {
+	if len(args) < 2 {
+		return 0
+	}
+	src := args[0]
+	dst := args[1]
+	var total int64
+	readAll := func() string {
+		switch r := src.(type) {
+		case *os.File:
+			b, _ := io.ReadAll(r)
+			return string(b)
+		case interface{ Read(args ...int64) string }:
+			return r.Read()
+		}
+		return ""
+	}
+	body := readAll()
+	switch w := dst.(type) {
+	case *os.File:
+		n, _ := w.Write([]byte(body))
+		total = int64(n)
+	case interface{ Write(s string) int64 }:
+		total = w.Write(body)
+	}
+	return total
+}`
+
+// helperSchedType — sched.scheduler analog. Events queued via enter() /
+// enterabs() are run in monotonically sorted (priority, time) order by
+// run(). delayfunc is ignored; we just sleep until the next scheduled
+// time relative to the moment run() begins.
+const helperSchedType = `type __SchedEvent struct {
+	When     float64
+	Priority int64
+	Action   any
+	ArgsArg  []any
+	Seq      int64
+}
+
+type __Scheduler struct {
+	events []*__SchedEvent
+	seq    int64
+}
+
+func (s *__Scheduler) Empty() bool { return len(s.events) == 0 }
+
+func (s *__Scheduler) Enter(delay float64, priority int64, action any, args ...any) *__SchedEvent {
+	now := float64(time.Now().UnixNano()) / 1e9
+	e := &__SchedEvent{
+		When:     now + delay,
+		Priority: priority,
+		Action:   action,
+		ArgsArg:  args,
+		Seq:      s.seq,
+	}
+	s.seq++
+	s.events = append(s.events, e)
+	return e
+}
+
+func (s *__Scheduler) Enterabs(when float64, priority int64, action any, args ...any) *__SchedEvent {
+	e := &__SchedEvent{
+		When:     when,
+		Priority: priority,
+		Action:   action,
+		ArgsArg:  args,
+		Seq:      s.seq,
+	}
+	s.seq++
+	s.events = append(s.events, e)
+	return e
+}
+
+func (s *__Scheduler) Cancel(e *__SchedEvent) {
+	out := s.events[:0]
+	for _, ev := range s.events {
+		if ev != e {
+			out = append(out, ev)
+		}
+	}
+	s.events = out
+}
+
+func (s *__Scheduler) Queue() []any {
+	sort.SliceStable(s.events, func(i, j int) bool {
+		if s.events[i].When != s.events[j].When {
+			return s.events[i].When < s.events[j].When
+		}
+		return s.events[i].Priority < s.events[j].Priority
+	})
+	out := []any{}
+	for _, e := range s.events {
+		out = append(out, e)
+	}
+	return out
+}
+
+func (s *__Scheduler) Run(args ...any) {
+	for len(s.events) > 0 {
+		sort.SliceStable(s.events, func(i, j int) bool {
+			if s.events[i].When != s.events[j].When {
+				return s.events[i].When < s.events[j].When
+			}
+			return s.events[i].Priority < s.events[j].Priority
+		})
+		e := s.events[0]
+		s.events = s.events[1:]
+		now := float64(time.Now().UnixNano()) / 1e9
+		wait := e.When - now
+		if wait > 0 {
+			time.Sleep(time.Duration(wait * float64(time.Second)))
+		}
+		if fn, ok := e.Action.(func(...any) any); ok {
+			fn(e.ArgsArg...)
+		} else if fn, ok := e.Action.(func()); ok {
+			fn()
+		} else if fn, ok := e.Action.(func() any); ok {
+			fn()
+		}
+	}
+}`
+
+const helperSchedNew = `func __gopy_sched_new(args ...any) *__Scheduler {
+	return &__Scheduler{}
+}`
+
+// helperTomllibLoad — read a file-handle (or io.Reader) fully then
+// delegate to loads. Mirrors tomllib.load(fh).
+const helperTomllibLoad = `func __gopy_tomllib_load(args ...any) map[string]any {
+	if len(args) == 0 {
+		return map[string]any{}
+	}
+	var data string
+	switch r := args[0].(type) {
+	case io.Reader:
+		b, _ := io.ReadAll(r)
+		data = string(b)
+	case interface{ Read(args ...int64) string }:
+		data = r.Read()
+	case string:
+		data = r
+	}
+	return __gopy_tomllib_loads(data)
+}`
+
+// helperAsyncioGather — collect results synchronously since gopy strips
+// async semantics. Each argument is passed through unchanged (await
+// already collapsed to the value), so this is identity on the inputs.
+const helperAsyncioGather = `func __gopy_asyncio_gather(args ...any) []any {
+	out := make([]any, len(args))
+	copy(out, args)
+	return out
+}`
+
+// helperSocketGethostbynameEx — return [hostname, aliases=[], ips=[]] for
+// the resolved name. Errors raise gaierror-tagged Exception.
+const helperSocketGethostbynameEx = `func __gopy_socket_gethostbyname_ex(host string) []any {
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		panic(NewException("gaierror: " + err.Error()))
+	}
+	canonical, _ := net.LookupCNAME(host)
+	if canonical == "" {
+		canonical = host
+	}
+	canonical = strings.TrimSuffix(canonical, ".")
+	ipsAny := make([]any, len(ips))
+	for i, ip := range ips {
+		ipsAny[i] = ip
+	}
+	return []any{canonical, []any{}, ipsAny}
+}`
+
+// helperSocketServerTCPType — minimal TCPServer shim wrapping net.Listener.
+// The handler callable is invoked per-connection inside serve_forever
+// (blocking loop until shutdown). Each call receives [conn] — gopy keeps
+// the interface narrow since the Python BaseRequestHandler shape isn't
+// reified.
+const helperSocketServerTCPType = `type __TCPServer struct {
+	listener net.Listener
+	handler  any
+	mu       sync.Mutex
+	closed   bool
+	addr     []any
+}
+
+func (s *__TCPServer) Server_address() []any {
+	return s.addr
+}
+
+func (s *__TCPServer) Fileno() int64 {
+	if s.listener == nil {
+		return -1
+	}
+	if tl, ok := s.listener.(*net.TCPListener); ok {
+		f, err := tl.File()
+		if err == nil {
+			return int64(f.Fd())
+		}
+	}
+	return -1
+}
+
+func (s *__TCPServer) Serve_forever(args ...any) {
+	if s.listener == nil {
+		return
+	}
+	for {
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return
+		}
+		conn, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		if fn, ok := s.handler.(func(...any) any); ok {
+			go func() {
+				defer conn.Close()
+				fn(conn)
+			}()
+		} else {
+			conn.Close()
+		}
+	}
+}
+
+func (s *__TCPServer) Handle_request() {
+	if s.listener == nil {
+		return
+	}
+	conn, err := s.listener.Accept()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	if fn, ok := s.handler.(func(...any) any); ok {
+		fn(conn)
+	}
+}
+
+func (s *__TCPServer) Shutdown() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	if s.listener != nil {
+		s.listener.Close()
+	}
+}
+
+func (s *__TCPServer) Server_close() {
+	s.Shutdown()
+}
+
+func (s *__TCPServer) Enter() *__TCPServer { return s }
+func (s *__TCPServer) Exit() bool          { s.Server_close(); return false }`
+
+const helperSocketServerTCPNew = `func __gopy_socketserver_tcp_new(args ...any) *__TCPServer {
+	host := ""
+	port := int64(0)
+	if len(args) > 0 {
+		if pair, ok := args[0].([]any); ok && len(pair) == 2 {
+			if h, ok := pair[0].(string); ok {
+				host = h
+			}
+			if p, ok := pair[1].(int64); ok {
+				port = p
+			}
+		}
+	}
+	addr := host
+	if port > 0 {
+		addr = addr + ":" + __gopy_int_to_str(port)
+	} else {
+		addr = addr + ":0"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	tcp := ln.Addr().(*net.TCPAddr)
+	srv := &__TCPServer{listener: ln, addr: []any{tcp.IP.String(), int64(tcp.Port)}}
+	if len(args) > 1 {
+		srv.handler = args[1]
+	}
+	return srv
+}
+
+func __gopy_int_to_str(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	digits := []byte{}
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	if neg {
+		return "-" + string(digits)
+	}
+	return string(digits)
 }`
