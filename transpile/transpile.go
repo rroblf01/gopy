@@ -7237,6 +7237,37 @@ var taggedMethodRename = map[string]map[string]string{
 		"poll":       "Poll",
 		"close":      "Close",
 	},
+	"__AsyncFuture": {
+		"set_result":        "Set_result",
+		"set_exception":     "Set_exception",
+		"result":            "Result",
+		"exception":         "Exception",
+		"done":              "Done",
+		"cancelled":         "Cancelled",
+		"cancel":            "Cancel",
+		"add_done_callback": "Add_done_callback",
+	},
+	"__TaskGroup": {
+		"create_task": "Create_task",
+	},
+	"__LogFormatter": {
+		"format":      "Format",
+		"formatTime":  "FormatTime",
+		"usesTime":    "UsesTime",
+	},
+	"__PopenStdin": {
+		"write": "Write",
+		"close": "Close",
+	},
+	"__PopenStdout": {
+		"read":  "Read",
+		"close": "Close",
+	},
+	"__AsyncTimeout": {
+		"reschedule": "Reschedule",
+		"expired":    "Expired",
+		"when":       "When",
+	},
 	"__Timer": {
 		"start":  "Start",
 		"cancel": "Cancel",
@@ -7485,6 +7516,7 @@ var taggedMethodElemTag = map[string]map[string]string{
 type taggedAttrInfo struct {
 	GoName string
 	Ty     *ir.Type
+	Tag    string
 }
 
 // taggedPropAttrs is the property-style equivalent of taggedAttrs: an
@@ -7503,6 +7535,11 @@ var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 	},
 	"__NamedTempFile": {
 		"name": {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
+	},
+	"__Popen": {
+		"stdin":  {GoName: "Stdin", Ty: nil, Tag: "__PopenStdin"},
+		"stdout": {GoName: "Stdout", Ty: nil, Tag: "__PopenStdout"},
+		"stderr": {GoName: "Stderr", Ty: nil, Tag: "__PopenStdout"},
 	},
 	"__DirEntry": {
 		"name": {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},
@@ -16092,6 +16129,9 @@ func (g *gen) exprTag(e ir.Expr) string {
 		if recvTag := g.exprTag(x.Recv); recvTag != "" {
 			if attrs, ok := taggedPropAttrs[recvTag]; ok {
 				if info, ok := attrs[x.Name]; ok && info.Ty == nil {
+					if info.Tag != "" {
+						return info.Tag
+					}
 					// Untyped prop = same tag as receiver (e.g. Path.parent → Path).
 					return recvTag
 				}

@@ -84,6 +84,48 @@ var stdlibModules = map[string]stdlibModule{
 			"extsep":  {GoExpr: `"."`},
 			"altsep":  {GoExpr: `""`},
 			"environ": {GoExpr: "__gopy_os_environ()", Helper: helperOsEnviron, HelperName: "__gopy_os_environ", HelperImports: []string{"os", "strings"}},
+			"O_RDONLY": {GoExpr: "int64(0)"},
+			"O_WRONLY": {GoExpr: "int64(1)"},
+			"O_RDWR":   {GoExpr: "int64(2)"},
+			"O_APPEND": {GoExpr: "int64(0o2000)"},
+			"O_CREAT":  {GoExpr: "int64(0o100)"},
+			"O_TRUNC":  {GoExpr: "int64(0o1000)"},
+			"O_EXCL":   {GoExpr: "int64(0o200)"},
+			"O_NONBLOCK": {GoExpr: "int64(0o4000)"},
+			"O_SYNC":   {GoExpr: "int64(0o4010000)"},
+			"O_CLOEXEC": {GoExpr: "int64(0o2000000)"},
+			"WNOHANG":     {GoExpr: "int64(1)"},
+			"WUNTRACED":   {GoExpr: "int64(2)"},
+			"WCONTINUED":  {GoExpr: "int64(8)"},
+			"WSTOPPED":    {GoExpr: "int64(2)"},
+			"WEXITED":     {GoExpr: "int64(4)"},
+			"WNOWAIT":     {GoExpr: "int64(0x1000000)"},
+			"P_PID":       {GoExpr: "int64(1)"},
+			"P_PGID":      {GoExpr: "int64(2)"},
+			"P_ALL":       {GoExpr: "int64(0)"},
+			"EX_OK":       {GoExpr: "int64(0)"},
+			"EX_USAGE":    {GoExpr: "int64(64)"},
+			"EX_DATAERR":  {GoExpr: "int64(65)"},
+			"EX_NOINPUT":  {GoExpr: "int64(66)"},
+			"EX_NOUSER":   {GoExpr: "int64(67)"},
+			"EX_NOHOST":   {GoExpr: "int64(68)"},
+			"EX_UNAVAILABLE": {GoExpr: "int64(69)"},
+			"EX_SOFTWARE": {GoExpr: "int64(70)"},
+			"EX_OSERR":    {GoExpr: "int64(71)"},
+			"EX_OSFILE":   {GoExpr: "int64(72)"},
+			"EX_CANTCREAT": {GoExpr: "int64(73)"},
+			"EX_IOERR":    {GoExpr: "int64(74)"},
+			"EX_TEMPFAIL": {GoExpr: "int64(75)"},
+			"EX_PROTOCOL": {GoExpr: "int64(76)"},
+			"EX_NOPERM":   {GoExpr: "int64(77)"},
+			"EX_CONFIG":   {GoExpr: "int64(78)"},
+			"F_OK":        {GoExpr: "int64(0)"},
+			"R_OK":        {GoExpr: "int64(4)"},
+			"W_OK":        {GoExpr: "int64(2)"},
+			"X_OK":        {GoExpr: "int64(1)"},
+			"SEEK_SET":    {GoExpr: "int64(0)"},
+			"SEEK_CUR":    {GoExpr: "int64(1)"},
+			"SEEK_END":    {GoExpr: "int64(2)"},
 		},
 		Funcs: map[string]stdlibFunc{
 			"getenv":    {GoFunc: "os.Getenv", GoImport: "os"},
@@ -189,6 +231,7 @@ var stdlibModules = map[string]stdlibModule{
 			"thread_time_ns":   {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
 			"time_ns":          {GoFunc: "__gopy_time_ns", GoImport: "time", Helper: helperTimeNs, RetKind: "int"},
 			"strftime":         {GoFunc: "__gopy_time_strftime", GoImport: "time", Helper: helperTimeStrftime, HelperImports: []string{"strings"}, RetKind: "str"},
+			"strptime":         {GoFunc: "__gopy_time_strptime", GoImport: "time", Helper: helperTimeStrptime, ExtraHelpers: map[string]string{"__gopy_py_time_format": helperPyTimeFormat}, HelperImports: []string{"strings", "fmt"}},
 			"localtime":        {GoFunc: "__gopy_time_localtime", GoImport: "time", Helper: helperTimeLocaltime},
 			"gmtime":           {GoFunc: "__gopy_time_gmtime", GoImport: "time", Helper: helperTimeGmtime},
 			"mktime":           {GoFunc: "__gopy_time_mktime", GoImport: "time", Helper: helperTimeMktime, RetKind: "float"},
@@ -315,6 +358,10 @@ var stdlibModules = map[string]stdlibModule{
 			"b16decode":         {GoFunc: "__gopy_b16decode", GoImport: "encoding/hex", Helper: helperB16Decode, RetKind: "str"},
 			"a85encode":         {GoFunc: "__gopy_a85encode", GoImport: "encoding/ascii85", Helper: helperA85Encode, RetKind: "str"},
 			"a85decode":         {GoFunc: "__gopy_a85decode", GoImport: "encoding/ascii85", Helper: helperA85Decode, RetKind: "str"},
+			"encodebytes":       {GoFunc: "__gopy_b64_encodebytes", Helper: helperB64Encodebytes, ExtraHelpers: map[string]string{"__gopy_b64encode": helperB64Encode}, HelperImports: []string{"encoding/base64", "strings"}, RetKind: "str"},
+			"decodebytes":       {GoFunc: "__gopy_b64_decodebytes", Helper: helperB64Decodebytes, ExtraHelpers: map[string]string{"__gopy_b64decode": helperB64Decode}, HelperImports: []string{"encoding/base64"}, RetKind: "str"},
+			"standard_b64encode": {GoFunc: "__gopy_b64encode", GoImport: "encoding/base64", Helper: helperB64Encode, RetKind: "str"},
+			"standard_b64decode": {GoFunc: "__gopy_b64decode", GoImport: "encoding/base64", Helper: helperB64Decode, RetKind: "str"},
 		},
 	},
 	"urllib": {
@@ -503,6 +550,8 @@ var stdlibModules = map[string]stdlibModule{
 		Funcs: map[string]stdlibFunc{
 			"guess_type":      {GoFunc: "__gopy_mimetypes_guess", Helper: helperMimetypesGuess, HelperImports: []string{"mime", "path/filepath"}},
 			"guess_extension": {GoFunc: "__gopy_mimetypes_guess_ext", Helper: helperMimetypesGuessExt, HelperImports: []string{"mime"}, RetKind: "str"},
+			"guess_all_extensions": {GoFunc: "__gopy_mimetypes_guess_all", Helper: helperMimetypesGuessAll, HelperImports: []string{"mime"}},
+			"read_mime_types":      {GoFunc: "__gopy_mimetypes_read", Helper: helperMimetypesRead},
 			"init":            {GoFunc: "__gopy_mimetypes_init", Helper: helperMimetypesInit},
 			"add_type":        {GoFunc: "__gopy_mimetypes_add", Helper: helperMimetypesAdd},
 			"MimeTypes":       {GoFunc: "__gopy_mimetypes_class_unused"},
@@ -1190,6 +1239,9 @@ var stdlibModules = map[string]stdlibModule{
 			"SIGIO":    {GoExpr: "int64(syscall.SIGIO)", GoImport: "syscall"},
 			"SIGSYS":   {GoExpr: "int64(syscall.SIGSYS)", GoImport: "syscall"},
 			"NSIG":     {GoExpr: "int64(65)"},
+			"ITIMER_REAL":    {GoExpr: "int64(0)"},
+			"ITIMER_VIRTUAL": {GoExpr: "int64(1)"},
+			"ITIMER_PROF":    {GoExpr: "int64(2)"},
 			"SIG_DFL":  {GoExpr: "any(0)"},
 			"SIG_IGN":  {GoExpr: "any(1)"},
 		},
@@ -1202,6 +1254,9 @@ var stdlibModules = map[string]stdlibModule{
 			"killpg":       {GoFunc: "__gopy_signal_killpg", Helper: helperSignalKillpg, HelperImports: []string{"syscall"}},
 			"raise_signal": {GoFunc: "__gopy_signal_raise", Helper: helperSignalRaise, HelperImports: []string{"syscall", "os"}},
 			"siginterrupt": {GoFunc: "__gopy_signal_siginterrupt", Helper: helperSignalSiginterrupt},
+			"valid_signals": {GoFunc: "__gopy_signal_valid_signals", Helper: helperSignalValidSignals},
+			"strsignal":     {GoFunc: "__gopy_signal_strsignal", Helper: helperSignalStrsignal, HelperImports: []string{"syscall"}, RetKind: "str"},
+			"pause":         {GoFunc: "__gopy_signal_pause", Helper: helperSignalPause, HelperImports: []string{"time"}},
 			"setitimer":  {GoFunc: "__gopy_signal_setitimer", Helper: helperSignalSetitimer},
 			"getitimer":  {GoFunc: "__gopy_signal_getitimer", Helper: helperSignalGetitimer},
 		},
@@ -1252,7 +1307,11 @@ var stdlibModules = map[string]stdlibModule{
 			"LifoQueue":       {GoFunc: "__gopy_lifo_queue_new", Helper: helperLifoQueueNew, RetTag: "__Queue", ExtraHelpers: map[string]string{"__Queue": helperQueueType}, HelperImports: []string{"sync"}},
 			"PriorityQueue":   {GoFunc: "__gopy_queue_new", Helper: helperQueueNew, RetTag: "__Queue", ExtraHelpers: map[string]string{"__Queue": helperQueueType}, HelperImports: []string{"sync"}},
 			"Task":            {GoFunc: "__gopy_asyncio_task_unused"},
-			"Future":          {GoFunc: "__gopy_asyncio_future_unused"},
+			"Future":          {GoFunc: "__gopy_asyncio_future", Helper: helperAsyncioFuture, RetTag: "__AsyncFuture", ExtraHelpers: map[string]string{"__AsyncFuture": helperAsyncioFutureType}},
+			"timeout":         {GoFunc: "__gopy_asyncio_timeout", Helper: helperAsyncioTimeout, RetTag: "__AsyncTimeout", ExtraHelpers: map[string]string{"__AsyncTimeout": helperAsyncioTimeoutType}},
+			"timeout_at":      {GoFunc: "__gopy_asyncio_timeout", Helper: helperAsyncioTimeout, RetTag: "__AsyncTimeout", ExtraHelpers: map[string]string{"__AsyncTimeout": helperAsyncioTimeoutType}},
+			"run_coroutine_threadsafe": {GoFunc: "__gopy_asyncio_run_coro_ts", Helper: helperAsyncioRunCoroTs, RetTag: "__AsyncFuture", ExtraHelpers: map[string]string{"__AsyncFuture": helperAsyncioFutureType}},
+			"TaskGroup":       {GoFunc: "__gopy_asyncio_taskgroup", Helper: helperAsyncioTaskGroup, RetTag: "__TaskGroup", ExtraHelpers: map[string]string{"__TaskGroup": helperAsyncioTaskGroupType}},
 			"AbstractEventLoop": {GoFunc: "__gopy_asyncio_abstract_loop_unused"},
 			"CancelledError":  {GoFunc: "__gopy_asyncio_cancel_err_unused"},
 			"TimeoutError":    {GoFunc: "__gopy_asyncio_timeout_err_unused"},
@@ -1342,7 +1401,40 @@ var stdlibModules = map[string]stdlibModule{
 			"TCP_NODELAY":  {GoExpr: "int64(1)"},
 			"SOCK_RAW":     {GoExpr: "int64(3)"},
 			"SOMAXCONN":    {GoExpr: "int64(128)"},
-			"AI_PASSIVE":   {GoExpr: "int64(1)"},
+			"AI_PASSIVE":      {GoExpr: "int64(1)"},
+			"AI_CANONNAME":    {GoExpr: "int64(2)"},
+			"AI_NUMERICHOST":  {GoExpr: "int64(4)"},
+			"AI_NUMERICSERV":  {GoExpr: "int64(1024)"},
+			"AI_V4MAPPED":     {GoExpr: "int64(8)"},
+			"AI_ALL":          {GoExpr: "int64(16)"},
+			"AI_ADDRCONFIG":   {GoExpr: "int64(32)"},
+			"NI_NUMERICHOST":  {GoExpr: "int64(1)"},
+			"NI_NUMERICSERV":  {GoExpr: "int64(2)"},
+			"NI_NOFQDN":       {GoExpr: "int64(4)"},
+			"NI_NAMEREQD":     {GoExpr: "int64(8)"},
+			"NI_DGRAM":        {GoExpr: "int64(16)"},
+			"NI_MAXHOST":      {GoExpr: "int64(1025)"},
+			"NI_MAXSERV":      {GoExpr: "int64(32)"},
+			"SHUT_RD":         {GoExpr: "int64(0)"},
+			"SHUT_WR":         {GoExpr: "int64(1)"},
+			"SHUT_RDWR":       {GoExpr: "int64(2)"},
+			"MSG_PEEK":        {GoExpr: "int64(2)"},
+			"MSG_OOB":         {GoExpr: "int64(1)"},
+			"MSG_WAITALL":     {GoExpr: "int64(256)"},
+			"MSG_DONTWAIT":    {GoExpr: "int64(64)"},
+			"MSG_NOSIGNAL":    {GoExpr: "int64(16384)"},
+			"INADDR_ANY":      {GoExpr: "int64(0)"},
+			"INADDR_BROADCAST": {GoExpr: "int64(4294967295)"},
+			"INADDR_LOOPBACK":  {GoExpr: "int64(2130706433)"},
+			"INADDR_NONE":      {GoExpr: "int64(4294967295)"},
+			"SO_LINGER":        {GoExpr: "int64(13)"},
+			"SO_BROADCAST":     {GoExpr: "int64(6)"},
+			"SO_ERROR":         {GoExpr: "int64(4)"},
+			"SO_RCVBUF":        {GoExpr: "int64(8)"},
+			"SO_SNDBUF":        {GoExpr: "int64(7)"},
+			"SO_RCVTIMEO":      {GoExpr: "int64(20)"},
+			"SO_SNDTIMEO":      {GoExpr: "int64(21)"},
+			"SO_TYPE":          {GoExpr: "int64(3)"},
 		},
 		Funcs: map[string]stdlibFunc{
 			"gethostname":   {GoFunc: "__gopy_socket_hostname", GoImport: "os", Helper: helperSocketHostname, RetKind: "str"},
@@ -1385,6 +1477,13 @@ var stdlibModules = map[string]stdlibModule{
 			"python_build":          {GoFunc: "__gopy_platform_pybuild", Helper: helperPlatformPybuild},
 			"libc_ver":              {GoFunc: "__gopy_platform_libcver", Helper: helperPlatformLibcver},
 			"freedesktop_os_release": {GoFunc: "__gopy_platform_osrelease", Helper: helperPlatformOsrelease, HelperImports: []string{"os", "bufio", "strings"}},
+			"win32_ver":             {GoFunc: "__gopy_platform_win32ver", Helper: helperPlatformWin32Ver},
+			"win32_edition":         {GoFunc: "__gopy_platform_win32edition", Helper: helperPlatformWin32Edition, RetKind: "str"},
+			"win32_is_iot":          {GoFunc: "__gopy_platform_win32iot", Helper: helperPlatformWin32Iot, RetKind: "bool"},
+			"mac_ver":               {GoFunc: "__gopy_platform_macver", Helper: helperPlatformMacVer},
+			"java_ver":              {GoFunc: "__gopy_platform_javaver", Helper: helperPlatformJavaVer},
+			"ios_ver":               {GoFunc: "__gopy_platform_iosver", Helper: helperPlatformIosVer},
+			"android_ver":           {GoFunc: "__gopy_platform_androidver", Helper: helperPlatformAndroidVer},
 		},
 	},
 	"dataclasses": {
@@ -1427,7 +1526,7 @@ var stdlibModules = map[string]stdlibModule{
 			"check_call":   {GoFunc: "__gopy_subprocess_check_call", Helper: helperSubprocessCheckCall, HelperImports: []string{"os/exec"}, RetKind: "int"},
 			"call":         {GoFunc: "__gopy_subprocess_call", Helper: helperSubprocessCall, HelperImports: []string{"os/exec"}, RetKind: "int"},
 			"getoutput":    {GoFunc: "__gopy_subprocess_getoutput", Helper: helperSubprocessGetoutput, HelperImports: []string{"os/exec", "strings"}, RetKind: "str"},
-			"Popen":        {GoFunc: "__gopy_subprocess_popen", Helper: helperSubprocessPopen, RetTag: "__Popen", ExtraHelpers: map[string]string{"__Popen": helperPopenType}, HelperImports: []string{"os/exec", "io", "syscall"}},
+			"Popen":        {GoFunc: "__gopy_subprocess_popen", Helper: helperSubprocessPopen, RetTag: "__Popen", ExtraHelpers: map[string]string{"__Popen": helperPopenType, "__PopenStdin": helperPopenStdinType}, HelperImports: []string{"os/exec", "io", "syscall"}},
 		},
 	},
 	"functools": {
@@ -1440,7 +1539,7 @@ var stdlibModules = map[string]stdlibModule{
 			// lives in transpile.go's call() builder.
 			"reduce":          {GoFunc: "__gopy_reduce_unused"},
 			"partial":         {GoFunc: "__gopy_partial", Helper: helperFunctoolsPartial, HelperImports: []string{"reflect"}},
-			"cache":           {GoFunc: "__gopy_cache_unused"},
+			"cache":           {GoFunc: "__gopy_functools_cache", Helper: helperFunctoolsCache, HelperImports: []string{"fmt", "sync"}},
 			"cached_property": {GoFunc: "__gopy_cached_prop_unused"},
 			"wraps":           {GoFunc: "__gopy_wraps_unused"},
 			"singledispatch":  {GoFunc: "__gopy_singledispatch_unused"},
@@ -1474,7 +1573,7 @@ var stdlibModules = map[string]stdlibModule{
 			"StreamHandler": {GoFunc: "__gopy_logging_handler_unused"},
 			"FileHandler":   {GoFunc: "__gopy_logging_handler_unused"},
 			"NullHandler":   {GoFunc: "__gopy_logging_handler_unused"},
-			"Formatter":     {GoFunc: "__gopy_logging_handler_unused"},
+			"Formatter":     {GoFunc: "__gopy_logging_formatter_new", Helper: helperLoggingFormatterNew, RetTag: "__LogFormatter", ExtraHelpers: map[string]string{"__LogFormatter": helperLoggingFormatterType}, HelperImports: []string{"strings", "fmt"}},
 			"Filter":        {GoFunc: "__gopy_logging_handler_unused"},
 			"LogRecord":     {GoFunc: "__gopy_logging_handler_unused"},
 			"Logger":        {GoFunc: "__gopy_logging_handler_unused"},
@@ -13976,4 +14075,361 @@ func (p *__Poll) Close() {
 
 const helperSelectPoll = `func __gopy_select_poll(args ...any) *__Poll {
 	return &__Poll{fds: map[int64]int64{}}
+}`
+
+// helperFunctoolsCache — memoize a single-arg function keyed on
+// fmt.Sprint("%v") of the arg tuple. Thread-safe via sync.Mutex.
+const helperFunctoolsCache = `func __gopy_functools_cache(args ...any) func(...any) any {
+	if len(args) == 0 {
+		return func(...any) any { return nil }
+	}
+	fn := args[0]
+	cache := map[string]any{}
+	var mu sync.Mutex
+	call := func(combined ...any) any {
+		key := fmt.Sprintf("%v", combined)
+		mu.Lock()
+		if v, ok := cache[key]; ok {
+			mu.Unlock()
+			return v
+		}
+		mu.Unlock()
+		var out any
+		switch f := fn.(type) {
+		case func(...any) any:
+			out = f(combined...)
+		case func(any) any:
+			if len(combined) > 0 {
+				out = f(combined[0])
+			} else {
+				out = f(nil)
+			}
+		}
+		mu.Lock()
+		cache[key] = out
+		mu.Unlock()
+		return out
+	}
+	return call
+}`
+
+// helperB64Encodebytes — encode bytes (str-backed in gopy) with newlines
+// every 76 chars, matching CPython's encodebytes shape.
+const helperB64Encodebytes = `func __gopy_b64_encodebytes(s string) string {
+	enc := __gopy_b64encode(s)
+	var out strings.Builder
+	for i := 0; i < len(enc); i += 76 {
+		j := i + 76
+		if j > len(enc) {
+			j = len(enc)
+		}
+		out.WriteString(enc[i:j])
+		out.WriteByte('\n')
+	}
+	return out.String()
+}`
+
+const helperB64Decodebytes = `func __gopy_b64_decodebytes(s string) string {
+	return __gopy_b64decode(s)
+}`
+
+// helperAsyncioFutureType — sync-mode Future. set_result/set_exception
+// store the value; result() returns it. Done flag flips on either set.
+const helperAsyncioFutureType = `type __AsyncFuture struct {
+	value    any
+	err      any
+	done     bool
+	callbacks []any
+}
+
+func (f *__AsyncFuture) Set_result(v any) {
+	f.value = v
+	f.done = true
+	for _, cb := range f.callbacks {
+		if c, ok := cb.(func(...any) any); ok {
+			c(f)
+		}
+	}
+	f.callbacks = nil
+}
+
+func (f *__AsyncFuture) Set_exception(e any) {
+	f.err = e
+	f.done = true
+}
+
+func (f *__AsyncFuture) Result(args ...any) any {
+	if f.err != nil {
+		panic(f.err)
+	}
+	return f.value
+}
+
+func (f *__AsyncFuture) Exception(args ...any) any {
+	return f.err
+}
+
+func (f *__AsyncFuture) Done() bool      { return f.done }
+func (f *__AsyncFuture) Cancelled() bool { return false }
+func (f *__AsyncFuture) Cancel(args ...any) bool { return false }
+func (f *__AsyncFuture) Add_done_callback(cb any) {
+	if f.done {
+		if c, ok := cb.(func(...any) any); ok {
+			c(f)
+		}
+		return
+	}
+	f.callbacks = append(f.callbacks, cb)
+}`
+
+const helperAsyncioFuture = `func __gopy_asyncio_future(args ...any) *__AsyncFuture {
+	return &__AsyncFuture{}
+}`
+
+// helperAsyncioTaskGroupType — sync-mode TaskGroup. create_task
+// invokes the coro synchronously (gopy strips async), tracking the
+// result for downstream gather-style consumers.
+const helperAsyncioTaskGroupType = `type __TaskGroup struct {
+	results []any
+}
+
+func (t *__TaskGroup) Create_task(coro any) any {
+	t.results = append(t.results, coro)
+	return coro
+}
+
+func (t *__TaskGroup) Enter() *__TaskGroup { return t }
+func (t *__TaskGroup) Exit() bool          { return false }`
+
+const helperAsyncioTaskGroup = `func __gopy_asyncio_taskgroup(args ...any) *__TaskGroup {
+	return &__TaskGroup{}
+}`
+
+// helperTimeStrptime — parse a date string via the existing
+// __gopy_py_time_format converter, return a 9-tuple struct_time analog.
+const helperTimeStrptime = `func __gopy_time_strptime(args ...string) []any {
+	if len(args) < 2 {
+		panic(NewException("ValueError: strptime needs string and format"))
+	}
+	src := args[0]
+	pyFmt := args[1]
+	goFmt := __gopy_py_time_format(pyFmt)
+	t, err := time.Parse(goFmt, src)
+	if err != nil {
+		panic(NewException("ValueError: " + err.Error()))
+	}
+	return []any{
+		int64(t.Year()),
+		int64(t.Month()),
+		int64(t.Day()),
+		int64(t.Hour()),
+		int64(t.Minute()),
+		int64(t.Second()),
+		int64(int(t.Weekday()+6) % 7),
+		int64(t.YearDay()),
+		int64(-1),
+	}
+}`
+
+// helperLoggingFormatterType — __LogFormatter holds the fmt and datefmt
+// strings; .format(record) substitutes %(levelname)s / %(name)s /
+// %(message)s / %(asctime)s / %(filename)s / %(lineno)d shapes. record
+// is a map[string]any.
+const helperLoggingFormatterType = `type __LogFormatter struct {
+	Fmt     string
+	Datefmt string
+}
+
+func (f *__LogFormatter) Format(record any) string {
+	r, _ := record.(map[string]any)
+	if r == nil {
+		return ""
+	}
+	out := f.Fmt
+	if out == "" {
+		if msg, ok := r["message"].(string); ok {
+			return msg
+		}
+		return ""
+	}
+	for k, v := range r {
+		ph := "%(" + k + ")s"
+		out = strings.ReplaceAll(out, ph, fmt.Sprintf("%v", v))
+		phd := "%(" + k + ")d"
+		out = strings.ReplaceAll(out, phd, fmt.Sprintf("%v", v))
+	}
+	return out
+}
+
+func (f *__LogFormatter) FormatTime(record any, args ...string) string {
+	return ""
+}
+
+func (f *__LogFormatter) UsesTime() bool {
+	return strings.Contains(f.Fmt, "%(asctime)")
+}`
+
+const helperLoggingFormatterNew = `func __gopy_logging_formatter_new(args ...any) *__LogFormatter {
+	f := &__LogFormatter{}
+	if len(args) > 0 {
+		if s, ok := args[0].(string); ok {
+			f.Fmt = s
+		}
+	}
+	if len(args) > 1 {
+		if s, ok := args[1].(string); ok {
+			f.Datefmt = s
+		}
+	}
+	return f
+}`
+
+// helperPopenStdinType — wraps Popen's stdinW pipe with .write / .close
+// so callers can stream input incrementally between communicate calls.
+const helperPopenStdinType = `type __PopenStdin struct {
+	w io.WriteCloser
+}
+
+func (p *__PopenStdin) Write(s string) int64 {
+	if p.w == nil {
+		return 0
+	}
+	n, _ := p.w.Write([]byte(s))
+	return int64(n)
+}
+
+func (p *__PopenStdin) Close() {
+	if p.w != nil {
+		p.w.Close()
+		p.w = nil
+	}
+}
+
+func (p *__Popen) Stdin() *__PopenStdin {
+	return &__PopenStdin{w: p.stdinW}
+}
+
+type __PopenStdout struct {
+	r interface{ Read(p []byte) (int, error) }
+}
+
+func (p *__PopenStdout) Read(args ...int64) string {
+	if p.r == nil {
+		return ""
+	}
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 4096)
+	for {
+		n, err := p.r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
+		if err != nil {
+			break
+		}
+	}
+	return string(buf)
+}
+
+func (p *__PopenStdout) Close() {}
+
+func (p *__Popen) Stdout() *__PopenStdout {
+	if p.stdoutR == nil {
+		return &__PopenStdout{}
+	}
+	return &__PopenStdout{r: p.stdoutR}
+}
+
+func (p *__Popen) Stderr() *__PopenStdout {
+	if p.stderrR == nil {
+		return &__PopenStdout{}
+	}
+	return &__PopenStdout{r: p.stderrR}
+}`
+
+// Signal extras: valid_signals returns full set; strsignal dispatches
+// through syscall. pause blocks indefinitely (gopy strategy: sleep 1y).
+const helperSignalValidSignals = `func __gopy_signal_valid_signals() []any {
+	out := []any{}
+	for i := int64(1); i < 64; i++ {
+		out = append(out, i)
+	}
+	return out
+}`
+
+const helperSignalStrsignal = `func __gopy_signal_strsignal(sig int64) string {
+	return syscall.Signal(sig).String()
+}`
+
+const helperSignalPause = `func __gopy_signal_pause() {
+	time.Sleep(time.Hour * 24 * 365)
+}`
+
+// helperAsyncioTimeoutType — async timeout context manager. gopy strips
+// async so the body runs synchronously; the timeout just no-ops.
+const helperAsyncioTimeoutType = `type __AsyncTimeout struct {
+	when    any
+	expired bool
+}
+
+func (t *__AsyncTimeout) Reschedule(when any) { t.when = when }
+func (t *__AsyncTimeout) Expired() bool       { return t.expired }
+func (t *__AsyncTimeout) When() any            { return t.when }
+func (t *__AsyncTimeout) Enter() *__AsyncTimeout { return t }
+func (t *__AsyncTimeout) Exit() bool             { return false }`
+
+const helperAsyncioTimeout = `func __gopy_asyncio_timeout(args ...any) *__AsyncTimeout {
+	t := &__AsyncTimeout{}
+	if len(args) > 0 {
+		t.when = args[0]
+	}
+	return t
+}`
+
+// helperAsyncioRunCoroTs — schedule coroutine on a loop. Sync semantics:
+// the coro has already evaluated; wrap its value in a done __AsyncFuture.
+const helperAsyncioRunCoroTs = `func __gopy_asyncio_run_coro_ts(args ...any) *__AsyncFuture {
+	f := &__AsyncFuture{done: true}
+	if len(args) > 0 {
+		f.value = args[0]
+	}
+	return f
+}`
+
+// Platform extras — all stubs since Go has no portable equivalent.
+const helperPlatformWin32Ver = `func __gopy_platform_win32ver(args ...any) []any {
+	return []any{"", "", "", ""}
+}`
+
+const helperPlatformWin32Edition = `func __gopy_platform_win32edition() string { return "" }`
+
+const helperPlatformWin32Iot = `func __gopy_platform_win32iot() bool { return false }`
+
+const helperPlatformMacVer = `func __gopy_platform_macver(args ...any) []any {
+	return []any{"", []any{"", "", ""}, ""}
+}`
+
+const helperPlatformJavaVer = `func __gopy_platform_javaver(args ...any) []any {
+	return []any{"", "", []any{"", "", ""}, []any{"", "", ""}}
+}`
+
+const helperPlatformIosVer = `func __gopy_platform_iosver(args ...any) []any {
+	return []any{"", "", "", false}
+}`
+
+const helperPlatformAndroidVer = `func __gopy_platform_androidver(args ...any) []any {
+	return []any{"", "", "", "", "", "", false}
+}`
+
+// Mimetypes extras.
+const helperMimetypesGuessAll = `func __gopy_mimetypes_guess_all(t string) []string {
+	exts, _ := mime.ExtensionsByType(t)
+	if exts == nil {
+		return []string{}
+	}
+	return exts
+}`
+
+const helperMimetypesRead = `func __gopy_mimetypes_read(args ...any) any {
+	return nil
 }`
