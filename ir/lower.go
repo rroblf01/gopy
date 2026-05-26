@@ -2160,18 +2160,31 @@ func lowerStmt(n parser.Node, sc *scope) (Stmt, error) {
 			}
 			var assigns []Stmt
 			for _, t := range targets {
-				if t.Type() != "Name" {
-					return nil, fmt.Errorf("line %d: chained assignment requires bare-name targets", n.Lineno())
+				switch t.Type() {
+				case "Name":
+					name := t.Str("id")
+					decl := sc.declare(name, val.TypeOf())
+					assigns = append(assigns, &Assign{Target: name, Value: val, Decl: decl})
+				case "Attribute":
+					recv, err := lowerExpr(t.Child("value"), sc)
+					if err != nil {
+						return nil, err
+					}
+					assigns = append(assigns, &AssignAttr{Target: recv, Name: t.Str("attr"), Value: val})
+				case "Subscript":
+					obj, err := lowerExpr(t.Child("value"), sc)
+					if err != nil {
+						return nil, err
+					}
+					idx, err := lowerExpr(t.Child("slice"), sc)
+					if err != nil {
+						return nil, err
+					}
+					assigns = append(assigns, &AssignSub{Target: obj, Index: idx, Value: val})
+				default:
+					return nil, fmt.Errorf("line %d: chained assignment target %q not supported", n.Lineno(), t.Type())
 				}
-				name := t.Str("id")
-				decl := sc.declare(name, val.TypeOf())
-				assigns = append(assigns, &Assign{Target: name, Value: val, Decl: decl})
 			}
-			// Wrap multiple assigns in a synthetic Try-less block. We don't
-			// have a generic Block IR; emit them as separate statements
-			// through a small "fan-out" wrapper. Cheaper: return the
-			// first and rely on lowerBody flattening — but lowerBody
-			// expects single Stmt return. Use a ChainedAssign helper.
 			return &Block{Body: assigns}, nil
 		}
 		tgt := targets[0]
@@ -3557,22 +3570,48 @@ func lowerListComp(n parser.Node, sc *scope) (Expr, error) {
 				return nil, fmt.Errorf("line %d: comprehension tuple target must be two names", n.Lineno())
 			}
 			itNode := g.Child("iter")
-			if itNode.Type() != "Call" || itNode.Child("func").Type() != "Attribute" || itNode.Child("func").Str("attr") != "items" {
-				return nil, fmt.Errorf("line %d: comprehension tuple target requires dict.items()", n.Lineno())
+			isItems := itNode.Type() == "Call" && itNode.Child("func").Type() == "Attribute" && itNode.Child("func").Str("attr") == "items"
+			if isItems {
+				d, err := lowerExpr(itNode.Child("func").Child("value"), innerSc)
+				if err != nil {
+					return nil, err
+				}
+				dt := d.TypeOf()
+				if dt == nil || dt.Kind != TyDict {
+					return nil, fmt.Errorf("line %d: .items() must be called on a typed dict", n.Lineno())
+				}
+				varName = elts[0].Str("id")
+				varName2 = elts[1].Str("id")
+				iter = d
+				innerSc.declare(varName, dt.Key)
+				innerSc.declare(varName2, dt.Val)
+			} else {
+				// Fall back to list-of-2-tuples / list-of-2-lists iteration.
+				it, err := lowerExpr(itNode, innerSc)
+				if err != nil {
+					return nil, err
+				}
+				t := it.TypeOf()
+				if t == nil || t.Kind != TyList || t.Elem == nil {
+					return nil, fmt.Errorf("line %d: comprehension tuple target requires dict.items() or a typed list of 2-tuples", n.Lineno())
+				}
+				var t0, t1 *Type
+				if t.Elem.Kind == TyTuple && len(t.Elem.Tuple) == 2 {
+					t0 = t.Elem.Tuple[0]
+					t1 = t.Elem.Tuple[1]
+				} else if t.Elem.Kind == TyList && t.Elem.Elem != nil {
+					t0 = t.Elem.Elem
+					t1 = t.Elem.Elem
+				} else {
+					return nil, fmt.Errorf("line %d: comprehension tuple target requires a list of 2-tuples", n.Lineno())
+				}
+				varName = elts[0].Str("id")
+				varName2 = elts[1].Str("id")
+				iter = it
+				elemTy = t.Elem
+				innerSc.declare(varName, t0)
+				innerSc.declare(varName2, t1)
 			}
-			d, err := lowerExpr(itNode.Child("func").Child("value"), innerSc)
-			if err != nil {
-				return nil, err
-			}
-			dt := d.TypeOf()
-			if dt == nil || dt.Kind != TyDict {
-				return nil, fmt.Errorf("line %d: .items() must be called on a typed dict", n.Lineno())
-			}
-			varName = elts[0].Str("id")
-			varName2 = elts[1].Str("id")
-			iter = d
-			innerSc.declare(varName, dt.Key)
-			innerSc.declare(varName2, dt.Val)
 		} else {
 			if tgt.Type() != "Name" {
 				return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())
@@ -3667,22 +3706,47 @@ func lowerDictComp(n parser.Node, sc *scope) (Expr, error) {
 				return nil, fmt.Errorf("line %d: comprehension tuple target must be two names", n.Lineno())
 			}
 			itNode := g.Child("iter")
-			if itNode.Type() != "Call" || itNode.Child("func").Type() != "Attribute" || itNode.Child("func").Str("attr") != "items" {
-				return nil, fmt.Errorf("line %d: comprehension tuple target requires dict.items()", n.Lineno())
+			isItems := itNode.Type() == "Call" && itNode.Child("func").Type() == "Attribute" && itNode.Child("func").Str("attr") == "items"
+			if isItems {
+				d, err := lowerExpr(itNode.Child("func").Child("value"), innerSc)
+				if err != nil {
+					return nil, err
+				}
+				dt := d.TypeOf()
+				if dt == nil || dt.Kind != TyDict {
+					return nil, fmt.Errorf("line %d: .items() must be called on a typed dict", n.Lineno())
+				}
+				varName = elts[0].Str("id")
+				varName2 = elts[1].Str("id")
+				iter = d
+				innerSc.declare(varName, dt.Key)
+				innerSc.declare(varName2, dt.Val)
+			} else {
+				it, err := lowerExpr(itNode, innerSc)
+				if err != nil {
+					return nil, err
+				}
+				t := it.TypeOf()
+				if t == nil || t.Kind != TyList || t.Elem == nil {
+					return nil, fmt.Errorf("line %d: comprehension tuple target requires dict.items() or a typed list of 2-tuples", n.Lineno())
+				}
+				var t0, t1 *Type
+				if t.Elem.Kind == TyTuple && len(t.Elem.Tuple) == 2 {
+					t0 = t.Elem.Tuple[0]
+					t1 = t.Elem.Tuple[1]
+				} else if t.Elem.Kind == TyList && t.Elem.Elem != nil {
+					t0 = t.Elem.Elem
+					t1 = t.Elem.Elem
+				} else {
+					return nil, fmt.Errorf("line %d: comprehension tuple target requires a list of 2-tuples", n.Lineno())
+				}
+				varName = elts[0].Str("id")
+				varName2 = elts[1].Str("id")
+				iter = it
+				elemTy = t.Elem
+				innerSc.declare(varName, t0)
+				innerSc.declare(varName2, t1)
 			}
-			d, err := lowerExpr(itNode.Child("func").Child("value"), innerSc)
-			if err != nil {
-				return nil, err
-			}
-			dt := d.TypeOf()
-			if dt == nil || dt.Kind != TyDict {
-				return nil, fmt.Errorf("line %d: .items() must be called on a typed dict", n.Lineno())
-			}
-			varName = elts[0].Str("id")
-			varName2 = elts[1].Str("id")
-			iter = d
-			innerSc.declare(varName, dt.Key)
-			innerSc.declare(varName2, dt.Val)
 		} else {
 			if tgt.Type() != "Name" {
 				return nil, fmt.Errorf("line %d: comprehension target must be a single name", n.Lineno())

@@ -5653,6 +5653,66 @@ func (g *gen) listComp(c *ir.ListComp) error {
 	g.writef("__out := []%s{}\n", elem)
 	openLoop := func(varName, varName2 string, cond ir.Expr, iter ir.Expr) error {
 		if varName2 != "" {
+			it := iter.TypeOf()
+			isList := it != nil && it.Kind == ir.TyList && it.Elem != nil
+			if isList {
+				// list-of-2-tuples: emit __tp expansion mirroring tuple_list ForEach.
+				g.writeIndent()
+				g.writef("for _, __tp := range ")
+				if err := g.expr(iter); err != nil {
+					return err
+				}
+				g.writef(" {\n")
+				g.indent++
+				var t0, t1 *ir.Type
+				needAssert := false
+				switch it.Elem.Kind {
+				case ir.TyTuple:
+					if len(it.Elem.Tuple) == 2 {
+						t0 = it.Elem.Tuple[0]
+						t1 = it.Elem.Tuple[1]
+						needAssert = true
+					}
+				case ir.TyList:
+					t0 = it.Elem.Elem
+					t1 = it.Elem.Elem
+				}
+				emit := func(name string, idx int, t *ir.Type) {
+					gt := g.goType(t)
+					g.writeIndent()
+					if needAssert && gt != "" && gt != "any" {
+						g.writef("%s := __tp[%d].(%s)\n", name, idx, gt)
+					} else {
+						g.writef("%s := __tp[%d]\n", name, idx)
+					}
+					g.writeIndent()
+					g.writef("_ = %s\n", name)
+				}
+				emit(varName, 0, t0)
+				emit(varName2, 1, t1)
+				if cond != nil {
+					pre, cond2 := ir.HoistNamedExprs(cond)
+					for _, ps := range pre {
+						if err := g.stmt(ps); err != nil {
+							return err
+						}
+					}
+					cond = cond2
+					g.writeIndent()
+					g.writef("if !(")
+					if err := g.expr(cond); err != nil {
+						return err
+					}
+					g.writef(") {\n")
+					g.indent++
+					g.writeIndent()
+					g.writef("continue\n")
+					g.indent--
+					g.writeIndent()
+					g.writef("}\n")
+				}
+				return nil
+			}
 			g.writeIndent()
 			g.writef("for %s, %s := range ", varName, varName2)
 			if err := g.expr(iter); err != nil {
@@ -5831,6 +5891,65 @@ func (g *gen) dictComp(c *ir.DictComp) error {
 	g.writef("__out := map[%s]%s{}\n", kt, vt)
 	openLoop := func(varName, varName2 string, cond ir.Expr, iter ir.Expr) error {
 		if varName2 != "" {
+			it := iter.TypeOf()
+			isList := it != nil && it.Kind == ir.TyList && it.Elem != nil
+			if isList {
+				g.writeIndent()
+				g.writef("for _, __tp := range ")
+				if err := g.expr(iter); err != nil {
+					return err
+				}
+				g.writef(" {\n")
+				g.indent++
+				var t0, t1 *ir.Type
+				needAssert := false
+				switch it.Elem.Kind {
+				case ir.TyTuple:
+					if len(it.Elem.Tuple) == 2 {
+						t0 = it.Elem.Tuple[0]
+						t1 = it.Elem.Tuple[1]
+						needAssert = true
+					}
+				case ir.TyList:
+					t0 = it.Elem.Elem
+					t1 = it.Elem.Elem
+				}
+				emit := func(name string, idx int, t *ir.Type) {
+					gt := g.goType(t)
+					g.writeIndent()
+					if needAssert && gt != "" && gt != "any" {
+						g.writef("%s := __tp[%d].(%s)\n", name, idx, gt)
+					} else {
+						g.writef("%s := __tp[%d]\n", name, idx)
+					}
+					g.writeIndent()
+					g.writef("_ = %s\n", name)
+				}
+				emit(varName, 0, t0)
+				emit(varName2, 1, t1)
+				if cond != nil {
+					pre, cond2 := ir.HoistNamedExprs(cond)
+					for _, ps := range pre {
+						if err := g.stmt(ps); err != nil {
+							return err
+						}
+					}
+					cond = cond2
+					g.writeIndent()
+					g.writef("if !(")
+					if err := g.expr(cond); err != nil {
+						return err
+					}
+					g.writef(") {\n")
+					g.indent++
+					g.writeIndent()
+					g.writef("continue\n")
+					g.indent--
+					g.writeIndent()
+					g.writef("}\n")
+				}
+				return nil
+			}
 			g.writeIndent()
 			g.writef("for %s, %s := range ", varName, varName2)
 			if err := g.expr(iter); err != nil {
