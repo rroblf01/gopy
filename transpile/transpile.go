@@ -7268,6 +7268,16 @@ var taggedMethodRename = map[string]map[string]string{
 		"expired":    "Expired",
 		"when":       "When",
 	},
+	"__Struct": {
+		"pack":     "Pack",
+		"unpack":   "Unpack",
+		"calcsize": "Calcsize",
+	},
+	"__NormalDist": {
+		"pdf":      "Pdf",
+		"cdf":      "Cdf",
+		"samples":  "Samples",
+	},
 	"__Timer": {
 		"start":  "Start",
 		"cancel": "Cancel",
@@ -7540,6 +7550,11 @@ var taggedPropAttrs = map[string]map[string]taggedAttrInfo{
 		"stdin":  {GoName: "Stdin", Ty: nil, Tag: "__PopenStdin"},
 		"stdout": {GoName: "Stdout", Ty: nil, Tag: "__PopenStdout"},
 		"stderr": {GoName: "Stderr", Ty: nil, Tag: "__PopenStdout"},
+	},
+	"__NormalDist": {
+		"mean":     {GoName: "Mean", Ty: &ir.Type{Kind: ir.TyFloat}},
+		"stdev":    {GoName: "Stdev", Ty: &ir.Type{Kind: ir.TyFloat}},
+		"variance": {GoName: "Variance", Ty: &ir.Type{Kind: ir.TyFloat}},
 	},
 	"__DirEntry": {
 		"name": {GoName: "Name", Ty: &ir.Type{Kind: ir.TyStr}},

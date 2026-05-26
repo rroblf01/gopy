@@ -176,6 +176,16 @@ var stdlibModules = map[string]stdlibModule{
 			"utime":     {GoFunc: "__gopy_os_utime", Helper: helperOsUtime, HelperImports: []string{"os", "time"}},
 			"truncate":  {GoFunc: "__gopy_os_truncate", Helper: helperOsTruncate, HelperImports: []string{"os"}},
 			"ftruncate": {GoFunc: "__gopy_os_ftruncate", Helper: helperOsFtruncate, HelperImports: []string{"syscall"}},
+			"WIFEXITED":    {GoFunc: "__gopy_os_wifexited", Helper: helperOsWIFExited, RetKind: "bool"},
+			"WEXITSTATUS":  {GoFunc: "__gopy_os_wexitstatus", Helper: helperOsWExitStatus, RetKind: "int"},
+			"WIFSIGNALED":  {GoFunc: "__gopy_os_wifsignaled", Helper: helperOsWIFSignaled, RetKind: "bool"},
+			"WTERMSIG":     {GoFunc: "__gopy_os_wtermsig", Helper: helperOsWTermSig, RetKind: "int"},
+			"WIFSTOPPED":   {GoFunc: "__gopy_os_wifstopped", Helper: helperOsWIFStopped, RetKind: "bool"},
+			"WSTOPSIG":     {GoFunc: "__gopy_os_wstopsig", Helper: helperOsWStopSig, RetKind: "int"},
+			"WIFCONTINUED": {GoFunc: "__gopy_os_wifcontinued", Helper: helperOsWIFContinued, RetKind: "bool"},
+			"waitpid":      {GoFunc: "__gopy_os_waitpid", Helper: helperOsWaitpid, HelperImports: []string{"syscall"}},
+			"wait":         {GoFunc: "__gopy_os_wait", Helper: helperOsWait, HelperImports: []string{"syscall"}},
+			"waitstatus_to_exitcode": {GoFunc: "__gopy_os_wait_to_exitcode", Helper: helperOsWaitToExitcode, RetKind: "int"},
 			"getsid":    {GoFunc: "__gopy_os_getsid", Helper: helperOsGetsid, HelperImports: []string{"syscall"}, RetKind: "int"},
 			"getpgid":   {GoFunc: "__gopy_os_getpgid", Helper: helperOsGetpgid, HelperImports: []string{"syscall"}, RetKind: "int"},
 			"getpgrp":   {GoFunc: "__gopy_os_getpgrp", Helper: helperOsGetpgrp, HelperImports: []string{"syscall"}, RetKind: "int"},
@@ -385,6 +395,9 @@ var stdlibModules = map[string]stdlibModule{
 					"parse_qsl":    {GoFunc: "__gopy_url_parse_qsl", GoImport: "net/url", Helper: helperURLParseQsl},
 					"urljoin":      {GoFunc: "__gopy_url_urljoin", GoImport: "net/url", Helper: helperURLUrljoin, RetKind: "str"},
 					"urlsplit":     {GoFunc: "__gopy_url_urlparse", GoImport: "net/url", Helper: helperURLUrlparse, RetTag: "__URLParseResult", ExtraHelpers: map[string]string{"__URLParseResult": helperURLParseResultType}},
+					"urlunparse":   {GoFunc: "__gopy_url_urlunparse", Helper: helperURLUrlunparse, RetKind: "str"},
+					"urlunsplit":   {GoFunc: "__gopy_url_urlunsplit", Helper: helperURLUrlunsplit, RetKind: "str"},
+					"urldefrag":    {GoFunc: "__gopy_url_urldefrag", Helper: helperURLUrldefrag, HelperImports: []string{"strings"}},
 				},
 			},
 			"error": {
@@ -485,6 +498,7 @@ var stdlibModules = map[string]stdlibModule{
 			"make_archive":      {GoFunc: "__gopy_shutil_make_archive", Helper: helperShutilMakeArchive, HelperImports: []string{"archive/tar", "archive/zip", "compress/gzip", "io", "os", "path/filepath"}, RetKind: "str"},
 			"copyfileobj":       {GoFunc: "__gopy_shutil_copyfileobj", Helper: helperShutilCopyfileobj, HelperImports: []string{"io", "os"}, RetKind: "int"},
 			"unpack_archive":    {GoFunc: "__gopy_shutil_unpack_archive", Helper: helperShutilUnpackArchive, HelperImports: []string{"archive/tar", "archive/zip", "compress/gzip", "io", "os", "path/filepath", "strings"}},
+			"chown":             {GoFunc: "__gopy_shutil_chown", Helper: helperShutilChown, HelperImports: []string{"os", "os/user", "strconv"}},
 		},
 	},
 	"tempfile": {
@@ -654,6 +668,11 @@ var stdlibModules = map[string]stdlibModule{
 			"pack":      {GoFunc: "__gopy_struct_pack", Helper: helperStructPack, HelperImports: []string{"encoding/binary", "bytes"}, RetKind: "str"},
 			"unpack":    {GoFunc: "__gopy_struct_unpack", Helper: helperStructUnpack, HelperImports: []string{"encoding/binary"}},
 			"calcsize":  {GoFunc: "__gopy_struct_calcsize", Helper: helperStructCalcsize, RetKind: "int"},
+			"pack_into":  {GoFunc: "__gopy_struct_pack_into", Helper: helperStructPackInto, ExtraHelpers: map[string]string{"__gopy_struct_pack": helperStructPack, "__gopy_struct_pack_int": ""}, HelperImports: []string{"encoding/binary", "bytes"}, RetKind: "int"},
+			"unpack_from": {GoFunc: "__gopy_struct_unpack_from", Helper: helperStructUnpackFrom, ExtraHelpers: map[string]string{"__gopy_struct_unpack": helperStructUnpack}, HelperImports: []string{"encoding/binary"}},
+			"iter_unpack": {GoFunc: "__gopy_struct_iter_unpack", Helper: helperStructIterUnpack, ExtraHelpers: map[string]string{"__gopy_struct_unpack": helperStructUnpack, "__gopy_struct_calcsize": helperStructCalcsize}, HelperImports: []string{"encoding/binary"}},
+			"Struct":     {GoFunc: "__gopy_struct_new", Helper: helperStructNew, RetTag: "__Struct", ExtraHelpers: map[string]string{"__Struct": helperStructType, "__gopy_struct_pack": helperStructPack, "__gopy_struct_unpack": helperStructUnpack, "__gopy_struct_calcsize": helperStructCalcsize}, HelperImports: []string{"encoding/binary", "bytes"}},
+			"error":      {GoFunc: "__gopy_struct_error_unused"},
 		},
 	},
 	"fractions": {
@@ -813,9 +832,29 @@ var stdlibModules = map[string]stdlibModule{
 		},
 	},
 	"io": {
+		Attrs: map[string]stdlibAttr{
+			"SEEK_SET":          {GoExpr: "int64(0)"},
+			"SEEK_CUR":          {GoExpr: "int64(1)"},
+			"SEEK_END":          {GoExpr: "int64(2)"},
+			"DEFAULT_BUFFER_SIZE": {GoExpr: "int64(8192)"},
+		},
 		Funcs: map[string]stdlibFunc{
 			"StringIO": {GoFunc: "__gopy_io_stringio_new", Helper: helperIOStringIONew, RetTag: "__StringIO", ExtraHelpers: map[string]string{"__StringIO": helperIOStringIOType}},
 			"BytesIO":  {GoFunc: "__gopy_io_bytesio_new", Helper: helperIOBytesIONew, RetTag: "__StringIO", ExtraHelpers: map[string]string{"__StringIO": helperIOStringIOType}},
+			"IOBase":             {GoFunc: "__gopy_io_unused"},
+			"RawIOBase":          {GoFunc: "__gopy_io_unused"},
+			"BufferedIOBase":     {GoFunc: "__gopy_io_unused"},
+			"TextIOBase":         {GoFunc: "__gopy_io_unused"},
+			"FileIO":             {GoFunc: "__gopy_io_unused"},
+			"BufferedReader":     {GoFunc: "__gopy_io_unused"},
+			"BufferedWriter":     {GoFunc: "__gopy_io_unused"},
+			"BufferedRandom":     {GoFunc: "__gopy_io_unused"},
+			"BufferedRWPair":     {GoFunc: "__gopy_io_unused"},
+			"TextIOWrapper":      {GoFunc: "__gopy_io_unused"},
+			"IncrementalNewlineDecoder": {GoFunc: "__gopy_io_unused"},
+			"UnsupportedOperation":      {GoFunc: "__gopy_io_unused"},
+			"open":               {GoFunc: "__gopy_io_unused"},
+			"open_code":          {GoFunc: "__gopy_io_unused"},
 		},
 	},
 	"weakref": {
@@ -1688,6 +1727,7 @@ var stdlibModules = map[string]stdlibModule{
 			"geometric_mean":    {GoFunc: "__gopy_stats_geomean", Helper: helperStatsGeoMean, HelperImports: []string{"math"}, RetKind: "float"},
 			"quantiles":         {GoFunc: "__gopy_stats_quantiles", Helper: helperStatsQuantiles, HelperImports: []string{"sort"}},
 			"linear_regression": {GoFunc: "__gopy_stats_linreg", Helper: helperStatsLinreg},
+			"NormalDist":        {GoFunc: "__gopy_stats_normaldist_new", Helper: helperStatsNormalDistNew, RetTag: "__NormalDist", ExtraHelpers: map[string]string{"__NormalDist": helperStatsNormalDistType}, HelperImports: []string{"math"}},
 		},
 	},
 	"uuid": {
@@ -14432,4 +14472,280 @@ const helperMimetypesGuessAll = `func __gopy_mimetypes_guess_all(t string) []str
 
 const helperMimetypesRead = `func __gopy_mimetypes_read(args ...any) any {
 	return nil
+}`
+
+// OS W* predicates + waitpid family. Linux exit-status layout:
+// low byte holds signal+core flags, high byte holds exit code on
+// normal exit. Predicates match those semantics.
+const helperOsWIFExited = `func __gopy_os_wifexited(status int64) bool {
+	return (status & 0x7f) == 0
+}`
+
+const helperOsWExitStatus = `func __gopy_os_wexitstatus(status int64) int64 {
+	return (status >> 8) & 0xff
+}`
+
+const helperOsWIFSignaled = `func __gopy_os_wifsignaled(status int64) bool {
+	sig := status & 0x7f
+	return sig != 0 && sig != 0x7f
+}`
+
+const helperOsWTermSig = `func __gopy_os_wtermsig(status int64) int64 {
+	return status & 0x7f
+}`
+
+const helperOsWIFStopped = `func __gopy_os_wifstopped(status int64) bool {
+	return (status & 0xff) == 0x7f
+}`
+
+const helperOsWStopSig = `func __gopy_os_wstopsig(status int64) int64 {
+	return (status >> 8) & 0xff
+}`
+
+const helperOsWIFContinued = `func __gopy_os_wifcontinued(status int64) bool {
+	return status == 0xffff
+}`
+
+const helperOsWaitpid = `func __gopy_os_waitpid(pid, options int64) []any {
+	var ws syscall.WaitStatus
+	rpid, err := syscall.Wait4(int(pid), &ws, int(options), nil)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return []any{int64(rpid), int64(ws)}
+}`
+
+const helperOsWait = `func __gopy_os_wait() []any {
+	var ws syscall.WaitStatus
+	rpid, err := syscall.Wait4(-1, &ws, 0, nil)
+	if err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
+	return []any{int64(rpid), int64(ws)}
+}`
+
+const helperOsWaitToExitcode = `func __gopy_os_wait_to_exitcode(status int64) int64 {
+	if (status & 0x7f) == 0 {
+		return (status >> 8) & 0xff
+	}
+	return -(status & 0x7f)
+}`
+
+// shutil.chown(path, user, group) — accept name or numeric id.
+// urllib.parse extras
+const helperURLUrlunparse = `func __gopy_url_urlunparse(parts ...any) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	tup, ok := parts[0].([]any)
+	if !ok || len(tup) < 6 {
+		return ""
+	}
+	scheme, _ := tup[0].(string)
+	netloc, _ := tup[1].(string)
+	path, _ := tup[2].(string)
+	params, _ := tup[3].(string)
+	query, _ := tup[4].(string)
+	fragment, _ := tup[5].(string)
+	out := ""
+	if scheme != "" {
+		out += scheme + "://"
+	}
+	out += netloc + path
+	if params != "" {
+		out += ";" + params
+	}
+	if query != "" {
+		out += "?" + query
+	}
+	if fragment != "" {
+		out += "#" + fragment
+	}
+	return out
+}`
+
+const helperURLUrlunsplit = `func __gopy_url_urlunsplit(parts ...any) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	tup, ok := parts[0].([]any)
+	if !ok || len(tup) < 5 {
+		return ""
+	}
+	scheme, _ := tup[0].(string)
+	netloc, _ := tup[1].(string)
+	path, _ := tup[2].(string)
+	query, _ := tup[3].(string)
+	fragment, _ := tup[4].(string)
+	out := ""
+	if scheme != "" {
+		out += scheme + "://"
+	}
+	out += netloc + path
+	if query != "" {
+		out += "?" + query
+	}
+	if fragment != "" {
+		out += "#" + fragment
+	}
+	return out
+}`
+
+const helperURLUrldefrag = `func __gopy_url_urldefrag(url string) []any {
+	if i := strings.Index(url, "#"); i >= 0 {
+		return []any{url[:i], url[i+1:]}
+	}
+	return []any{url, ""}
+}`
+
+// struct.Struct
+const helperStructType = `type __Struct struct {
+	Fmt string
+}
+
+func (s *__Struct) Pack(args ...any) string {
+	full := append([]any{s.Fmt}, args...)
+	return __gopy_struct_pack(full...)
+}
+
+func (s *__Struct) Unpack(data string) []any {
+	return __gopy_struct_unpack(s.Fmt, data)
+}
+
+func (s *__Struct) Calcsize() int64 {
+	return __gopy_struct_calcsize(s.Fmt)
+}`
+
+const helperStructNew = `func __gopy_struct_new(fmt string) *__Struct {
+	return &__Struct{Fmt: fmt}
+}`
+
+const helperStructPackInto = `func __gopy_struct_pack_into(args ...any) int64 {
+	// pack_into(fmt, buffer, offset, *args) — gopy can't mutate the
+	// buffer (str-backed), so this is a no-op returning the packed size.
+	if len(args) == 0 {
+		return 0
+	}
+	fmt, _ := args[0].(string)
+	return __gopy_struct_calcsize(fmt)
+}`
+
+const helperStructUnpackFrom = `func __gopy_struct_unpack_from(args ...any) []any {
+	if len(args) < 2 {
+		return []any{}
+	}
+	fmt, _ := args[0].(string)
+	data, _ := args[1].(string)
+	offset := int64(0)
+	if len(args) > 2 {
+		if n, ok := args[2].(int64); ok {
+			offset = n
+		}
+	}
+	if offset > 0 && int(offset) < len(data) {
+		data = data[offset:]
+	}
+	return __gopy_struct_unpack(fmt, data)
+}`
+
+const helperStructIterUnpack = `func __gopy_struct_iter_unpack(fmt, data string) []any {
+	size := __gopy_struct_calcsize(fmt)
+	if size <= 0 {
+		return []any{}
+	}
+	out := []any{}
+	pos := int64(0)
+	dlen := int64(len(data))
+	for pos+size <= dlen {
+		chunk := data[pos : pos+size]
+		out = append(out, __gopy_struct_unpack(fmt, chunk))
+		pos += size
+	}
+	return out
+}`
+
+// statistics.NormalDist — minimal Gaussian distribution wrapper.
+const helperStatsNormalDistType = `type __NormalDist struct {
+	Mean     float64
+	Stdev    float64
+	Variance float64
+}
+
+func (n *__NormalDist) Pdf(x float64) float64 {
+	if n.Stdev == 0 {
+		return 0
+	}
+	z := (x - n.Mean) / n.Stdev
+	return math.Exp(-0.5*z*z) / (n.Stdev * math.Sqrt(2*math.Pi))
+}
+
+func (n *__NormalDist) Cdf(x float64) float64 {
+	if n.Stdev == 0 {
+		return 0
+	}
+	return 0.5 * (1 + math.Erf((x-n.Mean)/(n.Stdev*math.Sqrt2)))
+}
+
+func (n *__NormalDist) Samples(args ...int64) []float64 {
+	count := int64(1)
+	if len(args) > 0 {
+		count = args[0]
+	}
+	out := make([]float64, count)
+	for i := range out {
+		out[i] = n.Mean
+	}
+	return out
+}`
+
+const helperStatsNormalDistNew = `func __gopy_stats_normaldist_new(args ...float64) *__NormalDist {
+	mu := float64(0)
+	sigma := float64(1)
+	if len(args) > 0 {
+		mu = args[0]
+	}
+	if len(args) > 1 {
+		sigma = args[1]
+	}
+	return &__NormalDist{Mean: mu, Stdev: sigma, Variance: sigma * sigma}
+}`
+
+const helperShutilChown = `func __gopy_shutil_chown(path string, args ...any) {
+	uid := -1
+	gid := -1
+	if len(args) > 0 {
+		switch v := args[0].(type) {
+		case string:
+			if v != "" {
+				if u, err := user.Lookup(v); err == nil {
+					if n, err := strconv.Atoi(u.Uid); err == nil {
+						uid = n
+					}
+				}
+			}
+		case int64:
+			uid = int(v)
+		case int:
+			uid = v
+		}
+	}
+	if len(args) > 1 {
+		switch v := args[1].(type) {
+		case string:
+			if v != "" {
+				if g, err := user.LookupGroup(v); err == nil {
+					if n, err := strconv.Atoi(g.Gid); err == nil {
+						gid = n
+					}
+				}
+			}
+		case int64:
+			gid = int(v)
+		case int:
+			gid = v
+		}
+	}
+	if err := os.Chown(path, uid, gid); err != nil {
+		panic(NewException("OSError: " + err.Error()))
+	}
 }`
