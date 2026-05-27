@@ -139,6 +139,11 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 		}
 		g.writef("\n")
 	}
+	// Bridged-decorator route registration: emit adapters + an init() that
+	// exposes each decorated handler to Python and applies its decorator.
+	if err := g.emitBridgeRoutes(); err != nil {
+		return nil, nil, err
+	}
 	// Post-codegen Exception promotion: any helper that calls
 	// NewException pulls in the inline base type. This catches the
 	// shims we don't explicitly track at scan time (deque, hashlib's
@@ -630,6 +635,20 @@ type gen struct {
 	// restore the stack so their own returns aren't trapped.
 	tryReturnStack []*tryReturnCtx
 	tryReturnCount int
+	// bridgeRoutes collects top-level functions decorated with a *bridged*
+	// decorator (e.g. `@app.get("/x")` where `app` is an embedded-CPython
+	// object). After the decl loop, codegen emits a reverse-bridge adapter
+	// for each and a single `init()` that exposes the Go handler to Python
+	// (with a real signature via RegisterTypedFunc) and applies the bridged
+	// decorator to register it with the framework.
+	bridgeRoutes []bridgeRoute
+}
+
+// bridgeRoute pairs a transpiled top-level function with the bridged
+// decorator expressions applied to it (in source order).
+type bridgeRoute struct {
+	fn         *ir.Func
+	decorators []ir.Expr
 }
 
 // tryReturnCtx records the locals a `try` IIFE writes to so the enclosing
@@ -814,6 +833,15 @@ func (g *gen) fn(fn *ir.Func) error {
 		prev := g.currentClass
 		g.currentClass = g.classes[fn.Receiver.Ty.Name]
 		defer func() { g.currentClass = prev }()
+	}
+	// Bridged decorators (`@app.get("/x")` where `app` is an embedded-CPython
+	// object): record the route so we can expose this handler to Python and
+	// apply the decorator after the decl loop. The function itself still
+	// emits as a normal Go function below.
+	if fn.Receiver == nil && !fn.IsGenerator {
+		if decs := g.bridgeDecorators(fn); len(decs) > 0 {
+			g.bridgeRoutes = append(g.bridgeRoutes, bridgeRoute{fn: fn, decorators: decs})
+		}
 	}
 	// Var-type tracking is function-local: a name reused across two
 	// functions could plausibly hold different stdlib types in each, so
@@ -8635,6 +8663,187 @@ func (g *gen) registerBridgeHelpers() {
 	g.needsException = true
 }
 
+// bridgeDecorators returns the subset of a function's decorator expressions
+// that are *bridged* (their receiver chain bottoms out in an embedded-CPython
+// object, e.g. `@app.get("/x")` with `app = FastAPI()`) AND whose handler has
+// a shape we can adapt across the reverse bridge. A function that is bridged
+// but not adaptable falls back to the existing accept-and-ignore behavior
+// (empty result), so it still compiles.
+func (g *gen) bridgeDecorators(fn *ir.Func) []ir.Expr {
+	if len(fn.Decorators) == 0 || !bridgeRouteEligible(fn) {
+		return nil
+	}
+	var out []ir.Expr
+	for _, d := range fn.Decorators {
+		if g.isBridgeExpr(d) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// bridgeRouteEligible reports whether a handler's signature can be adapted to
+// a reverse-bridge callback: no *args/**kwargs, parameters limited to scalars
+// or untyped (any), and a single non-tuple/non-named return.
+func bridgeRouteEligible(fn *ir.Func) bool {
+	if fn.Vararg != nil || fn.Kwarg != nil {
+		return false
+	}
+	for _, p := range fn.Params {
+		if !bridgeArgKindOK(p.Ty) {
+			return false
+		}
+	}
+	return bridgeRetKindOK(fn.Ret)
+}
+
+func bridgeArgKindOK(t *ir.Type) bool {
+	if t == nil {
+		return true
+	}
+	switch t.Kind {
+	case ir.TyInt, ir.TyFloat, ir.TyStr, ir.TyBool, ir.TyAny, ir.TyUnknown:
+		return true
+	}
+	return false
+}
+
+func bridgeRetKindOK(t *ir.Type) bool {
+	if t == nil {
+		return true
+	}
+	switch t.Kind {
+	case ir.TyInt, ir.TyFloat, ir.TyStr, ir.TyBool, ir.TyList, ir.TyDict,
+		ir.TyAny, ir.TyNone, ir.TyUnknown:
+		return true
+	}
+	return false
+}
+
+// bridgeAnnotation maps an IR type to the Python type-name string the
+// introspection factory (_gopy_resolve) understands, so a framework reading
+// inspect.signature on the exposed handler sees the right annotation.
+func bridgeAnnotation(t *ir.Type) string {
+	if t == nil {
+		return ""
+	}
+	switch t.Kind {
+	case ir.TyInt:
+		return "int"
+	case ir.TyFloat:
+		return "float"
+	case ir.TyStr:
+		return "str"
+	case ir.TyBool:
+		return "bool"
+	case ir.TyList:
+		return "list"
+	case ir.TyDict:
+		return "dict"
+	case ir.TyNone:
+		return "None"
+	case ir.TyNamed:
+		return t.Name
+	}
+	return ""
+}
+
+// emitBridgeRoutes emits, for every function carrying a bridged decorator, a
+// reverse-bridge adapter and (once) an init() that exposes the handler to
+// Python with a real signature via RegisterTypedFunc, then applies the bridged
+// decorator(s) to register it with the framework. Called after the decl loop,
+// so module-level bridge vars (the `app`) are already declared.
+func (g *gen) emitBridgeRoutes() error {
+	if len(g.bridgeRoutes) == 0 {
+		return nil
+	}
+	g.usedBridge = true
+	g.registerBridgeHelpers()
+	// Adapter per handler: unpack the reverse-bridge args into the typed Go
+	// call. Python's signature wrapper binds + applies defaults before calling
+	// us, so __args holds every positional parameter in declaration order.
+	for i, r := range g.bridgeRoutes {
+		if err := g.emitRouteAdapter(i, r.fn); err != nil {
+			return err
+		}
+	}
+	g.writef("func init() {\n")
+	for i, r := range g.bridgeRoutes {
+		fn := r.fn
+		g.writef("__route%d := __bridgeMust(RegisterTypedFunc(%q, []Param{", i, fn.Name)
+		for j, p := range fn.Params {
+			if j > 0 {
+				g.writef(", ")
+			}
+			g.writef("{Name: %q, Annotation: %q}", p.Name, bridgeAnnotation(p.Ty))
+		}
+		g.writef("}, %q, __pyadapter_%s))\n", bridgeAnnotation(fn.Ret), fn.Name)
+		// Apply decorators bottom-up (Python applies the closest one first),
+		// each wrapping the running result. The decorator chain itself emits
+		// as a single *Object via emitBridgeChainValue.
+		for d := len(r.decorators) - 1; d >= 0; d-- {
+			g.writef("__route%d = __bridgeMust(", i)
+			if err := g.emitBridgeChainValue(r.decorators[d]); err != nil {
+				return err
+			}
+			g.writef(".Call(__route%d))\n", i)
+		}
+		g.writef("_ = __route%d\n", i)
+	}
+	g.writef("}\n")
+	return nil
+}
+
+// emitRouteAdapter writes `func __pyadapter_<name>(__args []any, __kwargs
+// map[string]any) any` bridging the reverse-bridge argument list to the typed
+// Go handler call and boxing its result back to any.
+func (g *gen) emitRouteAdapter(idx int, fn *ir.Func) error {
+	g.writef("func __pyadapter_%s(__args []any, __kwargs map[string]any) any {\n", fn.Name)
+	g.writef("_ = __kwargs\n")
+	hasRet := fn.Ret != nil && fn.Ret.Kind != ir.TyNone && fn.Ret.Kind != ir.TyUnknown
+	if hasRet {
+		g.writef("return ")
+	}
+	g.writef("%s(", fn.Name)
+	for j, p := range fn.Params {
+		if j > 0 {
+			g.writef(", ")
+		}
+		conv := bridgeArgConv(p.Ty)
+		if conv == "" {
+			// Untyped parameter: forward the native value unchanged.
+			g.writef("__args[%d]", j)
+		} else {
+			g.writef("%s(__args[%d])", conv, j)
+		}
+	}
+	g.writef(")\n")
+	if !hasRet {
+		g.writef("return nil\n")
+	}
+	g.writef("}\n")
+	return nil
+}
+
+// bridgeArgConv returns the adapter-side coercion helper for a scalar handler
+// parameter, or "" for an untyped (any) parameter forwarded as-is.
+func bridgeArgConv(t *ir.Type) string {
+	if t == nil {
+		return ""
+	}
+	switch t.Kind {
+	case ir.TyInt:
+		return "__argInt"
+	case ir.TyFloat:
+		return "__argFloat"
+	case ir.TyStr:
+		return "__argStr"
+	case ir.TyBool:
+		return "__argBool"
+	}
+	return ""
+}
+
 const bridgeGlueSource = `var __bridgeMods = map[string]*Object{}
 var __bridgeMu sync.Mutex
 
@@ -8759,6 +8968,53 @@ func __bridgeBool(o *Object) bool {
 		__bridgeRaise(err)
 	}
 	return b
+}
+
+// __argInt / __argFloat / __argStr / __argBool coerce a reverse-bridge call
+// argument — already a native Go value produced by fromPy — to the Go type a
+// bridged handler declares, raising a TypeError-shaped Exception on mismatch.
+// They feed the adapters generated for bridge-decorated route handlers.
+func __argInt(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case float64:
+		return int64(x)
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	}
+	__bridgeRaise(NewException("TypeError: argument is not an int"))
+	return 0
+}
+
+func __argFloat(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int64:
+		return float64(x)
+	}
+	__bridgeRaise(NewException("TypeError: argument is not a float"))
+	return 0
+}
+
+func __argStr(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	__bridgeRaise(NewException("TypeError: argument is not a str"))
+	return ""
+}
+
+func __argBool(v any) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	__bridgeRaise(NewException("TypeError: argument is not a bool"))
+	return false
 }`
 
 func (g *gen) methodCall(m *ir.MethodCall) error {

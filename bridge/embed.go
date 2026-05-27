@@ -14,16 +14,16 @@ import (
 //go:embed bridge.go
 var bridgeSource string
 
-// MainPackageSource returns the bridge implementation rewritten so it can be
-// dropped into a generated `package main` build directory: the `package
-// bridge` clause becomes `package main` and the `//go:build cgo` constraint
-// line (plus its blank trailer) is removed, since the generated build always
-// runs with CGO enabled. The resulting file defines Init / Import / Object and
-// the conversion helpers directly in the program's package, so generated code
-// calls them unqualified.
-func MainPackageSource() string {
-	s := bridgeSource
-	// Drop the leading `//go:build cgo` line and the blank line after it.
+//go:embed reverse.go
+var reverseSource string
+
+//go:embed introspect.go
+var introspectSource string
+
+// rewriteForMain strips the `//go:build cgo` constraint line and rewrites the
+// `package bridge` clause to `package main`, so a bridge source file can be
+// dropped into a generated build directory and compiled in-package.
+func rewriteForMain(s string) string {
 	lines := strings.Split(s, "\n")
 	out := make([]string, 0, len(lines))
 	for _, ln := range lines {
@@ -33,6 +33,20 @@ func MainPackageSource() string {
 		out = append(out, ln)
 	}
 	s = strings.Join(out, "\n")
-	s = strings.Replace(s, "\npackage bridge\n", "\npackage main\n", 1)
-	return s
+	return strings.Replace(s, "\npackage bridge\n", "\npackage main\n", 1)
 }
+
+// MainPackageSource returns the forward-bridge implementation (Init / Import /
+// Object plus the conversion helpers) rewritten for a generated `package main`
+// build directory, so generated code calls them unqualified.
+func MainPackageSource() string { return rewriteForMain(bridgeSource) }
+
+// ReverseSource returns the reverse-bridge implementation (RegisterFunc and the
+// C trampoline) rewritten for a generated `package main` build. Needed when the
+// program exposes Go callbacks to Python (e.g. bridged decorators / routes).
+func ReverseSource() string { return rewriteForMain(reverseSource) }
+
+// IntrospectSource returns the introspection surface (RegisterTypedFunc,
+// MakeClass, Param/Field) rewritten for a generated `package main` build, so a
+// framework can introspect Go handlers as if they were native Python functions.
+func IntrospectSource() string { return rewriteForMain(introspectSource) }

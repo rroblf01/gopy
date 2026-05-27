@@ -200,6 +200,8 @@ func runBuild(args []string) {
 	// libpython. Without bridged calls the binary stays pure Go.
 	if usedBridge {
 		check(os.WriteFile(filepath.Join(tmp, "gopy_bridge.go"), []byte(bridgepkg.MainPackageSource()), 0o644))
+		check(os.WriteFile(filepath.Join(tmp, "gopy_bridge_reverse.go"), []byte(bridgepkg.ReverseSource()), 0o644))
+		check(os.WriteFile(filepath.Join(tmp, "gopy_bridge_introspect.go"), []byte(bridgepkg.IntrospectSource()), 0o644))
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	}
 	if err := cmd.Run(); err != nil {

@@ -94,6 +94,15 @@ type Func struct {
 	// runs as written. This is a best-effort accept-and-ignore so files
 	// that lean on annotation-only decorators still compile.
 	UserDecorators []string
+	// Decorators carries the fully-lowered decorator expressions for any
+	// user/passthrough decorator (`@app.get("/x")`, `@my_wrap`). It runs in
+	// parallel with UserDecorators (which keeps only the bare names for the
+	// accept-and-ignore path). Codegen inspects these to recognize *bridged*
+	// decorators — a decorator whose receiver is an embedded-CPython object
+	// (e.g. a FastAPI/Flask `app`) — and wire route registration through the
+	// reverse bridge. Non-bridge entries are ignored, preserving the existing
+	// identity-decorator behavior.
+	Decorators []Expr
 	// Line is the 1-based source line of the `def` statement in the
 	// originating .py file (or 0 when unknown / synthetic). Codegen emits
 	// a `//line <module>.py:<N>` directive before the function body so

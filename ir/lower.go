@@ -1330,6 +1330,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 	// invoked at runtime, so any behavior beyond identity (caching,
 	// logging) won't be reproduced.
 	var userDecorators []string
+	var decoratorExprs []Expr
 	for _, d := range n.Children("decorator_list") {
 		if d.Type() == "Name" {
 			switch d.Str("id") {
@@ -1405,10 +1406,16 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		// Python files that lean on annotation-only decorators.
 		if d.Type() == "Name" {
 			userDecorators = append(userDecorators, d.Str("id"))
+			if de, err := lowerExpr(d, newScope()); err == nil {
+				decoratorExprs = append(decoratorExprs, de)
+			}
 			continue
 		}
 		if d.Type() == "Attribute" {
 			userDecorators = append(userDecorators, d.Str("attr"))
+			if de, err := lowerExpr(d, newScope()); err == nil {
+				decoratorExprs = append(decoratorExprs, de)
+			}
 			continue
 		}
 		if d.Type() == "Call" {
@@ -1418,6 +1425,9 @@ func lowerFunc(n parser.Node) (*Func, error) {
 					userDecorators = append(userDecorators, fn.Str("id"))
 				} else {
 					userDecorators = append(userDecorators, fn.Str("attr"))
+				}
+				if de, err := lowerExpr(d, newScope()); err == nil {
+					decoratorExprs = append(decoratorExprs, de)
 				}
 				continue
 			}
@@ -1430,7 +1440,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		}
 		return nil, fmt.Errorf("line %d: decorator %q not supported", n.Lineno(), name)
 	}
-	f := &Func{Name: n.Str("name"), UserDecorators: userDecorators, Line: n.Lineno()}
+	f := &Func{Name: n.Str("name"), UserDecorators: userDecorators, Decorators: decoratorExprs, Line: n.Lineno()}
 	for _, tp := range n.Children("type_params") {
 		if tp.Type() == "TypeVar" {
 			f.TypeParams = append(f.TypeParams, tp.Str("name"))
