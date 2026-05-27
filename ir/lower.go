@@ -3038,8 +3038,16 @@ func lowerExpr(n parser.Node, sc *scope) (Expr, error) {
 		if common == nil {
 			common = &Type{Kind: TyAny}
 		}
-		tupleTy := &Type{Kind: TyTuple, Tuple: pos}
-		return &ListLit{Elems: elems, ElemTy: common, Ty: tupleTy}, nil
+		// Homogeneous tuples keep the TyList shape so they stay on the
+		// fast Go path (`[]int64`, `[][]int64`, etc.) and unpacking /
+		// codegen behave exactly as before. Only heterogeneous tuples —
+		// where the common element collapses to `any` — carry per-position
+		// TyTuple info, which is what subscript / lambda-key typing needs.
+		if common.Kind == TyAny {
+			tupleTy := &Type{Kind: TyTuple, Tuple: pos}
+			return &ListLit{Elems: elems, ElemTy: common, Ty: tupleTy}, nil
+		}
+		return &ListLit{Elems: elems, ElemTy: common, Ty: &Type{Kind: TyList, Elem: common}}, nil
 	case "Set":
 		// `{1, 2, 3}` lowers to the same slice shape. Membership via
 		// `in` works because we walk the slice; uniqueness is not

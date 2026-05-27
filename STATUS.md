@@ -11,6 +11,16 @@ Early but real. Current language support covers a typed subset of Python suffici
 
 The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpile/`, or the bundled stdlib shims is dedicated to any single framework. Support for third-party libraries comes from transpiling the library's own Python source alongside the application — which means the library must be written in the supported subset (no metaclasses, no `__getattr__`, no `setattr` magic).
 
+## Embedded-CPython bridge (experimental, hybrid model)
+
+`bridge/` (build tag `cgo`) embeds a real CPython interpreter in the gopy binary so transpiled code can call libraries the transpiler can't statically lower — Pydantic, psycopg2, anything that needs metaclasses / descriptors / C extensions. This is the **slow path** of a hybrid design: pure typed code keeps compiling to native Go (the fast path), and only operations that touch the interpreter cross the bridge.
+
+Decisions taken (2026-05): **hybrid** mode (Go fast path retained, bridge as fallback), **abi3** wheels (so third-party `.so` files load across CPython minors), **dynamic** linking of `libpython3.X` via `pkg-config python3-embed`, and **keep** the existing shim/transpile layer rather than rewriting on the interpreter.
+
+Status — **proof of concept working**. `cmd/bridgeprobe` imports `math` and `pydantic_core` (a Rust extension), builds a `SchemaValidator({"type": "int"})`, validates a value through it, and round-trips the result to Go; the validation-failure path surfaces the Python exception as a Go `error`. Bridge primitives: `Init` (one-shot `Py_Initialize`, GIL released after), `Import`, `(*Object).Attr` / `.Call` / `.CallMethod` / `.Go` / `.DecRef`, and `toPy` / `fromPy` conversions for `nil`/`bool`/`int`/`int64`/`float64`/`string`/`[]any`/`map[string]any`. GIL handling is coarse: a single mutex serializes all interpreter access and each call does `PyGILState_Ensure`/`Release`. Not yet wired into codegen — calling the bridge from transpiled Python is the next step.
+
+Trade-offs accepted: binary depends on `libpython3.X.so` (no longer a pure static Go binary), every Go↔Python crossing pays marshaling + GIL serialization, and the ~640 stdlib-parity fixtures validate only the fast path.
+
 ## Supported
 
 - Functions, parameters, return values
@@ -334,6 +344,7 @@ The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpi
 - List / dict comprehensions accept tuple-unpack targets over **any typed list of 2-tuples** now — not just `dict.items()`. `[k for (k, v) in pairs]` / `{k: v for (k, v) in pairs}` where `pairs: list[tuple[K, V]]` (or `list[list[T]]` for homogeneous tuples) lowers to a `for _, __tp := range pairs` loop with `__tp[0]` / `__tp[1]` typed extraction; the dict-items path still uses the direct `for k, v := range d` form
 - Chained assignment now accepts **attribute** and **subscript** targets in addition to bare names: `a.value = b.value = 7`, `xs[0] = ys[2] = 42`, `d["x"] = e["y"] = 99` all expand to a sequence of per-target assigns sharing the RHS literal (re-emitted at each site, so side-effecting RHS expressions still need a manual temp). Previously only `a = b = 0` (all-Name targets) was accepted
 - `f(*xs)` over a user function with fixed positional params now expands inline to `f(xs[0], xs[1], ..., xs[N-1])` where N matches the callee's arity. Works for `Name`/`Subscript`/`Attribute` spread targets (previously only `*[a,b,c]` literal spreads worked). xs is re-evaluated per index, so side-effecting spread sources should be hoisted to a local first. Triggers only when the splat is the single positional arg and the callee has no `*args` sink (otherwise existing variadic path still applies)
+- **Heterogeneous tuple literals now carry per-position types** (`TyTuple`): `(1, "a")` records `[int, str]` instead of collapsing to `list[any]`. A literal subscript `p[0]` / `p[1]` recovers the static type at that position, so `sorted(xs, key=lambda p: p[1])` over `xs = [(1, "b"), (3, "a")]` infers `p[1]` as `str` and the comparison compiles (previously `operator < not defined on interface`). Also lets `by_label[0][1].upper()` resolve the str method. Homogeneous tuples (`(0, 0)`, `(x, y)` with same-typed elements) keep the faster `TyList` shape (`[]int64`) — only the mixed case takes the tuple path. Go carrier stays `[]any` either way, so destructure / unpack paths are unchanged
 
 ## Not yet supported
 
