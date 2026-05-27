@@ -44,6 +44,25 @@ type Options struct {
 	// the same build (same Go package). Used only when EnableBridge is set,
 	// to avoid mistaking a local cross-module import for a bridged one.
 	LocalModules []string
+	// ModulePath is this module's dotted import path in a recursive multi-module
+	// build (e.g. "mypkg.calc"; "" for the entry). When mangling is active,
+	// every top-level symbol this module defines emits as
+	// `<path dots→_>_<name>` so modules sharing one flat Go package don't
+	// collide. "" leaves a module's own names bare. Single-module builds (no
+	// LocalModulePaths) never mangle — byte-for-byte unchanged.
+	ModulePath string
+	// LocalModulePaths is the set of every local module's dotted path in the
+	// build. Non-empty activates mangling and lets a dotted access
+	// `pkg.sub.fn()` be recognized as a cross-module reference.
+	LocalModulePaths []string
+	// ImportedSymbols maps a name pulled in via `from M import n` (M local) to
+	// M's dotted path, so a reference to `n` mangles to M's symbol. Resolved by
+	// the build driver (which knows relative-import targets the lowered IR drops).
+	ImportedSymbols map[string]string
+	// ModuleBindings maps a name bound to a *module* (`import M`, `import M as A`,
+	// `from P import sub`) to that module's dotted path, so `A.fn(...)` mangles
+	// to A's symbol. Also resolved by the build driver.
+	ModuleBindings map[string]string
 	// GoWeb opts the module into the Go-native web runtime: a recognized web
 	// framework app (`app = FastAPI()`, `Flask(__name__)`, …) and its route
 	// decorators (`@app.get("/x")`) are lowered onto a pure-Go net/http server
@@ -84,7 +103,7 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgeObjVars: map[string]bool{}, localMods: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgeObjVars: map[string]bool{}, localMods: map[string]bool{}, modOf: map[string]string{}, modBind: map[string]string{}, localModPathSet: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
 	g.buildAliases(m)
 	if opt.EnableBridge || opt.GoWeb {
 		g.bridgeImportSrc = g.buildBridgeImportSrc(m)
@@ -111,6 +130,39 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 			}
 		case *ir.Var:
 			g.globals[x.Name] = x.Ty
+		}
+	}
+	// Symbol-mangling setup (recursive multi-module builds). Map every own
+	// top-level symbol to this module's path, plus the driver-resolved imports
+	// (own definitions overwrite an imported name — a definition shadows). Maps
+	// stay keyed by the original Python name; mangling is applied only at emit.
+	g.manglingActive = opt.ModulePath != "" || len(opt.LocalModulePaths) > 0
+	for _, p := range opt.LocalModulePaths {
+		g.localModPathSet[p] = true
+	}
+	if g.manglingActive {
+		// modOf maps a locally-visible name to its fully-resolved (mangled) Go
+		// symbol. Imported entries arrive pre-mangled from the driver (so an
+		// alias like `from a import helper as ha` resolves `ha` → "a_helper").
+		for name, mangled := range opt.ImportedSymbols {
+			g.modOf[name] = mangled
+		}
+		for name, path := range opt.ModuleBindings {
+			g.modBind[name] = path
+		}
+		// Own free functions and module-level vars are mangled by this module's
+		// path. Classes are deliberately left bare: mangling a type name ripples
+		// through the whole type system (goType, constructors, receivers, enum
+		// members, ClassVars, isinstance), so cross-module class-name collisions
+		// remain a documented limitation. The driver likewise excludes imported
+		// class names, so a class stays bare on both sides.
+		for name, fn := range g.funcs {
+			if fn.Receiver == nil {
+				g.modOf[name] = g.mangle(opt.ModulePath, name)
+			}
+		}
+		for name := range g.globals {
+			g.modOf[name] = g.mangle(opt.ModulePath, name)
 		}
 	}
 	// GoWeb (Django): collect routes from `urlpatterns = [path(...), ...]` and
@@ -270,11 +322,12 @@ func (g *gen) moduleVar(v *ir.Var) error {
 		}
 	}
 	hasTy := v.Ty != nil && v.Ty.Kind != ir.TyUnknown && v.Ty.Kind != ir.TyNone
+	declared := g.declName(v.Name)
 	switch {
 	case hasTy:
-		g.writef("var %s %s", v.Name, g.goType(v.Ty))
+		g.writef("var %s %s", declared, g.goType(v.Ty))
 	default:
-		g.writef("var %s", v.Name)
+		g.writef("var %s", declared)
 	}
 	if v.Value != nil {
 		// Empty container literal RHS with a declared container type:
@@ -409,6 +462,56 @@ func dottedName(e ir.Expr) (string, bool) {
 		if base, ok := dottedName(x.Recv); ok {
 			return base + "." + x.Name, true
 		}
+	}
+	return "", false
+}
+
+// mangle joins a module path and a symbol into the flat-package Go name (dots
+// → underscores). An empty path yields the bare name (entry module).
+func (g *gen) mangle(path, name string) string {
+	if path == "" {
+		return name
+	}
+	return strings.ReplaceAll(path, ".", "_") + "_" + name
+}
+
+// declName mangles a top-level declaration emitted by this module.
+func (g *gen) declName(name string) string {
+	if !g.manglingActive {
+		return name
+	}
+	return g.mangle(g.opt.ModulePath, name)
+}
+
+// refName resolves a reference to a top-level symbol (own or imported) to its
+// fully-mangled Go symbol. Names not in modOf — locals, params, builtins,
+// stdlib — pass through unchanged.
+func (g *gen) refName(name string) string {
+	if !g.manglingActive {
+		return name
+	}
+	if mangled, ok := g.modOf[name]; ok {
+		return mangled
+	}
+	return name
+}
+
+// localModulePathOf returns the dotted path a receiver refers to when it spells
+// a local module — a bound name (`import M`, `from P import sub`) or a dotted
+// access whose prefix is a known local module path. ("", false) otherwise.
+func (g *gen) localModulePathOf(recv ir.Expr) (string, bool) {
+	if !g.manglingActive {
+		return "", false
+	}
+	d, ok := dottedName(recv)
+	if !ok {
+		return "", false
+	}
+	if p, ok := g.modBind[d]; ok {
+		return p, true
+	}
+	if g.localModPathSet[d] {
+		return d, true
 	}
 	return "", false
 }
@@ -681,6 +784,20 @@ type gen struct {
 	// access `mod.fn(...)` / `mod.NAME` drops the qualifier and resolves to the
 	// bare package-level symbol.
 	localMods map[string]bool
+	// modOf maps a bare top-level symbol name (func / module-var / class) known
+	// in this module to the dotted path of the module that defines it: own
+	// symbols → opt.ModulePath, names from `from M import n` (M local) → M. Drives
+	// symbol mangling so modules sharing one flat Go package don't collide.
+	modOf map[string]string
+	// modBind maps a name bound to a module (`import M`, `from P import sub`) to
+	// that module's dotted path, so `M.fn(...)` mangles to M's symbol.
+	modBind map[string]string
+	// localModPathSet is opt.LocalModulePaths as a set, to recognize a dotted
+	// access `pkg.sub.fn()` as a cross-module reference.
+	localModPathSet map[string]bool
+	// manglingActive is true when the build spans local modules. False → every
+	// name stays bare (single-module builds unchanged).
+	manglingActive bool
 	// bridged maps a local Python name bound by a bare `import X` (or
 	// `import X as Y`) whose module is neither a stdlib shim nor a local
 	// transpilable module. Calls on such names route through the embedded
@@ -1049,6 +1166,11 @@ func (g *gen) fn(fn *ir.Func) error {
 				methodName = mapped
 			}
 		}
+	}
+	if fn.Receiver == nil {
+		// Free functions are mangled per defining module (recursive multi-module
+		// builds); methods keep their name (the receiver type carries identity).
+		methodName = g.declName(fn.Name)
 	}
 	g.writef("%s", methodName)
 	if len(fn.TypeParams) > 0 && fn.Receiver == nil {
@@ -1463,7 +1585,9 @@ func (g *gen) stmt(s ir.Stmt) error {
 		}
 		switch {
 		case isGlobal:
-			g.writef("%s = ", x.Target)
+			// Writing an own module-level var → mangle the target to match its
+			// (mangled) package-var declaration. Local `:=` decls below stay bare.
+			g.writef("%s = ", g.declName(x.Target))
 		case x.Decl && x.Ty != nil && x.Ty.Kind != ir.TyUnknown:
 			g.writef("var %s %s = ", x.Target, g.goType(x.Ty))
 		case x.Decl && forceIntDecl:
@@ -4898,6 +5022,17 @@ func (g *gen) expr(e ir.Expr) error {
 			g.writef("%q", x.N)
 			return nil
 		}
+		// Module-level symbol reference (own/imported free function or
+		// module var) → mangle by its defining module. Guarded by
+		// localVarTypes so a local/param that shadows the name stays bare.
+		if g.manglingActive {
+			if _, isLocal := g.localVarTypes[x.N]; !isLocal {
+				if _, ok := g.modOf[x.N]; ok {
+					g.writef("%s", g.refName(x.N))
+					return nil
+				}
+			}
+		}
 		g.writef("%s", x.N)
 	case *ir.BinOp:
 		// Operator overloading for the tagged datetime / timedelta types.
@@ -5512,8 +5647,13 @@ func (g *gen) expr(e ir.Expr) error {
 		return g.methodCall(x)
 	case *ir.Attribute:
 		// Local-module attribute read: `mod.NAME` / `pkg.sub.NAME` where the
-		// receiver spells a sibling/subpackage module in the same package. Drop
-		// the qualifier — `NAME` is a package-level symbol.
+		// receiver spells a sibling/subpackage module in the same package. With
+		// mangling active, resolve to the defining module's mangled symbol;
+		// otherwise drop the qualifier.
+		if path, ok := g.localModulePathOf(x.Recv); ok {
+			g.writef("%s", g.mangle(path, x.Name))
+			return nil
+		}
 		if d, ok := dottedName(x.Recv); ok && g.localMods[d] {
 			g.writef("%s", x.Name)
 			return nil
@@ -7821,7 +7961,8 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 		}
 		kwIdx[kw.Name] = kw.Value
 	}
-	g.writef("%s(", fn.Name)
+	// fn came from g.funcs (own free function) → mangle by this module's path.
+	g.writef("%s(", g.declName(fn.Name))
 	for i, p := range fn.Params {
 		if i > 0 {
 			g.writef(", ")
@@ -10574,9 +10715,16 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		}
 	}
 	// Local-module call: `mod.fn(args)` / `pkg.sub.fn(args)` where the receiver
-	// spells a sibling/subpackage module transpiled into this same package.
-	// Drop the module qualifier and emit a bare free call — `fn(args)` resolves
-	// to the package-level function.
+	// spells a sibling/subpackage module in this same package. With mangling
+	// active, resolve to the defining module's mangled symbol; otherwise drop
+	// the qualifier (`fn(args)`).
+	if path, ok := g.localModulePathOf(m.Recv); ok {
+		return g.call(&ir.Call{
+			Func:     &ir.Name{N: g.mangle(path, m.Method)},
+			Args:     m.Args,
+			Keywords: m.Keywords,
+		})
+	}
 	if d, ok := dottedName(m.Recv); ok && g.localMods[d] {
 		return g.call(&ir.Call{
 			Func:     &ir.Name{N: m.Method},
@@ -19599,19 +19747,22 @@ func (g *gen) goType(t *ir.Type) string {
 		// User-defined classes are referenced by pointer — except enums,
 		// which the codegen aliases to int64 directly, and interface-
 		// shaped classes which carry their own pointer / value receiver.
+		// The type name is mangled (recursive multi-module builds) by the
+		// module that defines it; refName is a no-op when mangling is inactive.
+		name := g.refName(t.Name)
 		if cls, ok := g.classes[t.Name]; ok {
 			if cls.IsEnum {
-				return t.Name
+				return name
 			}
 			if cls.IsInterface && len(cls.InterfaceMethods) > 0 && len(cls.Fields) == 0 && !cls.HasInit && len(cls.MethodNames) == len(cls.InterfaceMethods) {
-				return t.Name
+				return name
 			}
-			return "*" + t.Name
+			return "*" + name
 		}
 		if t.Name == "Exception" {
 			return "*Exception"
 		}
-		return t.Name
+		return name
 	default:
 		return "any"
 	}

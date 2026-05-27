@@ -212,12 +212,41 @@ func runBuild(args []string) {
 		return
 	}
 
+	// Symbol-mangling metadata. Each module's top-level free functions and
+	// module vars are mangled `<modpath dots→_>_<name>` so the flat shared Go
+	// package has no collisions; classes stay bare. Compute every module's
+	// dotted path, the set of all such paths, and each module's classes (so an
+	// imported class name isn't mangled).
+	entryDir := filepath.Dir(src)
+	allFiles := append([]string{src}, func() []string {
+		fs := make([]string, len(deps))
+		for i, d := range deps {
+			fs[i] = d.path
+		}
+		return fs
+	}()...)
+	pathOf := map[string]string{}
+	localPathSet := map[string]bool{}
+	var localModulePaths []string
+	classesOf := map[string]map[string]bool{}
+	for _, f := range allFiles {
+		p := modulePathOf(f, src, entryDir)
+		pathOf[f] = p
+		if p != "" {
+			localPathSet[p] = true
+			localModulePaths = append(localModulePaths, p)
+		}
+		if root, err := parser.ParseFileWith(pyBin, dumperPath, f); err == nil {
+			classesOf[p] = scanClasses(root)
+		}
+	}
+	sort.Strings(localModulePaths)
+
 	// Recursive multi-file build. transpileDeps lists the discovered local
-	// modules to transpile into the shared package; lm is the set of local
-	// module names whose qualified `mod.fn(...)` access drops the qualifier.
-	// Returns the go-build error (nil on success) without exiting, so the
-	// caller can fall back to bridging.
-	buildOnce := func(transpileDeps []localDep, lm []string) error {
+	// modules to transpile into the shared package; mangle enables symbol
+	// mangling (Phase 1). Returns the go-build error (nil on success) without
+	// exiting, so the caller can fall back to bridging.
+	buildOnce := func(transpileDeps []localDep, mangle bool) error {
 		// Clear any .go from a previous attempt (keep go.mod) so a stale dep
 		// translation can't leak into a fallback build.
 		if matches, _ := filepath.Glob(filepath.Join(tmp, "*.go")); matches != nil {
@@ -229,7 +258,15 @@ func runBuild(args []string) {
 		sharedImports := map[string]bool{}
 		usedBridge := false
 		emit := func(path, goName string) error {
-			goSrc, meta, err := tryTranspileModule(path, "main", pyBin, dumperPath, *bridge, *goweb, true, lm)
+			opt := transpile.Options{EnableBridge: *bridge, GoWeb: *goweb, SkipHelpers: true, LocalModules: localMods}
+			if mangle {
+				opt.ModulePath = pathOf[path]
+				opt.LocalModulePaths = localModulePaths
+				if root, err := parser.ParseFileWith(pyBin, dumperPath, path); err == nil {
+					opt.ImportedSymbols, opt.ModuleBindings = resolveImportBindings(root, packageDottedOf(path, entryDir), localPathSet, classesOf)
+				}
+			}
+			goSrc, meta, err := tryTranspileOpts(path, pyBin, dumperPath, opt)
 			if err != nil {
 				return fmt.Errorf("%s: %w", filepath.Base(path), err)
 			}
@@ -259,8 +296,9 @@ func runBuild(args []string) {
 		return runGoBuildErr(tmp, absBin, usedBridge)
 	}
 
-	// Phase 1: transpile the entry and every discovered sibling (pure Go).
-	err = buildOnce(deps, localMods)
+	// Phase 1: transpile the entry and every discovered module (pure Go), with
+	// symbol mangling so same-named symbols across modules don't collide.
+	err = buildOnce(deps, true)
 	if err == nil {
 		return
 	}
@@ -271,7 +309,7 @@ func runBuild(args []string) {
 	// optimistic (transpile what fits) while still running the rest.
 	if *bridge {
 		fmt.Fprintf(os.Stderr, "gopy: pure recursion failed (%v); retrying with local deps bridged\n", err)
-		if err2 := buildOnce(nil, nil); err2 != nil {
+		if err2 := buildOnce(nil, false); err2 != nil {
 			die("go build failed: " + err2.Error())
 		}
 		return
@@ -536,6 +574,24 @@ func tryTranspileModule(src, pkg, python, dumper string, enableBridge, goWeb, sk
 	})
 }
 
+// tryTranspileOpts parses + lowers a file and transpiles it with a
+// caller-built Options (PackageName / SourceModule are filled in here). Used by
+// the recursive build to pass per-module symbol-mangling configuration.
+func tryTranspileOpts(src, python, dumper string, opt transpile.Options) ([]byte, *transpile.ModuleMeta, error) {
+	root, err := parser.ParseFileWith(python, dumper, src)
+	if err != nil {
+		return nil, nil, err
+	}
+	modName := filepath.Base(src)
+	mod, err := ir.Lower(modName, root)
+	if err != nil {
+		return nil, nil, err
+	}
+	opt.PackageName = "main"
+	opt.SourceModule = modName
+	return transpile.ModuleWithMeta(mod, opt)
+}
+
 // localDep is one discovered local dependency module: its source .py path and
 // the unique .go filename it is emitted as (dotted module path → underscores,
 // so `mypkg/calc.py` and a top-level `calc.py` don't collide on disk).
@@ -675,6 +731,140 @@ func discoverLocalModules(entryPath, pyBin, dumperPath string) (deps []localDep,
 	}
 	sort.Strings(modNames)
 	return deps, modNames
+}
+
+// modulePathOf returns a module file's dotted import path relative to the entry
+// directory ("" for the entry itself or a top-level __init__.py). E.g.
+// mypkg/calc.py → "mypkg.calc", mypkg/__init__.py → "mypkg".
+func modulePathOf(file, entry, entryDir string) string {
+	abs, _ := filepath.Abs(file)
+	if ea, _ := filepath.Abs(entry); abs == ea {
+		return ""
+	}
+	rel, err := filepath.Rel(entryDir, abs)
+	if err != nil {
+		return ""
+	}
+	rel = strings.TrimSuffix(rel, ".py")
+	rel = strings.TrimSuffix(rel, string(filepath.Separator)+"__init__")
+	if rel == "__init__" {
+		return ""
+	}
+	return strings.ReplaceAll(rel, string(filepath.Separator), ".")
+}
+
+// packageDottedOf returns the dotted path of a module file's *package* (its
+// directory relative to the entry dir), against which relative imports resolve.
+func packageDottedOf(file, entryDir string) string {
+	rel, err := filepath.Rel(entryDir, filepath.Dir(file))
+	if err != nil || rel == "." {
+		return ""
+	}
+	return strings.ReplaceAll(rel, string(filepath.Separator), ".")
+}
+
+// mangleSym is the driver-side mirror of transpile's symbol mangling: a module
+// path (dots → underscores) joined to a symbol name. Must stay in sync with
+// transpile's gen.mangle so cross-module references resolve to the same symbol.
+func mangleSym(path, name string) string {
+	if path == "" {
+		return name
+	}
+	return strings.ReplaceAll(path, ".", "_") + "_" + name
+}
+
+// scanClasses returns the names of top-level classes defined in a parsed module
+// — used so an imported class name is left un-mangled (classes stay bare).
+func scanClasses(root parser.Node) map[string]bool {
+	out := map[string]bool{}
+	for _, s := range root.Children("body") {
+		if s.Type() == "ClassDef" {
+			if n := s.Str("name"); n != "" {
+				out[n] = true
+			}
+		}
+	}
+	return out
+}
+
+// resolveImportBindings inspects a module's import statements and classifies
+// each imported name for symbol mangling: a submodule binding (`from pkg import
+// sub`, `import M`) → modBindings[name]=path; a value symbol (`from M import
+// fn`) → imported[name]=M; a class → skipped (classes stay bare). Relative
+// imports resolve against pkg (the importing module's package). localPath is
+// the set of all local module dotted paths; classesOf maps a module path to its
+// class names.
+func resolveImportBindings(root parser.Node, pkg string, localPath map[string]bool, classesOf map[string]map[string]bool) (imported, modBindings map[string]string) {
+	imported = map[string]string{}
+	modBindings = map[string]string{}
+	resolveMod := func(level int, module string) string {
+		if level == 0 {
+			return module
+		}
+		base := pkg
+		for i := 1; i < level; i++ {
+			if idx := strings.LastIndex(base, "."); idx >= 0 {
+				base = base[:idx]
+			} else {
+				base = ""
+			}
+		}
+		switch {
+		case module == "":
+			return base
+		case base == "":
+			return module
+		default:
+			return base + "." + module
+		}
+	}
+	for _, s := range root.Children("body") {
+		switch s.Type() {
+		case "Import":
+			for _, a := range s.Children("names") {
+				name := a.Str("name")
+				if name == "" || !localPath[name] {
+					continue
+				}
+				bind := a.Str("asname")
+				if bind == "" {
+					bind = name
+				}
+				modBindings[bind] = name
+			}
+		case "ImportFrom":
+			level := 0
+			if lv, ok := s["level"].(float64); ok {
+				level = int(lv)
+			}
+			fm := resolveMod(level, s.Str("module"))
+			if !localPath[fm] {
+				continue
+			}
+			for _, a := range s.Children("names") {
+				name := a.Str("name")
+				if name == "" {
+					continue
+				}
+				bind := a.Str("asname")
+				if bind == "" {
+					bind = name
+				}
+				switch {
+				case localPath[fm+"."+name]:
+					modBindings[bind] = fm + "." + name
+				case classesOf[fm][name]:
+					// class — stays bare, no mangling binding
+				default:
+					// Value symbol: resolve the binding (possibly aliased) to the
+					// source module's mangled symbol, e.g. `from a import f as g`
+					// → g → "a_f".
+					imported[bind] = mangleSym(fm, name)
+				}
+			}
+		}
+	}
+	return imported, modBindings
 }
 
 // locateDumper walks up from the caller's source dir, or from CWD, looking

@@ -259,6 +259,44 @@ func TestCLIBuildDottedImport(t *testing.T) {
 	}
 }
 
+// TestCLIBuildSymbolCollision builds an entry that imports same-named symbols
+// (a function and a module var) from two different modules. Without per-module
+// symbol mangling the shared flat Go package would reject the duplicates
+// ("redeclared in this block"); with mangling each resolves to its module's
+// unique symbol. Aliased imports (`as`) must resolve to the source symbol.
+func TestCLIBuildSymbolCollision(t *testing.T) {
+	root := repoRoot(t)
+	gopyBin := buildGopyCLI(t, root)
+	tmp := t.TempDir()
+	files := map[string]string{
+		"a.py": "def helper() -> str:\n    return \"A\"\n\nVAL = 1\n",
+		"b.py": "def helper() -> str:\n    return \"B\"\n\nVAL = 2\n",
+		"main.py": "from a import helper as ha, VAL as va\n" +
+			"from b import helper as hb, VAL as vb\n" +
+			"def main() -> None:\n    print(ha(), hb(), va, vb)\n" +
+			"if __name__ == \"__main__\":\n    main()\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outBin := filepath.Join(tmp, "coll-bin")
+	cmd := exec.Command(gopyBin, "build", "-o", outBin, filepath.Join(tmp, "main.py"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gopy build (symbol collision): %v\n%s", err, out)
+	}
+	var got bytes.Buffer
+	run := exec.Command(outBin)
+	run.Stdout = &got
+	if err := run.Run(); err != nil {
+		t.Fatalf("run binary: %v", err)
+	}
+	if want := "A B 1 2\n"; got.String() != want {
+		t.Fatalf("output mismatch\nwant %q\n got %q", want, got.String())
+	}
+}
+
 // TestCLIBuildProject runs `gopy build <dir>` against a multi-file fixture
 // and checks the resulting binary's stdout matches running `python3 main.py`
 // from inside that directory. Covers the directory entry point that lets
