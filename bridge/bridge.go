@@ -33,6 +33,21 @@ static PyObject* gopy_call(PyObject* fn, PyObject* args) {
     return PyObject_CallObject(fn, args);
 }
 
+// Call with positional args tuple + keyword args dict (either may be NULL,
+// though CPython requires args to be a tuple — callers pass an empty tuple).
+static PyObject* gopy_call_kw(PyObject* fn, PyObject* args, PyObject* kw) {
+    return PyObject_Call(fn, args, kw);
+}
+
+static PyObject* gopy_getitem(PyObject* o, PyObject* key) {
+    return PyObject_GetItem(o, key);
+}
+
+static Py_ssize_t gopy_len(PyObject* o) { return PyObject_Length(o); }
+static int gopy_is_true_obj(PyObject* o) { return PyObject_IsTrue(o); }
+static PyObject* gopy_repr(PyObject* o) { return PyObject_Repr(o); }
+static PyObject* gopy_str(PyObject* o) { return PyObject_Str(o); }
+
 static PyObject* gopy_none() {
     Py_RETURN_NONE;
 }
@@ -202,6 +217,131 @@ func (o *Object) CallMethod(name string, args ...any) (*Object, error) {
 	}
 	defer m.DecRef()
 	return m.Call(args...)
+}
+
+// CallKw invokes a callable with positional args plus keyword args. kwargs
+// keys become Python keyword names; values are converted like positional
+// args. A nil/empty kwargs behaves like Call.
+func (o *Object) CallKw(args []any, kwargs map[string]any) (*Object, error) {
+	var obj *Object
+	var err error
+	withGIL(func() {
+		tup := C.PyTuple_New(C.Py_ssize_t(len(args)))
+		if tup == nil {
+			err = lastError()
+			return
+		}
+		defer C.Py_DecRef(tup)
+		for i, a := range args {
+			pa := toPy(a)
+			if pa == nil {
+				err = fmt.Errorf("bridge: cannot convert arg %d (%T) to Python", i, a)
+				return
+			}
+			C.PyTuple_SetItem(tup, C.Py_ssize_t(i), pa) // steals
+		}
+		var kw *C.PyObject
+		if len(kwargs) > 0 {
+			kw = toPy(map[string]any(kwargs))
+			if kw == nil {
+				err = fmt.Errorf("bridge: cannot convert kwargs to Python")
+				return
+			}
+			defer C.Py_DecRef(kw)
+		}
+		res := C.gopy_call_kw(o.p, tup, kw)
+		if res == nil {
+			err = lastError()
+			return
+		}
+		obj = &Object{p: res}
+	})
+	return obj, err
+}
+
+// CallMethodKw fetches obj.name and calls it with args + kwargs.
+func (o *Object) CallMethodKw(name string, args []any, kwargs map[string]any) (*Object, error) {
+	m, err := o.Attr(name)
+	if err != nil {
+		return nil, err
+	}
+	defer m.DecRef()
+	return m.CallKw(args, kwargs)
+}
+
+// GetItem implements obj[key] for any indexable/subscriptable Python object.
+func (o *Object) GetItem(key any) (*Object, error) {
+	var obj *Object
+	var err error
+	withGIL(func() {
+		pk := toPy(key)
+		if pk == nil {
+			err = fmt.Errorf("bridge: cannot convert key (%T) to Python", key)
+			return
+		}
+		defer C.Py_DecRef(pk)
+		p := C.gopy_getitem(o.p, pk)
+		if p == nil {
+			err = lastError()
+			return
+		}
+		obj = &Object{p: p}
+	})
+	return obj, err
+}
+
+// Len returns len(obj). Errors when the object has no length.
+func (o *Object) Len() (int, error) {
+	var n int
+	var err error
+	withGIL(func() {
+		r := C.gopy_len(o.p)
+		if r < 0 {
+			err = lastError()
+			return
+		}
+		n = int(r)
+	})
+	return n, err
+}
+
+// Bool returns the Python truthiness of the object (bool(obj)).
+func (o *Object) Bool() (bool, error) {
+	var b bool
+	var err error
+	withGIL(func() {
+		r := C.gopy_is_true_obj(o.p)
+		if r < 0 {
+			err = lastError()
+			return
+		}
+		b = r != 0
+	})
+	return b, err
+}
+
+// Str returns str(obj). Repr returns repr(obj).
+func (o *Object) Str() (string, error)  { return o.strLike(false) }
+func (o *Object) Repr() (string, error) { return o.strLike(true) }
+
+func (o *Object) strLike(repr bool) (string, error) {
+	var s string
+	var err error
+	withGIL(func() {
+		var p *C.PyObject
+		if repr {
+			p = C.gopy_repr(o.p)
+		} else {
+			p = C.gopy_str(o.p)
+		}
+		if p == nil {
+			err = lastError()
+			return
+		}
+		defer C.Py_DecRef(p)
+		s = C.GoString(C.PyUnicode_AsUTF8(p))
+	})
+	return s, err
 }
 
 // Go converts the wrapped PyObject back to a native Go value.

@@ -33,6 +33,17 @@ type Options struct {
 	// Imports needed by emitted helpers are still pulled into this
 	// module's import block when SkipHelpers is false; otherwise the
 	// caller writes them with the shared helper file.
+
+	// EnableBridge opts the module into the embedded-CPython bridge: bare
+	// `import X` statements whose module is neither a stdlib shim nor a
+	// local transpilable module are marked "bridged", and calls on them
+	// route through the bridge instead of being rejected. Off by default so
+	// existing single-file and project builds are entirely unaffected.
+	EnableBridge bool
+	// LocalModules lists module names that resolve to sibling .py files in
+	// the same build (same Go package). Used only when EnableBridge is set,
+	// to avoid mistaking a local cross-module import for a bridged one.
+	LocalModules []string
 }
 
 // ModuleMeta exposes codegen by-products that the caller (typically the
@@ -44,6 +55,10 @@ type Options struct {
 type ModuleMeta struct {
 	Helpers map[string]string
 	Imports []string
+	// UsedBridge is true when the module emitted at least one embedded-CPython
+	// bridge call. The build driver vendors the bridge source and enables CGO
+	// only when this is set.
+	UsedBridge bool
 }
 
 // Module renders an IR module as gofmt-formatted Go source.
@@ -60,7 +75,7 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}}
 	g.buildAliases(m)
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
@@ -148,7 +163,7 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 		}
 	}
 
-	meta := &ModuleMeta{Helpers: map[string]string{}, Imports: g.collectImports()}
+	meta := &ModuleMeta{Helpers: map[string]string{}, Imports: g.collectImports(), UsedBridge: g.usedBridge}
 	for k, v := range g.helpers {
 		meta.Helpers[k] = v
 	}
@@ -237,6 +252,19 @@ func (g *gen) buildAliases(m *ir.Module) {
 				if n.Alias != "" {
 					g.aliases[n.Alias] = n.Name
 				}
+				// Bridge candidacy: a bare module import that is neither a
+				// stdlib shim nor a local sibling module gets routed through
+				// the embedded CPython interpreter (only when opted in).
+				if g.opt.EnableBridge {
+					root := splitDotted(n.Name)[0]
+					if _, isStd := stdlibModules[root]; !isStd && !g.isLocalModule(n.Name) {
+						local := n.Alias
+						if local == "" {
+							local = n.Name
+						}
+						g.bridged[local] = n.Name
+					}
+				}
 			}
 			continue
 		}
@@ -270,6 +298,19 @@ func (g *gen) buildAliases(m *ir.Module) {
 			}
 		}
 	}
+}
+
+// isLocalModule reports whether name refers to a sibling .py module in the
+// same build (and so resolves within the shared Go package, not via the
+// bridge). Only consulted when EnableBridge is set.
+func (g *gen) isLocalModule(name string) bool {
+	root := splitDotted(name)[0]
+	for _, lm := range g.opt.LocalModules {
+		if lm == name || lm == root {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveAlias returns the canonical stdlib path for a local name, or the
@@ -514,6 +555,15 @@ type gen struct {
 	// `import X as Y`) to a dotted stdlib path the codegen knows about.
 	// Example: `from datetime import datetime` → aliases["datetime"] = "datetime.datetime".
 	aliases map[string]string
+	// bridged maps a local Python name bound by a bare `import X` (or
+	// `import X as Y`) whose module is neither a stdlib shim nor a local
+	// transpilable module. Calls on such names route through the embedded
+	// CPython bridge instead of being rejected. Value is the Python module
+	// name to import at runtime.
+	bridged map[string]string
+	// usedBridge is set once any bridged call is actually emitted, so the
+	// build driver knows to vendor the bridge source and enable CGO.
+	usedBridge bool
 	// varTypes records the runtime tag of a local variable when it was
 	// assigned the result of a typed stdlib call (Match, Path, Timedelta).
 	// Codegen consults this for method dispatch (e.g. m.group()) and for
@@ -8114,7 +8164,104 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 	},
 }
 
+// emitBridgeCall renders a leaf call on a bridged module — `mod.fn(args)` /
+// `mod.fn(args, kw=...)` — as a call through the embedded CPython bridge,
+// converting the result to a native Go value at the boundary. Args are boxed
+// to their canonical Go widths so they cross the `...any` API correctly.
+func (g *gen) emitBridgeCall(mod, method string, args []ir.Expr, kws []ir.Keyword) error {
+	g.usedBridge = true
+	g.registerBridgeHelpers()
+	g.writef("__bridgeGo(__bridgeModule(%q).", mod)
+	if len(kws) == 0 {
+		g.writef("CallMethod(%q", method)
+		for _, a := range args {
+			g.writef(", ")
+			if err := g.boxedExpr(a); err != nil {
+				return err
+			}
+		}
+		g.writef("))")
+		return nil
+	}
+	g.writef("CallMethodKw(%q, []any{", method)
+	for i, a := range args {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if err := g.boxedExpr(a); err != nil {
+			return err
+		}
+	}
+	g.writef("}, map[string]any{")
+	for i, kw := range kws {
+		if kw.Name == "**" {
+			return fmt.Errorf("bridge: **kwargs splat not yet supported on bridged calls")
+		}
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("%q: ", kw.Name)
+		if err := g.boxedExpr(kw.Value); err != nil {
+			return err
+		}
+	}
+	// Close map literal, CallMethodKw(, and the wrapping __bridgeGo(.
+	g.writef("}))")
+	return nil
+}
+
+// registerBridgeHelpers installs the once-emitted runtime glue the bridged
+// calls rely on: a cached module importer and an error-checking converter.
+// Both reference the vendored bridge symbols (Import / *Object) that
+// `gopy build` drops into the package when usedBridge is set.
+func (g *gen) registerBridgeHelpers() {
+	g.addImport("sync")
+	g.helpers["__bridge_glue"] = bridgeGlueSource
+}
+
+const bridgeGlueSource = `var __bridgeMods = map[string]*Object{}
+var __bridgeMu sync.Mutex
+
+// __bridgeModule lazily imports and caches a Python module by name, panicking
+// if the import fails (a missing third-party library is a hard error).
+func __bridgeModule(name string) *Object {
+	__bridgeMu.Lock()
+	defer __bridgeMu.Unlock()
+	if m, ok := __bridgeMods[name]; ok {
+		return m
+	}
+	m, err := Import(name)
+	if err != nil {
+		panic(err)
+	}
+	__bridgeMods[name] = m
+	return m
+}
+
+// __bridgeGo unwraps a bridge call result, panicking on a Python-side error,
+// and converts the returned object to a native Go value.
+func __bridgeGo(o *Object, err error) any {
+	if err != nil {
+		panic(err)
+	}
+	v, err := o.Go()
+	if err != nil {
+		panic(err)
+	}
+	return v
+}`
+
 func (g *gen) methodCall(m *ir.MethodCall) error {
+	// Bridged module call: `mod.fn(args)` where `mod` was a bare import of a
+	// non-stdlib, non-local module. Route through the embedded CPython
+	// interpreter. Leaf form only — the result is converted to a native Go
+	// value at the call boundary via __bridge_go, so chaining further method
+	// calls on the result (`mod.Cls(...).method()`) is not yet supported.
+	if recvName, ok := m.Recv.(*ir.Name); ok {
+		if mod, isBridged := g.bridged[recvName.N]; isBridged {
+			return g.emitBridgeCall(mod, m.Method, m.Args, m.Keywords)
+		}
+	}
 	// complex.conjugate() — `c.conjugate()` returns a complex with the
 	// imaginary part negated. Maps to math/cmplx.Conj.
 	if recvTy := g.effectiveType(m.Recv); recvTy != nil && recvTy.Kind == ir.TyComplex {

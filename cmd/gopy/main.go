@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	bridgepkg "github.com/rroblf01/gopy/bridge"
 	"github.com/rroblf01/gopy/ir"
 	"github.com/rroblf01/gopy/parser"
 	"github.com/rroblf01/gopy/transpile"
@@ -148,8 +149,9 @@ func runBuild(args []string) {
 	dumper := fs.String("dumper", "", "path to scripts/py_ast_dump.py (default: auto-locate)")
 	python := fs.String("python", "", "Python interpreter to use (default: ./.venv/bin/python3 if present, else python3)")
 	keep := fs.Bool("keep", false, "keep the intermediate Go source directory (printed to stderr)")
+	bridge := fs.Bool("bridge", false, "enable the embedded-CPython bridge for non-stdlib imports (requires CGO + libpython)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: gopy build [-o binary] [-keep] <input.py|dir>")
+		fmt.Fprintln(os.Stderr, "usage: gopy build [-o binary] [-keep] [-bridge] <input.py|dir>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -175,7 +177,7 @@ func runBuild(args []string) {
 	absBin, err := filepath.Abs(binPath)
 	check(err)
 
-	goSrc := transpileFile(src, "main", *python, *dumper)
+	goSrc, usedBridge := transpileFileBridge(src, "main", *python, *dumper, *bridge)
 
 	tmp, err := os.MkdirTemp("", "gopy-build-")
 	check(err)
@@ -193,6 +195,13 @@ func runBuild(args []string) {
 	cmd.Dir = tmp
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
+	// When the program calls into the embedded interpreter, vendor the bridge
+	// implementation as package main and build with CGO enabled so it links
+	// libpython. Without bridged calls the binary stays pure Go.
+	if usedBridge {
+		check(os.WriteFile(filepath.Join(tmp, "gopy_bridge.go"), []byte(bridgepkg.MainPackageSource()), 0o644))
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	}
 	if err := cmd.Run(); err != nil {
 		die("go build failed: " + err.Error())
 	}
@@ -366,6 +375,14 @@ func detectProjectName(dir string) string {
 }
 
 func transpileFile(src, pkg, python, dumper string) []byte {
+	goSrc, _ := transpileFileBridge(src, pkg, python, dumper, false)
+	return goSrc
+}
+
+// transpileFileBridge transpiles a single file, optionally enabling the
+// embedded-CPython bridge. It returns the Go source and whether any bridged
+// call was emitted (so the build driver knows to vendor the bridge + CGO).
+func transpileFileBridge(src, pkg, python, dumper string, enableBridge bool) ([]byte, bool) {
 	dumperPath := dumper
 	if dumperPath == "" {
 		dumperPath = locateDumper()
@@ -382,12 +399,13 @@ func transpileFile(src, pkg, python, dumper string) []byte {
 	modName := filepath.Base(src)
 	mod, err := ir.Lower(modName, root)
 	check(err)
-	goSrc, err := transpile.Module(mod, transpile.Options{
+	goSrc, meta, err := transpile.ModuleWithMeta(mod, transpile.Options{
 		PackageName:  pkg,
 		SourceModule: modName,
+		EnableBridge: enableBridge,
 	})
 	check(err)
-	return goSrc
+	return goSrc, meta.UsedBridge
 }
 
 // locateDumper walks up from the caller's source dir, or from CWD, looking
