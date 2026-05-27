@@ -284,12 +284,32 @@ fallback) serves `GET /fib/10` → `{"fib":55,"n":10}`. This is the shape the
 hybrid Django target needs: routing/validation/OpenAPI in Go, the
 non-transpilable logic (ORM, etc.) in the bridge, one process.
 
-**Next:** the same wiring with a real Django model — define the bridged
-`models.Model` + `settings.configure()`/`django.setup()` at startup (the
-deferred-class + module-statement machinery already sequences this) and call
-`Item.objects.filter(...)` from inside a `-goweb` handler. The standalone ORM
-script and the goweb+bridge handler are both proven; this is their composition.
-Deferred: converter-accurate Django 404, request.POST/headers, middleware.
+**Hybrid Django web + ORM — proven end-to-end.** The full composition works in
+one binary: a `-goweb -bridge` app declares Django setup as module-level
+statements (`settings.configure()` / `django.setup()`), a bridged
+`class Item(models.Model)`, `with connection.schema_editor()`, and seed
+`Item.objects.create(...)` — all collected into the synthesized `main()` in
+source order (so the deferred bridged class is defined *after* setup), with a
+trailing `app.run(port)` → `__webServe`. A FastAPI handler then queries the ORM:
+
+```python
+@app.get("/items")
+def list_items() -> dict:
+    return {"items": [i.name for i in Item.objects.all()], "count": Item.objects.count()}
+```
+
+`GET /items` returns `{"count":2,"items":["widget","bolt"]}` — the pure-Go
+net/http handler runs the comprehension + `.count()` over the bridged Django
+QuerySet per request, GIL-serialized. This is the hybrid target the user set:
+routing/validation/OpenAPI in Go, the ORM in embedded CPython, one process. The
+structure relies on *no explicit `def main()`* — Django setup must be
+module-level so it lands in the synthesized main ahead of the deferred model;
+an app that puts setup inside its own `main()` would re-introduce the
+package-init ordering hazard.
+
+Deferred: `Item.objects.filter(...)` with request-derived params (path/query →
+ORM filter), POST body → `create`, converter-accurate Django 404,
+request.POST/headers, middleware.
 
 ## Supported
 
