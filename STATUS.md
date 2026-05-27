@@ -274,10 +274,22 @@ that work:
   `INSTALLED_APPS=["__main__"]` idiom (AppConfig derives the app path from it).
   Init now sets `__main__.__file__` to a cwd-relative path; harmless otherwise.
 
-**Next:** wire ORM calls from Go HTTP handlers (`-goweb`) so a real request flow
-hits the bridged ORM — the standalone script proves the ORM path; the hybrid web
-+ ORM composition is the remaining integration. Deferred: converter-accurate
-Django 404, request.POST/headers, middleware.
+**Hybrid composition (`-goweb -bridge`) — proven.** The two build modes compose:
+a `-goweb` FastAPI app whose route handler calls a bridged Python function
+builds into one binary (CGO on, since the bridged call sets `UsedBridge`), and
+the pure-Go net/http handler invokes embedded CPython per request. Verified:
+`@app.get("/fib/{n}")` returning `{"n": n, "fib": mathlib.fib(n)}` where
+`mathlib` is an untyped sibling (auto-bridged by the recursion's Phase-2
+fallback) serves `GET /fib/10` → `{"fib":55,"n":10}`. This is the shape the
+hybrid Django target needs: routing/validation/OpenAPI in Go, the
+non-transpilable logic (ORM, etc.) in the bridge, one process.
+
+**Next:** the same wiring with a real Django model — define the bridged
+`models.Model` + `settings.configure()`/`django.setup()` at startup (the
+deferred-class + module-statement machinery already sequences this) and call
+`Item.objects.filter(...)` from inside a `-goweb` handler. The standalone ORM
+script and the goweb+bridge handler are both proven; this is their composition.
+Deferred: converter-accurate Django 404, request.POST/headers, middleware.
 
 ## Supported
 
