@@ -179,6 +179,86 @@ func TestCLIBuildSubpackage(t *testing.T) {
 	}
 }
 
+// TestCLIBuildRelativeImports builds an entry that imports a package whose
+// modules use relative imports (`from .util import f`, `from . import util`).
+// Discovery must resolve those relative to the importing module's own package
+// dir, all into pure Go.
+func TestCLIBuildRelativeImports(t *testing.T) {
+	root := repoRoot(t)
+	gopyBin := buildGopyCLI(t, root)
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "mypkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"mypkg/__init__.py": "",
+		"mypkg/util.py":     "def helper(s: str) -> str:\n    return s.upper()\n",
+		"mypkg/core.py": "from .util import helper\n" +
+			"from . import util\n" +
+			"def run(s: str) -> str:\n    return helper(s) + \"/\" + util.helper(s)\n",
+		"main.py": "from mypkg.core import run\n" +
+			"def main() -> None:\n    print(run(\"hi\"))\n" +
+			"if __name__ == \"__main__\":\n    main()\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outBin := filepath.Join(tmp, "rel-bin")
+	cmd := exec.Command(gopyBin, "build", "-o", outBin, filepath.Join(tmp, "main.py"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gopy build (relative imports): %v\n%s", err, out)
+	}
+	var got bytes.Buffer
+	run := exec.Command(outBin)
+	run.Stdout = &got
+	if err := run.Run(); err != nil {
+		t.Fatalf("run binary: %v", err)
+	}
+	if want := "HI/HI\n"; got.String() != want {
+		t.Fatalf("output mismatch\nwant %q\n got %q", want, got.String())
+	}
+}
+
+// TestCLIBuildDottedImport builds an entry that uses `import pkg.mod` and then
+// the deep-qualified `pkg.mod.fn(...)` / `pkg.mod.CONST` access, which must
+// have its module qualifier stripped to a bare package-level symbol.
+func TestCLIBuildDottedImport(t *testing.T) {
+	root := repoRoot(t)
+	gopyBin := buildGopyCLI(t, root)
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "mypkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"mypkg/__init__.py": "",
+		"mypkg/calc.py":     "SCALE = 10\n\ndef add(a: int, b: int) -> int:\n    return a + b\n",
+		"main.py": "import mypkg.calc\n" +
+			"def main() -> None:\n    print(mypkg.calc.add(2, 3))\n    print(mypkg.calc.SCALE)\n" +
+			"if __name__ == \"__main__\":\n    main()\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outBin := filepath.Join(tmp, "dot-bin")
+	cmd := exec.Command(gopyBin, "build", "-o", outBin, filepath.Join(tmp, "main.py"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gopy build (dotted import): %v\n%s", err, out)
+	}
+	var got bytes.Buffer
+	run := exec.Command(outBin)
+	run.Stdout = &got
+	if err := run.Run(); err != nil {
+		t.Fatalf("run binary: %v", err)
+	}
+	if want := "5\n10\n"; got.String() != want {
+		t.Fatalf("output mismatch\nwant %q\n got %q", want, got.String())
+	}
+}
+
 // TestCLIBuildProject runs `gopy build <dir>` against a multi-file fixture
 // and checks the resulting binary's stdout matches running `python3 main.py`
 // from inside that directory. Covers the directory entry point that lets

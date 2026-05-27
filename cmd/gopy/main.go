@@ -544,33 +544,49 @@ type localDep struct {
 	goName string
 }
 
-// scanImports returns candidate dotted module paths referenced by top-level
-// `import X` / `from X import n1, n2` statements. For an `import a.b` it yields
-// "a.b"; for `from pkg import mod` it yields both "pkg" (the package, in case
-// the name lives in pkg/__init__.py) and "pkg.mod" (in case it is a submodule).
-func scanImports(root parser.Node) []string {
-	var out []string
+// importRef is one candidate module an import statement might pull in. level is
+// the relative-import depth (0 = absolute, 1 = `from .`, 2 = `from ..`, …);
+// dotted is the module path to resolve, relative to the importing module's
+// package when level > 0.
+type importRef struct {
+	level  int
+	dotted string
+}
+
+// scanImports returns candidate module references from top-level `import X` /
+// `from X import n1, n2` statements. For `import a.b` it yields "a.b"; for
+// `from pkg import mod` it yields "pkg" (the name may live in pkg/__init__.py)
+// and "pkg.mod" (it may be a submodule). Relative imports carry their level:
+// `from .mod import y` → {1,"mod"},{1,"mod.y"}; `from . import x` → {1,"x"}.
+func scanImports(root parser.Node) []importRef {
+	var out []importRef
 	for _, stmt := range root.Children("body") {
 		switch stmt.Type() {
 		case "Import":
 			for _, a := range stmt.Children("names") {
 				if nm := a.Str("name"); nm != "" {
-					out = append(out, nm)
+					out = append(out, importRef{0, nm})
 				}
 			}
 		case "ImportFrom":
-			// Relative imports (`from . import x`) aren't resolved yet.
-			if lvl, ok := stmt["level"].(float64); ok && lvl > 0 {
-				continue
+			level := 0
+			if lvl, ok := stmt["level"].(float64); ok {
+				level = int(lvl)
 			}
 			m := stmt.Str("module")
-			if m == "" {
-				continue
+			if m != "" {
+				out = append(out, importRef{level, m})
 			}
-			out = append(out, m)
 			for _, a := range stmt.Children("names") {
-				if nm := a.Str("name"); nm != "" {
-					out = append(out, m+"."+nm)
+				nm := a.Str("name")
+				if nm == "" {
+					continue
+				}
+				if m != "" {
+					out = append(out, importRef{level, m + "." + nm})
+				} else if level > 0 {
+					// `from . import nm` — nm is a submodule of the current package.
+					out = append(out, importRef{level, nm})
 				}
 			}
 		}
@@ -617,16 +633,30 @@ func discoverLocalModules(entryPath, pyBin, dumperPath string) (deps []localDep,
 		if err != nil {
 			continue // unparseable: don't discover through it
 		}
-		for _, dotted := range scanImports(root) {
-			cand := resolveModuleFile(dotted, dir)
+		for _, ref := range scanImports(root) {
+			// Absolute imports resolve from the project root (the entry's dir);
+			// relative imports resolve from the importing module's package,
+			// ascending one level per leading dot beyond the first.
+			base := dir
+			if ref.level > 0 {
+				base = filepath.Dir(cur)
+				for i := 1; i < ref.level; i++ {
+					base = filepath.Dir(base)
+				}
+			}
+			cand := resolveModuleFile(ref.dotted, base)
 			if cand == "" {
 				continue // not a local module
 			}
-			// The last dotted segment is the bare binding name a sibling-style
-			// `from pkg import mod; mod.fn()` would reference, so register it
+			// Register both the last dotted segment (the bare binding a
+			// sibling-style `from pkg import mod; mod.fn()` references) and the
+			// full dotted path (what `import pkg.mod; pkg.mod.fn()` references)
 			// for qualifier stripping.
-			parts := strings.Split(dotted, ".")
+			parts := strings.Split(ref.dotted, ".")
 			nameSet[parts[len(parts)-1]] = true
+			if len(parts) > 1 {
+				nameSet[ref.dotted] = true
+			}
 			abs, _ := filepath.Abs(cand)
 			if !seen[abs] {
 				seen[abs] = true

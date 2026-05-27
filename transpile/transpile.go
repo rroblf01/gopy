@@ -397,6 +397,22 @@ func (g *gen) buildAliases(m *ir.Module) {
 	}
 }
 
+// dottedName reconstructs a dotted module reference from a receiver expression
+// that is a bare name (`mod` → "mod") or a chain of attribute reads
+// (`pkg.sub` → "pkg.sub"). Returns false for any other shape. Used to detect a
+// local-module qualifier so `pkg.sub.fn(...)` can drop down to a bare call.
+func dottedName(e ir.Expr) (string, bool) {
+	switch x := e.(type) {
+	case *ir.Name:
+		return x.N, true
+	case *ir.Attribute:
+		if base, ok := dottedName(x.Recv); ok {
+			return base + "." + x.Name, true
+		}
+	}
+	return "", false
+}
+
 // isLocalModule reports whether name refers to a sibling .py module in the
 // same build (and so resolves within the shared Go package, not via the
 // bridge). Only consulted when EnableBridge is set.
@@ -5495,10 +5511,10 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.MethodCall:
 		return g.methodCall(x)
 	case *ir.Attribute:
-		// Local-module attribute read: `mod.NAME` where `mod` is a sibling .py
-		// in the same package. Drop the qualifier — `NAME` is a package-level
-		// symbol.
-		if recv, ok := x.Recv.(*ir.Name); ok && g.localMods[recv.N] {
+		// Local-module attribute read: `mod.NAME` / `pkg.sub.NAME` where the
+		// receiver spells a sibling/subpackage module in the same package. Drop
+		// the qualifier — `NAME` is a package-level symbol.
+		if d, ok := dottedName(x.Recv); ok && g.localMods[d] {
 			g.writef("%s", x.Name)
 			return nil
 		}
@@ -10557,10 +10573,11 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 			}
 		}
 	}
-	// Local-module call: `mod.fn(args)` where `mod` is a sibling .py transpiled
-	// into this same package. Drop the qualifier and emit a bare free call —
-	// `fn(args)` resolves to the package-level function.
-	if recv, ok := m.Recv.(*ir.Name); ok && g.localMods[recv.N] {
+	// Local-module call: `mod.fn(args)` / `pkg.sub.fn(args)` where the receiver
+	// spells a sibling/subpackage module transpiled into this same package.
+	// Drop the module qualifier and emit a bare free call — `fn(args)` resolves
+	// to the package-level function.
+	if d, ok := dottedName(m.Recv); ok && g.localMods[d] {
 		return g.call(&ir.Call{
 			Func:     &ir.Name{N: m.Method},
 			Args:     m.Args,
