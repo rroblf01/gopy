@@ -136,6 +136,49 @@ func TestCLIBuildRecursive(t *testing.T) {
 	}
 }
 
+// TestCLIBuildSubpackage runs `gopy build <entry.py>` on an entry that imports
+// a sub*package* (`from pkg.mod import f`, `from pkg import mod; mod.g()`), not
+// just a flat sibling. The build must resolve `pkg/mod.py` and `pkg/__init__.py`
+// under the entry's tree, transpile them into the shared package, and strip the
+// `mod.` qualifier — proving recursion follows package layouts, all pure Go.
+func TestCLIBuildSubpackage(t *testing.T) {
+	root := repoRoot(t)
+	gopyBin := buildGopyCLI(t, root)
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "mypkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"mypkg/__init__.py": "",
+		"mypkg/calc.py": "def add(a: int, b: int) -> int:\n    return a + b\n\n" +
+			"def mul(a: int, b: int) -> int:\n    return a * b\n",
+		"main.py": "from mypkg.calc import add\n" +
+			"from mypkg import calc\n" +
+			"def main() -> None:\n    print(add(2, 3))\n    print(calc.mul(4, 5))\n" +
+			"if __name__ == \"__main__\":\n    main()\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outBin := filepath.Join(tmp, "pkg-bin")
+	cmd := exec.Command(gopyBin, "build", "-o", outBin, filepath.Join(tmp, "main.py"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gopy build (subpackage): %v\n%s", err, out)
+	}
+	var got bytes.Buffer
+	run := exec.Command(outBin)
+	run.Stdout = &got
+	if err := run.Run(); err != nil {
+		t.Fatalf("run binary: %v", err)
+	}
+	want := "5\n20\n"
+	if got.String() != want {
+		t.Fatalf("output mismatch\nwant %q\n got %q", want, got.String())
+	}
+}
+
 // TestCLIBuildProject runs `gopy build <dir>` against a multi-file fixture
 // and checks the resulting binary's stdout matches running `python3 main.py`
 // from inside that directory. Covers the directory entry point that lets

@@ -342,6 +342,22 @@ func (g *gen) buildAliases(m *ir.Module) {
 		segs := splitDotted(imp.From)
 		mod, ok := stdlibModules[segs[0]]
 		if !ok {
+			// `from pkg import mod` where pkg is a local (sibling/subpackage)
+			// module and mod is itself a local module: record the binding name
+			// so `mod.fn(...)` / `mod.NAME` drops the qualifier. Names that are
+			// not modules (functions, constants) resolve bare and need nothing.
+			if g.isLocalModule(imp.From) {
+				for _, n := range imp.Names {
+					if g.isLocalModule(n.Name) {
+						local := n.Alias
+						if local == "" {
+							local = n.Name
+						}
+						g.localMods[local] = true
+					}
+				}
+				continue
+			}
 			// `from X import Y` where X is a bridged (non-stdlib, non-local)
 			// module: bind each Y to the module attribute it names so a bare
 			// `Y(...)` / `Y` routes through the bridge.

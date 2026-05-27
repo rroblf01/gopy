@@ -212,12 +212,12 @@ func runBuild(args []string) {
 		return
 	}
 
-	// Recursive multi-file build. transpileDeps lists the discovered sibling
+	// Recursive multi-file build. transpileDeps lists the discovered local
 	// modules to transpile into the shared package; lm is the set of local
 	// module names whose qualified `mod.fn(...)` access drops the qualifier.
 	// Returns the go-build error (nil on success) without exiting, so the
 	// caller can fall back to bridging.
-	buildOnce := func(transpileDeps, lm []string) error {
+	buildOnce := func(transpileDeps []localDep, lm []string) error {
 		// Clear any .go from a previous attempt (keep go.mod) so a stale dep
 		// translation can't leak into a fallback build.
 		if matches, _ := filepath.Glob(filepath.Join(tmp, "*.go")); matches != nil {
@@ -249,7 +249,7 @@ func runBuild(args []string) {
 			die(fmt.Sprintf("%s", err))
 		}
 		for _, d := range transpileDeps {
-			if err := emit(d, strings.TrimSuffix(filepath.Base(d), ".py")+".go"); err != nil {
+			if err := emit(d.path, d.goName); err != nil {
 				return err
 			}
 		}
@@ -536,8 +536,18 @@ func tryTranspileModule(src, pkg, python, dumper string, enableBridge, goWeb, sk
 	})
 }
 
-// scanImports returns the module names referenced by top-level `import X` /
-// `from X import ...` statements in a parsed module.
+// localDep is one discovered local dependency module: its source .py path and
+// the unique .go filename it is emitted as (dotted module path → underscores,
+// so `mypkg/calc.py` and a top-level `calc.py` don't collide on disk).
+type localDep struct {
+	path   string
+	goName string
+}
+
+// scanImports returns candidate dotted module paths referenced by top-level
+// `import X` / `from X import n1, n2` statements. For an `import a.b` it yields
+// "a.b"; for `from pkg import mod` it yields both "pkg" (the package, in case
+// the name lives in pkg/__init__.py) and "pkg.mod" (in case it is a submodule).
 func scanImports(root parser.Node) []string {
 	var out []string
 	for _, stmt := range root.Children("body") {
@@ -549,21 +559,52 @@ func scanImports(root parser.Node) []string {
 				}
 			}
 		case "ImportFrom":
-			if m := stmt.Str("module"); m != "" {
-				out = append(out, m)
+			// Relative imports (`from . import x`) aren't resolved yet.
+			if lvl, ok := stmt["level"].(float64); ok && lvl > 0 {
+				continue
+			}
+			m := stmt.Str("module")
+			if m == "" {
+				continue
+			}
+			out = append(out, m)
+			for _, a := range stmt.Children("names") {
+				if nm := a.Str("name"); nm != "" {
+					out = append(out, m+"."+nm)
+				}
 			}
 		}
 	}
 	return out
 }
 
+// resolveModuleFile maps a dotted module path to a local .py file under baseDir,
+// trying the module-file layout (`a/b/c.py`) then the package layout
+// (`a/b/c/__init__.py`). Returns "" when neither exists (stdlib / third-party /
+// not local).
+func resolveModuleFile(dotted, baseDir string) string {
+	parts := strings.Split(dotted, ".")
+	asModule := filepath.Join(append([]string{baseDir}, parts...)...) + ".py"
+	if _, err := os.Stat(asModule); err == nil {
+		return asModule
+	}
+	asPackage := filepath.Join(append([]string{baseDir}, append(parts, "__init__.py")...)...)
+	if _, err := os.Stat(asPackage); err == nil {
+		return asPackage
+	}
+	return ""
+}
+
 // discoverLocalModules walks the import graph from entryPath, following
-// `import X` / `from X import ...` to sibling `X.py` files in the entry's
-// directory (single-segment names only — subpackages are not yet resolved).
-// It returns the dependency files (excluding the entry) in discovery order and
-// the set of local module names used for qualifier stripping. Imports that
-// don't resolve to a sibling file (stdlib / third-party) are left alone.
-func discoverLocalModules(entryPath, pyBin, dumperPath string) (deps []string, modNames []string) {
+// `import X` / `from X import ...` to local .py files under the entry's
+// directory — siblings (`utils.py`) and subpackages alike (`pkg/sub.py`,
+// `pkg/__init__.py`). It returns the dependency modules (excluding the entry)
+// in discovery order and the set of local module names used for qualifier
+// stripping. Imports that don't resolve to a local file (stdlib / third-party)
+// are left alone. Flat-package caveat: every module shares one Go package, so
+// two modules defining the same top-level symbol collide — keep names unique
+// across the project (or that build falls back to the bridge under -bridge).
+func discoverLocalModules(entryPath, pyBin, dumperPath string) (deps []localDep, modNames []string) {
 	dir := filepath.Dir(entryPath)
 	entryAbs, _ := filepath.Abs(entryPath)
 	seen := map[string]bool{entryAbs: true}
@@ -576,21 +617,26 @@ func discoverLocalModules(entryPath, pyBin, dumperPath string) (deps []string, m
 		if err != nil {
 			continue // unparseable: don't discover through it
 		}
-		for _, name := range scanImports(root) {
-			seg := name
-			if i := strings.IndexByte(seg, '.'); i >= 0 {
-				seg = seg[:i]
+		for _, dotted := range scanImports(root) {
+			cand := resolveModuleFile(dotted, dir)
+			if cand == "" {
+				continue // not a local module
 			}
-			cand := filepath.Join(dir, seg+".py")
-			if _, err := os.Stat(cand); err != nil {
-				continue // not a local sibling
-			}
-			nameSet[seg] = true
+			// The last dotted segment is the bare binding name a sibling-style
+			// `from pkg import mod; mod.fn()` would reference, so register it
+			// for qualifier stripping.
+			parts := strings.Split(dotted, ".")
+			nameSet[parts[len(parts)-1]] = true
 			abs, _ := filepath.Abs(cand)
 			if !seen[abs] {
 				seen[abs] = true
 				queue = append(queue, abs)
-				deps = append(deps, cand)
+				rel, err := filepath.Rel(dir, abs)
+				if err != nil {
+					rel = filepath.Base(abs)
+				}
+				goName := strings.NewReplacer("/", "_", string(filepath.Separator), "_", ".py", "").Replace(rel) + ".go"
+				deps = append(deps, localDep{path: cand, goName: goName})
 			}
 		}
 	}
