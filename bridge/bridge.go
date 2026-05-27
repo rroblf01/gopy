@@ -51,6 +51,10 @@ static int gopy_setattr(PyObject* o, const char* name, PyObject* val) {
     return PyObject_SetAttrString(o, name, val);
 }
 
+// Run a string of Python source in the __main__ namespace (used at init to
+// give __main__ a __file__). Returns 0 on success, -1 on error.
+static int gopy_run(const char* src) { return PyRun_SimpleString(src); }
+
 static PyObject* gopy_getiter(PyObject* o) { return PyObject_GetIter(o); }
 static PyObject* gopy_iternext(PyObject* it) { return PyIter_Next(it); }
 
@@ -140,6 +144,18 @@ func Init() error {
 			initErr = fmt.Errorf("bridge: Py_Initialize failed")
 			return
 		}
+		// Give __main__ a filesystem location. The embedded interpreter's
+		// __main__ is synthetic (the host is Go, not a .py file), so it has no
+		// __file__ — which breaks frameworks that introspect it, notably
+		// Django's single-file `INSTALLED_APPS=["__main__"]` idiom (AppConfig
+		// derives the app path from __main__.__file__). Harmless otherwise:
+		// nothing else reads it. Runs while the init thread still holds the GIL.
+		boot := C.CString("import os, sys\n" +
+			"m = sys.modules.get('__main__')\n" +
+			"if m is not None and not getattr(m, '__file__', None):\n" +
+			"    m.__file__ = os.path.join(os.getcwd(), '__gopy_main__.py')\n")
+		C.gopy_run(boot)
+		C.free(unsafe.Pointer(boot))
 		// Release the GIL held by the initializing thread; per-call code
 		// re-acquires it. Save the main thread state so Finalize can restore.
 		mainState = C.PyEval_SaveThread()

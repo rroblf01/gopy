@@ -84,7 +84,7 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgeObjVars: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
 	g.buildAliases(m)
 	if opt.EnableBridge || opt.GoWeb {
 		g.bridgeImportSrc = g.buildBridgeImportSrc(m)
@@ -646,6 +646,12 @@ type gen struct {
 	// bridge `*Object` (assigned from a bridged call without conversion), so
 	// `x.method()` on them keeps chaining through the bridge.
 	bridgeVars map[string]bool
+	// bridgeObjVars is the subset of bridge vars whose Go static type is
+	// `any` rather than `*Object` — e.g. a loop variable produced by ranging
+	// `__bridgeIter(...)`, whose elements come back boxed as `any`. Chain
+	// emission unwraps these via `__bridgeObj(name)` so method/attribute
+	// access still type-checks.
+	bridgeObjVars map[string]bool
 	// bridgedFrom maps a local name introduced by `from X import Y` (where X
 	// is a bridged module) to the module + attribute it resolves to, so a
 	// bare `Y(...)` call or `Y` reference routes through the bridge.
@@ -776,6 +782,14 @@ func (g *gen) class(c *ir.Class) error {
 		g.usedBridge = true
 		g.registerBridgeHelpers()
 		g.bridgeVars[c.Name] = true
+		// Deferred definition (DeferDefine): the class needs framework setup
+		// to run first, so emit only the package-scope handle here. The
+		// __bridgeDefineClass call is emitted as a BridgeClassDef statement in
+		// the synthesized main(), after that setup.
+		if c.DeferDefine {
+			g.writef("var %s *Object\n", c.Name)
+			return nil
+		}
 		src := g.bridgeImportSrc + "\n" + c.BridgedSource
 		g.writef("var %s *Object = __bridgeDefineClass(%q, %q)\n", c.Name, c.Name, src)
 		return nil
@@ -1227,6 +1241,17 @@ func (g *gen) funcLitSig(fn *ir.Func) string {
 
 func (g *gen) stmt(s ir.Stmt) error {
 	switch x := s.(type) {
+	case *ir.BridgeClassDef:
+		// Deferred bridged-class definition (see Class.DeferDefine): bind the
+		// package-scope handle now that any preceding framework setup has run
+		// in the embedded interpreter.
+		g.usedBridge = true
+		g.registerBridgeHelpers()
+		g.bridgeVars[x.Name] = true
+		src := g.bridgeImportSrc + "\n" + x.Source
+		g.writeIndent()
+		g.writef("%s = __bridgeDefineClass(%q, %q)\n", x.Name, x.Name, src)
+		return nil
 	case *ir.ExprStmt:
 		g.writeIndent()
 		if err := g.expr(x.X); err != nil {
@@ -3246,6 +3271,43 @@ func (g *gen) withCM(w *ir.WithCM) error {
 				return g.emitTaggedOpenCM(synth, w.VarName, w.Body, "__gopy_bz2_open_read", "__Bz2File")
 			}
 		}
+	}
+	// Bridged context manager (`with connection.schema_editor() as se:`):
+	// the ctx expression yields a CPython object. Drive the manager protocol
+	// through the bridge — __enter__ on entry, __exit__(None,None,None) on
+	// exit — and bind the as-var to the entered object so the body chains
+	// through the bridge.
+	if g.isBridgeExpr(w.Ctx) {
+		g.usedBridge = true
+		g.registerBridgeHelpers()
+		g.writeIndent()
+		g.writef("func() {\n")
+		g.indent++
+		g.writeIndent()
+		g.writef("__cm := ")
+		if err := g.emitBridgeChainValue(w.Ctx); err != nil {
+			return err
+		}
+		g.writef("\n")
+		g.writeIndent()
+		g.writef("defer __cm.CallMethod(\"__exit__\", nil, nil, nil)\n")
+		if w.VarName != "" {
+			g.bridgeVars[w.VarName] = true
+			g.writeIndent()
+			g.writef("%s := __bridgeMust(__cm.CallMethod(%q))\n", w.VarName, "__enter__")
+			g.writeIndent()
+			g.writef("_ = %s\n", w.VarName)
+		} else {
+			g.writeIndent()
+			g.writef("__bridgeMust(__cm.CallMethod(%q))\n", "__enter__")
+		}
+		if err := g.stmts(w.Body); err != nil {
+			return err
+		}
+		g.indent--
+		g.writeIndent()
+		g.writef("}()\n")
+		return nil
 	}
 	t := g.effectiveType(w.Ctx)
 	if t == nil || t.Kind != ir.TyNamed {
@@ -6060,7 +6122,31 @@ func (g *gen) expr(e ir.Expr) error {
 // element-collection variable is named __out so it never collides with
 // user code; the user's loop variable keeps its Python name. Multiple
 // `for V in ITER` clauses (Extra) nest the loops in source order.
+// clearCompBridgeVars drops any bridge-var registrations a comprehension made
+// for its loop variables (see the bridged-iterable branch in the loop opener).
+// Those vars are scoped to the generated closure, so they must not outlive it.
+func (g *gen) clearCompBridgeVars(v, v2 string, extra []ir.CompGen) {
+	drop := func(name string) {
+		if name == "" || name == "_" {
+			return
+		}
+		delete(g.bridgeVars, name)
+		delete(g.bridgeObjVars, name)
+	}
+	drop(v)
+	drop(v2)
+	for _, gn := range extra {
+		drop(gn.Var)
+		drop(gn.Var2)
+	}
+}
+
 func (g *gen) listComp(c *ir.ListComp) error {
+	// The comprehension's loop vars may be registered as bridge vars (when
+	// ranging a bridged iterable); they're local to the generated closure, so
+	// drop those registrations on the way out to avoid shadowing later code
+	// that reuses the same identifier.
+	defer g.clearCompBridgeVars(c.Var, c.Var2, c.Extra)
 	elem := g.goType(c.ElemTy)
 	if elem == "" || elem == "any" {
 		elem = "any"
@@ -6217,6 +6303,52 @@ func (g *gen) listComp(c *ir.ListComp) error {
 				}
 				return nil
 			}
+		}
+		// Bridged iterable (`for i in qs` where qs is a bridged QuerySet, etc.):
+		// materialize via __bridgeIter and treat the element as a live object so
+		// `i.name` chains through the bridge.
+		if g.isBridgeExpr(iter) {
+			g.usedBridge = true
+			g.registerBridgeHelpers()
+			g.bridgeVars[varName] = true
+			g.bridgeObjVars[varName] = true
+			g.writeIndent()
+			if varName == "_" {
+				g.writef("for range __bridgeIter(")
+			} else {
+				g.writef("for _, %s := range __bridgeIter(", varName)
+			}
+			if err := g.emitBridgeChainValue(iter); err != nil {
+				return err
+			}
+			g.writef(") {\n")
+			g.indent++
+			if varName != "_" {
+				g.writeIndent()
+				g.writef("_ = %s\n", varName)
+			}
+			if cond != nil {
+				pre, cond2 := ir.HoistNamedExprs(cond)
+				for _, ps := range pre {
+					if err := g.stmt(ps); err != nil {
+						return err
+					}
+				}
+				cond = cond2
+				g.writeIndent()
+				g.writef("if !(")
+				if err := g.boolExpr(cond); err != nil {
+					return err
+				}
+				g.writef(") {\n")
+				g.indent++
+				g.writeIndent()
+				g.writef("continue\n")
+				g.indent--
+				g.writeIndent()
+				g.writef("}\n")
+			}
+			return nil
 		}
 		g.writeIndent()
 		iterTy := iter.TypeOf()
@@ -8699,6 +8831,12 @@ func (g *gen) emitBridgeChainValue(e ir.Expr) error {
 			g.writef("__bridgeMust(__bridgeModule(%q).Attr(%q))", ref.module, ref.attr)
 			return nil
 		}
+		// An `any`-typed bridge var (e.g. a __bridgeIter loop element) — unwrap
+		// to *Object so chained .Attr/.CallMethod links type-check.
+		if g.bridgeObjVars[x.N] {
+			g.writef("__bridgeObj(%s)", x.N)
+			return nil
+		}
 		// A local var already holding a *Object — emit it directly.
 		if g.bridgeVars[x.N] {
 			g.writef("%s", x.N)
@@ -10213,6 +10351,17 @@ func __bridgeMust(o *Object, err error) *Object {
 		__bridgeRaise(err)
 	}
 	return o
+}
+
+// __bridgeObj asserts an any-typed bridge value (e.g. a __bridgeIter loop
+// element, which arrives boxed as any) back to a *Object so chained method /
+// attribute access type-checks. Raises if the value isn't a live object.
+func __bridgeObj(v any) *Object {
+	if o, ok := v.(*Object); ok {
+		return o
+	}
+	__bridgeRaise(NewException("TypeError: value is not a bridge object"))
+	return nil
 }
 
 // __bridgeVal converts a live bridge *Object to a native Go value at a use

@@ -27,6 +27,22 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 	if err := hoistNestedClasses(root, m); err != nil {
 		return nil, fmt.Errorf("%s: %v", modName, err)
 	}
+	// Module-level executable statements (a bare `settings.configure()`,
+	// `with ...`, a top-level `for`, etc.) are collected into mainBody and
+	// emitted as a synthesized `func main()` in source order. hasMainFlow is
+	// the up-front signal that such statements exist; when set, bridged class
+	// definitions are *deferred* into the same flow so that any preceding
+	// setup (e.g. Django's settings.configure()/django.setup()) runs in the
+	// embedded interpreter before the class is defined there.
+	hasMainFlow := false
+	for _, stmt := range root.Children("body") {
+		if isExecutableTopLevel(stmt) {
+			hasMainFlow = true
+			break
+		}
+	}
+	modScope := newScope()
+	var mainBody []Stmt
 	for _, stmt := range root.Children("body") {
 		if isMainGuard(stmt) {
 			// `if __name__ == "__main__":` — Go runs main() automatically,
@@ -52,6 +68,16 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 			m.Imports = append(m.Imports, imp)
 			continue
 		}
+		if isExecutableTopLevel(stmt) {
+			s, err := lowerStmt(stmt, modScope)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %v", modName, err)
+			}
+			if s != nil {
+				mainBody = append(mainBody, s)
+			}
+			continue
+		}
 		decls, err := lowerTopLevel(stmt)
 		if err != nil {
 			// Prefix the originating module name (typically the .py
@@ -63,9 +89,55 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 		if decls == nil {
 			continue
 		}
+		// When a synthesized main() exists, a bridged class definition is
+		// deferred into that flow at its source position: the Class decl
+		// emits only `var <Name> *Object`, and a BridgeClassDef statement
+		// performs the __bridgeDefineClass call after any earlier setup.
+		if hasMainFlow {
+			for _, d := range decls {
+				if c, ok := d.(*Class); ok && c.IsBridged {
+					c.DeferDefine = true
+					mainBody = append(mainBody, &BridgeClassDef{Name: c.Name, Source: c.BridgedSource})
+				}
+			}
+		}
 		m.Decls = append(m.Decls, decls...)
 	}
+	if len(mainBody) > 0 {
+		for _, d := range m.Decls {
+			if f, ok := d.(*Func); ok && f.Receiver == nil && f.Name == "main" {
+				return nil, fmt.Errorf("%s: module-level executable statements cannot coexist with a top-level `def main()`; move the statements into main()", modName)
+			}
+		}
+		m.Decls = append(m.Decls, &Func{Name: "main", Body: mainBody})
+	}
 	return m, nil
+}
+
+// isExecutableTopLevel reports whether a module-level statement is executable
+// flow (collected into a synthesized main()) rather than a declaration
+// (function, class, import, or a simple `name = expr` / `name: T = expr`
+// module variable, which remain package-scope). Returning false for the
+// declaration forms preserves the existing top-level lowering exactly.
+func isExecutableTopLevel(n parser.Node) bool {
+	switch n.Type() {
+	case "Expr", "With", "AsyncWith", "For", "AsyncFor", "While",
+		"Try", "TryStar", "Assert", "Delete", "AugAssign", "Raise":
+		return true
+	case "If":
+		// `if __name__ == "__main__":` is dropped entirely; any other
+		// top-level `if` is executable flow.
+		return !isMainGuard(n)
+	case "Assign":
+		// `name = expr` stays a package var; structured targets
+		// (attribute / subscript / tuple) are executable assignments.
+		targets := n.Children("targets")
+		return len(targets) != 1 || targets[0].Type() != "Name"
+	case "AnnAssign":
+		tgt := n.Child("target")
+		return tgt == nil || tgt.Type() != "Name"
+	}
+	return false
 }
 
 // hoistNestedClasses walks function bodies recursively and hoists any

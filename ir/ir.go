@@ -188,6 +188,14 @@ type Class struct {
 	// BridgedSource is the verbatim Python source of an IsBridged class,
 	// captured by the AST dumper, to re-exec in the embedded interpreter.
 	BridgedSource string
+	// DeferDefine marks an IsBridged class whose definition must run after
+	// module-level setup statements (e.g. a Django model that needs
+	// settings.configure()/django.setup() to have run first). Codegen emits
+	// only `var <Name> *Object` at package scope; the actual
+	// __bridgeDefineClass call is emitted as a BridgeClassDef statement at the
+	// class's source position inside the synthesized main(), preserving the
+	// process-level ordering the framework requires.
+	DeferDefine bool
 	// DataclassOrder marks @dataclass(order=True). Codegen emits
 	// __lt__ / __le__ / __gt__ / __ge__ comparing the field tuple
 	// lexicographically.
@@ -227,6 +235,15 @@ type Param struct {
 
 // Stmt is any statement in a function body or module top level.
 type Stmt interface{ stmtNode() }
+
+// BridgeClassDef defines a deferred bridged class (see Class.DeferDefine) at
+// its source position inside the synthesized main(). Codegen emits
+// `<Name> = __bridgeDefineClass("<Name>", <Source>)`, binding the
+// package-scope `var <Name> *Object` declared by the corresponding Class decl.
+type BridgeClassDef struct {
+	Name   string
+	Source string
+}
 
 type ExprStmt struct{ X Expr }
 type Assign struct {
@@ -502,6 +519,7 @@ func (*Block) stmtNode()      {}
 func (*Match) stmtNode()      {}
 func (*LocalFunc) stmtNode()  {}
 func (*MultiAssign) stmtNode() {}
+func (*BridgeClassDef) stmtNode() {}
 
 // Expr is any value-producing node.
 type Expr interface {
