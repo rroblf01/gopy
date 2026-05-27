@@ -210,6 +210,22 @@ func pruneUnusedImports(imports []string, body string) []string {
 // ones honor the annotation so untyped numeric literals don't drift to Go
 // defaults that disagree with Python's int64 / float64 model.
 func (g *gen) moduleVar(v *ir.Var) error {
+	// Module-level bridged value: `app = framework.Router()` at module scope
+	// becomes a package-level `*Object` initialized at startup, tracked in
+	// bridgeVars so functions referencing `app` chain through the bridge.
+	if v.Value != nil && g.isBridgeExpr(v.Value) {
+		if _, isMC := v.Value.(*ir.MethodCall); isMC {
+			g.usedBridge = true
+			g.registerBridgeHelpers()
+			g.bridgeVars[v.Name] = true
+			g.writef("var %s *Object = ", v.Name)
+			if err := g.emitBridgeChainValue(v.Value); err != nil {
+				return err
+			}
+			g.writef("\n")
+			return nil
+		}
+	}
 	hasTy := v.Ty != nil && v.Ty.Kind != ir.TyUnknown && v.Ty.Kind != ir.TyNone
 	switch {
 	case hasTy:

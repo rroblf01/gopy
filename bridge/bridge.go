@@ -127,13 +127,12 @@ type Object struct {
 var (
 	initOnce  sync.Once
 	initErr   error
-	gilMu     sync.Mutex // serializes interpreter access from goroutines
 	mainState *C.PyThreadState
 )
 
 // Init starts the embedded interpreter exactly once. Safe to call repeatedly.
 // After init the GIL is released so other goroutines can re-acquire it per
-// call via the gilMu + PyGILState dance in withGIL.
+// call via PyGILState_Ensure/Release in withGIL.
 func Init() error {
 	initOnce.Do(func() {
 		C.Py_Initialize()
@@ -148,16 +147,18 @@ func Init() error {
 	return initErr
 }
 
-// withGIL runs fn while holding the GIL. It serializes all interpreter
-// access through gilMu (coarse but correct) and acquires/releases the GIL
-// with the PyGILState API. The goroutine is pinned to its OS thread for the
-// whole section: PyGILState_Ensure/Release and the per-thread Python thread
-// state are thread-specific, and Go may otherwise migrate the goroutine
+// withGIL runs fn while holding the GIL. Serialization comes from the GIL
+// itself: PyGILState_Ensure blocks until this thread owns the interpreter, so
+// concurrent goroutines are serialized without an extra Go mutex — and because
+// PyGILState_Ensure/Release is recursive (ref-counted per thread), a reverse
+// callback that re-enters the bridge (Python → Go → forward bridge) works
+// instead of deadlocking on a non-reentrant lock.
+//
+// The goroutine is pinned to its OS thread for the whole section: the GIL
+// thread state is per-OS-thread, and Go may otherwise migrate the goroutine
 // between Ensure and Release, corrupting that state (intermittent SIGSEGV).
 // Callers return their results via captured variables in the closure.
 func withGIL(fn func()) {
-	gilMu.Lock()
-	defer gilMu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	gil := C.PyGILState_Ensure()
@@ -642,11 +643,12 @@ func fromPy(p *C.PyObject) (any, error) {
 		}
 		return out, nil
 	}
-	// Fallback: str() the object so callers at least see something.
-	s := C.PyObject_Str(p)
-	if s == nil {
-		return nil, lastError()
-	}
-	defer C.Py_DecRef(s)
-	return C.GoString(C.PyUnicode_AsUTF8(s)), nil
+	// Unrecognized Python object (a class instance, module, function, etc.):
+	// hand it back as a live *Object so Go code can keep operating on it —
+	// read attributes, call methods, pass it on. Take a new reference since
+	// the caller owns the result and the source reference is borrowed/managed
+	// elsewhere. This is what lets a Go callback receive `self` (and any other
+	// rich object) as a usable handle rather than a lossy string.
+	C.Py_IncRef(p)
+	return &Object{p: p}, nil
 }
