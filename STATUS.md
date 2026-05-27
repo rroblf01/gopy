@@ -67,7 +67,17 @@ Captured as `bridge/reverse_test.go`: Python's `map(go_doubler, [1,2,3])` → `[
 
 **GIL correctness fix (applies to the whole bridge).** `withGIL` now pins the goroutine to its OS thread (`runtime.LockOSThread` / `UnlockOSThread`) around `PyGILState_Ensure`/`Release`. Python's thread state is per-OS-thread, and Go may migrate a goroutine between the Ensure and Release, which corrupted that state and caused an intermittent SIGSEGV in `Py_DecRef` (was ~1/8 of full bridge-test runs). With the pin, 15/15 runs pass.
 
-**Reverse bridge — next steps.** Known limitation: `gilMu` is not reentrant, so a reverse callback that itself calls back into the forward bridge would deadlock (fine for leaf callbacks; needs a GIL-state-aware or reentrant lock to lift). To actually run a framework like FastAPI the missing pieces are: exposing transpiled Go functions/classes to Python *with their signatures and annotations* (so the framework can introspect routes / build schemas) and registering Go-backed objects (not just functions). Keyword-argument support on reverse calls is done. The PoC proves the calling mechanism; the introspection surface is the larger remaining build.
+**Reverse bridge — known limitation.** `gilMu` is not reentrant, so a reverse callback that itself calls back into the forward bridge would deadlock (fine for leaf callbacks; needs a GIL-state-aware or reentrant lock to lift).
+
+### Go → Python introspection (the framework unlock) — proof of concept
+
+`bridge.RegisterTypedFunc(name string, params []Param, retAnnotation string, fn)` exposes a Go callback to Python as a function **with a real signature and annotations**, not just a bare PyCFunction. Frameworks (FastAPI, Pydantic, click) drive everything off `inspect.signature(handler)` + `typing.get_type_hints`, which report nothing useful for a raw PyCFunction — so this is the missing piece for a Python framework to see transpiled Go handlers as if they were native `def`s.
+
+Mechanism: register the Go callback as a raw reverse-bridge callable, then a once-bootstrapped Python factory (`_gopy_make_typed`, built via `builtins.exec` into a namespace dict) wraps it in a real Python function carrying a synthesized `inspect.Signature` (`__signature__`) and `__annotations__`; the wrapper binds/forwards args to the raw callable. `Param{Name, Annotation, HasDefault, Default}` carries each parameter; annotation names (`"int"`, `"str"`, `"float"`, `"bool"`, `"list"`, `"dict"`, `"bytes"`, `"None"`, `""`/`"any"`) resolve to the Python type objects.
+
+Verified (`bridge/introspect_test.go`): exposing `def add(a: int, b: int = 5) -> int`, then from Python — `inspect.signature(add)` → `"(a: int, b: int = 5) -> int"`, `typing.get_type_hints(add)` → 3 hints (a / b / return), `add(10)` → `15` (Python applies the default), `add(3, 4)` → `7`. Bridge package stays non-flaky (10/10 runs).
+
+**Next steps toward a real framework.** Still needed: exposing Go-backed *classes* (so `class User(BaseModel)`-style models and handler classes are introspectable), mapping richer annotations (custom/Pydantic types, `Optional`, `list[T]`) beyond the scalar set, registering whole modules of typed functions at once, and the transpiler codegen that auto-emits `RegisterTypedFunc` calls for `@app.get`-decorated handlers from their Python annotations. The calling + introspection primitives are proven; wiring them into the transpiler + decorators is the remaining build.
 
 Trade-offs accepted: binary depends on `libpython3.X.so` (no longer a pure static Go binary), every Go↔Python crossing pays marshaling + GIL serialization, and the ~640 stdlib-parity fixtures validate only the fast path.
 
