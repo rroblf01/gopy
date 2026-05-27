@@ -4,6 +4,82 @@ package bridge
 
 import "testing"
 
+// frameworkDispatchSrc is the exact pattern a web framework uses: introspect a
+// handler's signature, coerce raw (string) request params to each parameter's
+// annotated type, then call. Proves a transpiled Go handler integrates with a
+// Python framework's request-binding machinery.
+const frameworkDispatchSrc = `
+import inspect
+
+def _gopy_dispatch(handler, raw_params):
+    sig = inspect.signature(handler)
+    kwargs = {}
+    for pname, param in sig.parameters.items():
+        if pname in raw_params:
+            val = raw_params[pname]
+            ann = param.annotation
+            if ann is int:
+                val = int(val)
+            elif ann is float:
+                val = float(val)
+            elif ann is bool:
+                val = val in ('1', 'true', 'True', True)
+            else:
+                val = str(val)
+            kwargs[pname] = val
+    return handler(**kwargs)
+`
+
+// TestFrameworkDispatch proves the end-to-end framework integration: a Python
+// dispatcher introspects a Go handler's signature, coerces string request
+// params to the handler's annotated types, and invokes it — the core of what
+// FastAPI does per request.
+func TestFrameworkDispatch(t *testing.T) {
+	// def add(a: int, b: int) -> int, backed by Go.
+	add, err := RegisterTypedFunc("add",
+		[]Param{{Name: "a", Annotation: "int"}, {Name: "b", Annotation: "int"}},
+		"int",
+		func(args []any, kwargs map[string]any) any {
+			return args[0].(int64) + args[1].(int64)
+		},
+	)
+	if err != nil {
+		t.Fatalf("RegisterTypedFunc: %v", err)
+	}
+	defer add.DecRef()
+
+	// Bootstrap the dispatcher.
+	builtins, err := Import("builtins")
+	if err != nil {
+		t.Fatalf("import builtins: %v", err)
+	}
+	defer builtins.DecRef()
+	ns, err := builtins.CallMethod("dict")
+	if err != nil {
+		t.Fatalf("dict(): %v", err)
+	}
+	defer ns.DecRef()
+	if _, err := builtins.CallMethod("exec", frameworkDispatchSrc, ns); err != nil {
+		t.Fatalf("exec dispatcher: %v", err)
+	}
+	dispatch, err := ns.GetItem("_gopy_dispatch")
+	if err != nil {
+		t.Fatalf("get _gopy_dispatch: %v", err)
+	}
+	defer dispatch.DecRef()
+
+	// Simulate a request: raw string params, as an HTTP layer would deliver.
+	r, err := dispatch.Call(add, map[string]any{"a": "3", "b": "4"})
+	if err != nil {
+		t.Fatalf("dispatch(add, {a:3,b:4}): %v", err)
+	}
+	defer r.DecRef()
+	v, _ := r.Go()
+	if v != int64(7) {
+		t.Fatalf("dispatch coerced+called add(\"3\",\"4\") = %v, want 7", v)
+	}
+}
+
 // TestTypedFuncSignature exposes a Go function to Python with a real
 // signature and checks that inspect.signature + typing.get_type_hints report
 // it correctly — the property frameworks like FastAPI depend on — and that
