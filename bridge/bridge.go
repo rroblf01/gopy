@@ -43,6 +43,14 @@ static PyObject* gopy_getitem(PyObject* o, PyObject* key) {
     return PyObject_GetItem(o, key);
 }
 
+static int gopy_setitem(PyObject* o, PyObject* key, PyObject* val) {
+    return PyObject_SetItem(o, key, val);
+}
+
+static int gopy_setattr(PyObject* o, const char* name, PyObject* val) {
+    return PyObject_SetAttrString(o, name, val);
+}
+
 static PyObject* gopy_getiter(PyObject* o) { return PyObject_GetIter(o); }
 static PyObject* gopy_iternext(PyObject* it) { return PyIter_Next(it); }
 
@@ -316,6 +324,48 @@ func (o *Object) GetItem(key any) (*Object, error) {
 		obj = &Object{p: p}
 	})
 	return obj, err
+}
+
+// SetItem implements obj[key] = val for any mutable Python container.
+func (o *Object) SetItem(key, val any) error {
+	var err error
+	withGIL(func() {
+		pk := toPy(key)
+		if pk == nil {
+			err = fmt.Errorf("bridge: cannot convert key (%T) to Python", key)
+			return
+		}
+		defer C.Py_DecRef(pk)
+		pv := toPy(val)
+		if pv == nil {
+			err = fmt.Errorf("bridge: cannot convert value (%T) to Python", val)
+			return
+		}
+		defer C.Py_DecRef(pv)
+		if C.gopy_setitem(o.p, pk, pv) != 0 {
+			err = lastError()
+		}
+	})
+	return err
+}
+
+// SetAttr implements obj.name = val.
+func (o *Object) SetAttr(name string, val any) error {
+	cn := C.CString(name)
+	defer C.free(unsafe.Pointer(cn))
+	var err error
+	withGIL(func() {
+		pv := toPy(val)
+		if pv == nil {
+			err = fmt.Errorf("bridge: cannot convert value (%T) to Python", val)
+			return
+		}
+		defer C.Py_DecRef(pv)
+		if C.gopy_setattr(o.p, cn, pv) != 0 {
+			err = lastError()
+		}
+	})
+	return err
 }
 
 // Iter materializes a Python iterable into a slice of native Go values via

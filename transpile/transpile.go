@@ -1343,6 +1343,27 @@ func (g *gen) stmt(s ir.Stmt) error {
 		}
 		return nil
 	case *ir.AssignSub:
+		// Bridged subscript assignment: `obj[key] = v` on a bridged receiver
+		// routes through *Object.SetItem.
+		if g.isBridgeExpr(x.Target) {
+			g.usedBridge = true
+			g.registerBridgeHelpers()
+			g.writeIndent()
+			g.writef("__bridgeSetItem(")
+			if err := g.emitBridgeChainValue(x.Target); err != nil {
+				return err
+			}
+			g.writef(", ")
+			if err := g.boxedExpr(x.Index); err != nil {
+				return err
+			}
+			g.writef(", ")
+			if err := g.boxedExpr(x.Value); err != nil {
+				return err
+			}
+			g.writef(")\n")
+			return nil
+		}
 		// User-class __setitem__: route `recv[k] = v` to `recv.Setitem(k, v)`.
 		if tTy := g.effectiveType(x.Target); tTy != nil && tTy.Kind == ir.TyNamed {
 			if fn := g.lookupMethod(tTy.Name, "__setitem__"); fn != nil {
@@ -1482,6 +1503,23 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("}()\n")
 		return nil
 	case *ir.AssignAttr:
+		// Bridged attribute write: `obj.field = v` on a bridged receiver
+		// routes through *Object.SetAttr.
+		if g.isBridgeExpr(x.Target) {
+			g.usedBridge = true
+			g.registerBridgeHelpers()
+			g.writeIndent()
+			g.writef("__bridgeSetAttr(")
+			if err := g.emitBridgeChainValue(x.Target); err != nil {
+				return err
+			}
+			g.writef(", %q, ", x.Name)
+			if err := g.boxedExpr(x.Value); err != nil {
+				return err
+			}
+			g.writef(")\n")
+			return nil
+		}
 		g.writeIndent()
 		// Class var assignment: `Class.field = expr` or `cls.field = expr`
 		// (inside a @classmethod where cls was already substituted with
@@ -8644,6 +8682,20 @@ func __bridgeIter(o *Object) []any {
 		__bridgeRaise(err)
 	}
 	return xs
+}
+
+// __bridgeSetItem / __bridgeSetAttr perform obj[key] = v / obj.field = v on a
+// bridged object, raising on a Python-side error.
+func __bridgeSetItem(o *Object, key, val any) {
+	if err := o.SetItem(key, val); err != nil {
+		__bridgeRaise(err)
+	}
+}
+
+func __bridgeSetAttr(o *Object, name string, val any) {
+	if err := o.SetAttr(name, val); err != nil {
+		__bridgeRaise(err)
+	}
 }
 
 // __bridgeInt / __bridgeFloat / __bridgeStr / __bridgeBool convert a bridge

@@ -55,7 +55,9 @@ All verified end-to-end against `mymod` on `PYTHONPATH` and matching CPython.
 
 **Annotation-driven typed conversion — landed.** Assigning a bridge result to a variable with a scalar annotation converts it to that Go type so it feeds native arithmetic / comparison: `n: int = mymod.double(21)` emits `n := __bridgeInt(<chain>)` (likewise `__bridgeFloat` / `__bridgeStr` / `__bridgeBool`), then `n + 1` compiles. Verified `n: int = mymod.double(21); print(n + 1)` → `43`, `s: str = mymod.greet("ana"); s + "!"` → `hi ana!`, and a typed `step: int = mymod.double(5)` feeding `total = total + step` → `10`.
 
-**Inline arithmetic + writes** (codegen): a bridge call used *directly* as an arithmetic operand (`total + mymod.double(5)` without first hoisting to a typed var) still fails — re-emitting the whole BinOp around a typed conversion is fragile given Go's per-operator special cases, so it needs a typed bridge-value node threaded through the IR rather than a codegen patch. Workaround: hoist to an annotated local (`step: int = mymod.double(5)`). Bridged subscript *assignment* (`obj[key] = v`) and attribute *writes* (`obj.field = v`) are also still pending.
+**Writes — landed.** `obj[key] = v` and `obj.field = v` on a bridged receiver route through `*Object.SetItem` / `SetAttr` (via `__bridgeSetItem` / `__bridgeSetAttr`, raising on a Python-side error). Chained targets work — `bag.items["x"] = 42` resolves `bag.items` to a `*Object` then `SetItem`. Verified `bag.label = "full"` / `bag.items["x"] = 42` round-trips and matches CPython. The bridge data-access surface is now read/write symmetric.
+
+**Inline arithmetic** (codegen): a bridge call used *directly* as an arithmetic operand (`total + mymod.double(5)` without first hoisting to a typed var) still fails — re-emitting the whole BinOp around a typed conversion is fragile given Go's per-operator special cases, so it needs a typed bridge-value node threaded through the IR rather than a codegen patch. Workaround: hoist to an annotated local (`step: int = mymod.double(5)`).
 
 ## Reverse bridge (Python → Go) — proof of concept
 
