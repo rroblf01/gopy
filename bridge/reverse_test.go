@@ -7,7 +7,7 @@ import "testing"
 // TestReverseBridge exposes a Go callback to Python and has Python invoke it
 // indirectly via builtins.map — proving the Python→Go direction works.
 func TestReverseBridge(t *testing.T) {
-	doubler, err := RegisterFunc(func(args []any) any {
+	doubler, err := RegisterFunc(func(args []any, kwargs map[string]any) any {
 		return args[0].(int64) * 2
 	})
 	if err != nil {
@@ -46,7 +46,7 @@ func TestReverseBridge(t *testing.T) {
 // TestReverseBridgeDirect calls the Go-backed callable straight from Go via
 // the forward Call path — the round trip Go→(Python callable wrapping Go)→Go.
 func TestReverseBridgeDirect(t *testing.T) {
-	greeter, err := RegisterFunc(func(args []any) any {
+	greeter, err := RegisterFunc(func(args []any, kwargs map[string]any) any {
 		return "hi " + args[0].(string)
 	})
 	if err != nil {
@@ -65,10 +65,36 @@ func TestReverseBridgeDirect(t *testing.T) {
 	}
 }
 
+// TestReverseBridgeKwargs confirms keyword arguments reach the Go callback.
+// Python calls the callable with a kwarg via functools-free direct .CallKw.
+func TestReverseBridgeKwargs(t *testing.T) {
+	fn, err := RegisterFunc(func(args []any, kwargs map[string]any) any {
+		base := args[0].(int64)
+		if step, ok := kwargs["step"].(int64); ok {
+			return base + step
+		}
+		return base
+	})
+	if err != nil {
+		t.Fatalf("RegisterFunc: %v", err)
+	}
+	defer fn.DecRef()
+
+	r, err := fn.CallKw([]any{int64(10)}, map[string]any{"step": int64(5)})
+	if err != nil {
+		t.Fatalf("CallKw: %v", err)
+	}
+	defer r.DecRef()
+	v, _ := r.Go()
+	if v != int64(15) {
+		t.Fatalf("fn(10, step=5) = %v, want 15", v)
+	}
+}
+
 // TestReverseBridgePanic confirms a panicking Go callback surfaces as a
 // Python error rather than crashing the interpreter.
 func TestReverseBridgePanic(t *testing.T) {
-	boom, err := RegisterFunc(func(args []any) any {
+	boom, err := RegisterFunc(func(args []any, kwargs map[string]any) any {
 		panic("boom from go")
 	})
 	if err != nil {

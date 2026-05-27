@@ -19,19 +19,22 @@ package bridge
 #include <Python.h>
 
 // Forward declaration of the Go dispatcher (see //export below).
-extern PyObject* gopyRevDispatch(long id, PyObject* args);
+extern PyObject* gopyRevDispatch(long id, PyObject* args, PyObject* kwargs);
 
 // The trampoline every exposed Go function shares. `self` is the PyLong id
-// bound when the callable was created; `args` is the positional tuple.
-static PyObject* gopy_trampoline(PyObject* self, PyObject* args) {
+// bound when the callable was created; `args` is the positional tuple and
+// `kwargs` the keyword dict (NULL when none were passed).
+static PyObject* gopy_trampoline(PyObject* self, PyObject* args, PyObject* kwargs) {
     long id = PyLong_AsLong(self);
-    return gopyRevDispatch(id, args);
+    return gopyRevDispatch(id, args, kwargs);
 }
 
 // One static method definition is enough — all exposed callbacks share the
-// same trampoline and METH_VARARGS calling convention; the per-function id
-// lives in the bound `self`, not here.
-static PyMethodDef gopy_revdef = {"gopy_callback", gopy_trampoline, METH_VARARGS, "gopy reverse-bridge callback"};
+// same trampoline and METH_VARARGS|METH_KEYWORDS convention; the per-function
+// id lives in the bound `self`, not here. The trampoline is cast to
+// PyCFunction; CPython calls it with the 3-arg keyword signature because the
+// METH_KEYWORDS flag is set.
+static PyMethodDef gopy_revdef = {"gopy_callback", (PyCFunction)gopy_trampoline, METH_VARARGS | METH_KEYWORDS, "gopy reverse-bridge callback"};
 
 static PyObject* gopy_make_callable(long id) {
     PyObject* idObj = PyLong_FromLong(id);
@@ -50,9 +53,10 @@ import (
 )
 
 // revFunc is a registered Go callback. It receives the Python positional args
-// (already converted to native Go values) and returns a value to convert back
-// to Python. Panicking inside is caught and surfaced as a Python exception.
-type revFunc func(args []any) any
+// and keyword args (already converted to native Go values; kwargs is nil when
+// none were passed) and returns a value to convert back to Python. Panicking
+// inside is caught and surfaced as a Python exception.
+type revFunc func(args []any, kwargs map[string]any) any
 
 var (
 	revMu    sync.Mutex
@@ -86,7 +90,7 @@ func RegisterFunc(fn revFunc) (*Object, error) {
 }
 
 //export gopyRevDispatch
-func gopyRevDispatch(id C.long, args *C.PyObject) *C.PyObject {
+func gopyRevDispatch(id C.long, args *C.PyObject, kwargs *C.PyObject) *C.PyObject {
 	// Runs while CPython holds the GIL (we're called synchronously from the
 	// trampoline inside a Python call), so we must not re-acquire it.
 	revMu.Lock()
@@ -114,10 +118,23 @@ func gopyRevDispatch(id C.long, args *C.PyObject) *C.PyObject {
 		goArgs[i] = v
 	}
 
+	// Convert the keyword dict (may be NULL) to a map[string]any.
+	var goKwargs map[string]any
+	if kwargs != nil {
+		kv, err := fromPy(kwargs)
+		if err != nil {
+			setPyError("gopy reverse-bridge: kwarg conversion: " + err.Error())
+			return nil
+		}
+		if m, ok := kv.(map[string]any); ok {
+			goKwargs = m
+		}
+	}
+
 	// Run the callback, turning a Go panic into a Python exception rather
 	// than crashing the interpreter.
 	var result any
-	if err := callSafely(fn, goArgs, &result); err != nil {
+	if err := callSafely(fn, goArgs, goKwargs, &result); err != nil {
 		setPyError("gopy reverse-bridge: " + err.Error())
 		return nil
 	}
@@ -129,14 +146,14 @@ func gopyRevDispatch(id C.long, args *C.PyObject) *C.PyObject {
 	return out
 }
 
-// callSafely runs fn(args), recovering any panic into an error.
-func callSafely(fn revFunc, args []any, result *any) (err error) {
+// callSafely runs fn(args, kwargs), recovering any panic into an error.
+func callSafely(fn revFunc, args []any, kwargs map[string]any, result *any) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = panicError(r)
 		}
 	}()
-	*result = fn(args)
+	*result = fn(args, kwargs)
 	return nil
 }
 
