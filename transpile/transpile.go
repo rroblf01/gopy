@@ -1107,6 +1107,28 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("\n")
 		return nil
 	case *ir.Assign:
+		// Annotated bridge assignment: `n: int = mod.fn(...)` converts the
+		// bridge result to the declared scalar type so it can feed native Go
+		// arithmetic. Takes priority over the bare-*Object path below.
+		if g.isBridgeExpr(x.Value) && x.Ty != nil {
+			if conv := bridgeScalarConv(x.Ty.Kind); conv != "" {
+				g.usedBridge = true
+				g.registerBridgeHelpers()
+				delete(g.bridgeVars, x.Target)
+				g.localVarTypes[x.Target] = x.Ty
+				g.writeIndent()
+				op := ":="
+				if !x.Decl && g.globals[x.Target] == nil {
+					op = "="
+				}
+				g.writef("%s %s %s(", x.Target, op, conv)
+				if err := g.emitBridgeChainValue(x.Value); err != nil {
+					return err
+				}
+				g.writef(")\n")
+				return nil
+			}
+		}
 		// Bridge object assignment: `v = mod.fn(...)` keeps v as a live
 		// *Object (no conversion) so later `v.method()` chains through the
 		// bridge. The var is tracked in bridgeVars; reads in value contexts
@@ -8292,6 +8314,22 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 	},
 }
 
+// bridgeScalarConv returns the typed bridge-conversion helper name for a
+// concrete scalar type kind, or "" if the type isn't a supported scalar.
+func bridgeScalarConv(k ir.TypeKind) string {
+	switch k {
+	case ir.TyInt:
+		return "__bridgeInt"
+	case ir.TyFloat:
+		return "__bridgeFloat"
+	case ir.TyStr:
+		return "__bridgeStr"
+	case ir.TyBool:
+		return "__bridgeBool"
+	}
+	return ""
+}
+
 // isBridgeExpr reports whether an expression evaluates to a live bridge
 // `*Object` (a bridged module reference or a method call chained off one).
 // Used to decide both whether to route a call through the bridge and where
@@ -8606,6 +8644,53 @@ func __bridgeIter(o *Object) []any {
 		__bridgeRaise(err)
 	}
 	return xs
+}
+
+// __bridgeInt / __bridgeFloat / __bridgeStr / __bridgeBool convert a bridge
+// *Object to a concrete Go scalar at an annotated use site, so the value can
+// feed native Go arithmetic / comparison. Each coerces through the converted
+// any value, accepting the compatible numeric widths.
+func __bridgeInt(o *Object) int64 {
+	switch v := __bridgeVal(o).(type) {
+	case int64:
+		return v
+	case float64:
+		return int64(v)
+	case bool:
+		if v {
+			return 1
+		}
+		return 0
+	}
+	__bridgeRaise(NewException("TypeError: bridge value is not an int"))
+	return 0
+}
+
+func __bridgeFloat(o *Object) float64 {
+	switch v := __bridgeVal(o).(type) {
+	case float64:
+		return v
+	case int64:
+		return float64(v)
+	}
+	__bridgeRaise(NewException("TypeError: bridge value is not a float"))
+	return 0
+}
+
+func __bridgeStr(o *Object) string {
+	if s, ok := __bridgeVal(o).(string); ok {
+		return s
+	}
+	__bridgeRaise(NewException("TypeError: bridge value is not a str"))
+	return ""
+}
+
+func __bridgeBool(o *Object) bool {
+	b, err := o.Bool()
+	if err != nil {
+		__bridgeRaise(err)
+	}
+	return b
 }`
 
 func (g *gen) methodCall(m *ir.MethodCall) error {
