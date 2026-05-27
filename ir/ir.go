@@ -178,6 +178,16 @@ type Class struct {
 	// and the GoWeb runtime treats a handler parameter of this type as a JSON
 	// request body to decode + validate.
 	IsPydantic bool
+	// IsBridged marks a class whose base is an attribute of an external module
+	// (e.g. `class Item(models.Model)`) that can't be lowered to a Go struct —
+	// its semantics live in a framework's metaclass machinery. Codegen defines
+	// it in the embedded CPython interpreter (re-exec'ing BridgedSource) and
+	// binds the name to a bridge object, so `Item.objects.filter(...)` etc.
+	// route through the bridge. Requires the bridge to be enabled.
+	IsBridged bool
+	// BridgedSource is the verbatim Python source of an IsBridged class,
+	// captured by the AST dumper, to re-exec in the embedded interpreter.
+	BridgedSource string
 	// DataclassOrder marks @dataclass(order=True). Codegen emits
 	// __lt__ / __le__ / __gt__ / __ge__ comparing the field tuple
 	// lexicographically.

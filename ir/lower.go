@@ -505,6 +505,15 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			if attr == "ABC" || attr == "ABCMeta" || attr == "Protocol" || attr == "Generic" {
 				continue
 			}
+			// A base that's an attribute of an external module (e.g.
+			// `class Item(models.Model)`) carries framework metaclass
+			// semantics gopy can't reproduce as a Go struct. Capture the
+			// verbatim source and mark the class bridged; codegen re-execs it
+			// in the embedded interpreter (requires the bridge). Without the
+			// source we can't reconstruct it, so fall back to the old error.
+			if src := n.Str("_source"); src != "" {
+				return []Decl{&Class{Name: name, IsBridged: true, BridgedSource: src}}, nil
+			}
 			return nil, fmt.Errorf("class %s: complex base expressions not supported", name)
 		}
 		if b.Type() == "Subscript" {

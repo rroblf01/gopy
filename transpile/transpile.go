@@ -86,6 +86,9 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	}
 	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
 	g.buildAliases(m)
+	if opt.EnableBridge || opt.GoWeb {
+		g.bridgeImportSrc = g.buildBridgeImportSrc(m)
+	}
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
 	// for super() dispatch.
@@ -109,6 +112,12 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 		case *ir.Var:
 			g.globals[x.Name] = x.Ty
 		}
+	}
+	// GoWeb (Django): collect routes from `urlpatterns = [path(...), ...]` and
+	// fix up the referenced view functions' signatures (request shim + path
+	// converter types + __webResp return) before they are emitted below.
+	if opt.GoWeb {
+		g.collectDjangoRoutes(m)
 	}
 	// Diamond-inheritance method conflict check. Go's embedding rules will
 	// reject ambiguous selectors at compile time with a cryptic message
@@ -235,6 +244,12 @@ func (g *gen) moduleVar(v *ir.Var) error {
 	if g.opt.GoWeb && v.Value != nil && g.isWebAppCtor(v.Value) {
 		g.usedWeb = true
 		g.webAppVars[v.Name] = true
+		return nil
+	}
+	// GoWeb (Django): the `urlpatterns` list is consumed by collectDjangoRoutes
+	// to build the route table — it has no Go-variable equivalent (its `path()`
+	// entries aren't transpilable), so emit nothing.
+	if g.opt.GoWeb && v.Name == "urlpatterns" {
 		return nil
 	}
 	// Module-level bridged value: `app = framework.Router()` at module scope
@@ -676,6 +691,10 @@ type gen struct {
 	// call is recognized; codegen emits http.ListenAndServe on it. 0 → :8000.
 	webServePort int
 	usedWeb      bool
+	// bridgeImportSrc is a Python import preamble (reconstructed from the
+	// module's imports) prepended when re-exec'ing a bridged class's source in
+	// the embedded interpreter, so its base / field references resolve.
+	bridgeImportSrc string
 }
 
 // bridgeRoute pairs a transpiled top-level function with the bridged
@@ -744,6 +763,23 @@ func (g *gen) class(c *ir.Class) error {
 	prev := g.currentClass
 	g.currentClass = c
 	defer func() { g.currentClass = prev }()
+
+	// Bridged class (`class Item(models.Model)`): its base lives in a framework
+	// whose metaclass machinery can't be a Go struct. Define it in the embedded
+	// CPython interpreter by re-exec'ing its source (with the module's import
+	// preamble), and bind the name to a bridge object so member access routes
+	// through the bridge. Requires the bridge / GoWeb mode.
+	if c.IsBridged {
+		if !g.opt.EnableBridge && !g.opt.GoWeb {
+			return fmt.Errorf("class %s: base is an external framework type; needs -bridge", c.Name)
+		}
+		g.usedBridge = true
+		g.registerBridgeHelpers()
+		g.bridgeVars[c.Name] = true
+		src := g.bridgeImportSrc + "\n" + c.BridgedSource
+		g.writef("var %s *Object = __bridgeDefineClass(%q, %q)\n", c.Name, c.Name, src)
+		return nil
+	}
 
 	// Enum classes get a typed-int alias + one constant per declared
 	// member. No struct, no methods. Member access through
@@ -5379,6 +5415,27 @@ func (g *gen) expr(e ir.Expr) error {
 			g.writef(")")
 			return nil
 		}
+		// GoWeb (Django): `request.method` / `request.body` on the request shim
+		// map to Go methods (so `json.loads(request.body)` works). request.GET
+		// access is handled in methodCall.
+		if g.opt.GoWeb {
+			if rt := g.effectiveType(x.Recv); isWebReqParam(rt) {
+				switch x.Name {
+				case "method":
+					if err := g.expr(x.Recv); err != nil {
+						return err
+					}
+					g.writef(".Method()")
+					return nil
+				case "body":
+					if err := g.expr(x.Recv); err != nil {
+						return err
+					}
+					g.writef(".Body()")
+					return nil
+				}
+			}
+		}
 		// `Class.field` where Class is registered and field is a class
 		// var → rewrite to module-level `Class_field`. Same shape for
 		// `cls.field` inside a @classmethod, where `cls` was already
@@ -5665,6 +5722,24 @@ func (g *gen) expr(e ir.Expr) error {
 				g.writef(")")
 				return nil
 			}
+		}
+		// `v[k]` on a json.loads / json.load result (tagged __JsonAny, a Go
+		// `any`): direct indexing is illegal, so route through a reflective
+		// indexer. Scoped to this tag so concrete-but-untracked values
+		// (os.pipe pairs, fds, …) keep their plain `v[k]`.
+		if g.exprTag(x.Value) == "__JsonAny" {
+			g.helpers["__gopy_index"] = helperGopyIndex
+			g.addImport("reflect")
+			g.writef("__gopy_index(")
+			if err := g.expr(x.Value); err != nil {
+				return err
+			}
+			g.writef(", ")
+			if err := g.boxedExpr(x.Index); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
 		}
 		// Tagged stdlib subscript get — e.g. `sh[k]` on a __Shelf binding
 		// dispatches to .Get(key). Returns `any`.
@@ -6621,6 +6696,44 @@ func (g *gen) fstring(f *ir.FStr) error {
 }
 
 func (g *gen) call(c *ir.Call) error {
+	// GoWeb (Django): JsonResponse(data) / HttpResponse(content) map to the
+	// pure-Go __webResp constructors. A view returning one compiles to a
+	// __webResp-returning function the net/http adapter serializes.
+	if g.opt.GoWeb {
+		if name, ok := c.Func.(*ir.Name); ok && len(c.Args) >= 1 {
+			switch name.N {
+			case "runserver":
+				// gopy's Django serve trigger: `runserver(8000)` → blocking
+				// http.ListenAndServe on the route mux.
+				g.usedWeb = true
+				g.registerWebHelpers()
+				port := int64(8000)
+				if il, ok := c.Args[0].(*ir.IntLit); ok {
+					port = il.V
+				}
+				g.writef("__webServe(\":%d\")", port)
+				return nil
+			case "JsonResponse":
+				g.usedWeb = true
+				g.registerWebHelpers()
+				g.writef("__djangoJSON(")
+				if err := g.boxedExpr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(")")
+				return nil
+			case "HttpResponse":
+				g.usedWeb = true
+				g.registerWebHelpers()
+				g.writef("__djangoHTTP(")
+				if err := g.boxedExpr(c.Args[0]); err != nil {
+					return err
+				}
+				g.writef(")")
+				return nil
+			}
+		}
+	}
 	// Bridged callable: `Y(args)` where Y is a `from X import Y` binding of a
 	// bridged module, or a local var holding a callable *Object.
 	if name, ok := c.Func.(*ir.Name); ok {
@@ -8480,6 +8593,50 @@ func bridgeScalarConv(k ir.TypeKind) string {
 	return ""
 }
 
+// buildBridgeImportSrc reconstructs the module's import statements as Python
+// source, to prepend when re-exec'ing a bridged class in the embedded
+// interpreter. Local sibling modules are skipped (they aren't importable in the
+// embedded CPython); stdlib + third-party imports are kept verbatim.
+func (g *gen) buildBridgeImportSrc(m *ir.Module) string {
+	var b strings.Builder
+	seen := map[string]bool{}
+	emit := func(line string) {
+		if !seen[line] {
+			seen[line] = true
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	for _, imp := range m.Imports {
+		if imp.From == "" {
+			for _, n := range imp.Names {
+				if g.isLocalModule(n.Name) {
+					continue
+				}
+				if n.Alias != "" {
+					emit("import " + n.Name + " as " + n.Alias)
+				} else {
+					emit("import " + n.Name)
+				}
+			}
+			continue
+		}
+		if g.isLocalModule(imp.From) {
+			continue
+		}
+		parts := make([]string, 0, len(imp.Names))
+		for _, n := range imp.Names {
+			if n.Alias != "" {
+				parts = append(parts, n.Name+" as "+n.Alias)
+			} else {
+				parts = append(parts, n.Name)
+			}
+		}
+		emit("from " + imp.From + " import " + strings.Join(parts, ", "))
+	}
+	return b.String()
+}
+
 // isBridgeExpr reports whether an expression evaluates to a live bridge
 // `*Object` (a bridged module reference or a method call chained off one).
 // Used to decide both whether to route a call through the bridge and where
@@ -8818,6 +8975,120 @@ func (g *gen) webDecorators(fn *ir.Func) []webRoute {
 	return out
 }
 
+// djangoParam is one path converter parsed from a Django route pattern.
+type djangoParam struct {
+	name string
+	ty   *ir.Type
+}
+
+// collectDjangoRoutes scans `urlpatterns = [path(route, view), ...]` and, for
+// each entry, registers a route and rewrites the referenced view's signature:
+// the first parameter becomes the request shim (`__webReq`), path-converter
+// parameters get their typed `__webReq`-derived types, and the return type is
+// forced to `__webResp` (Django views have no return annotation, which gopy
+// would otherwise emit as a no-return func).
+func (g *gen) collectDjangoRoutes(m *ir.Module) {
+	for _, d := range m.Decls {
+		v, ok := d.(*ir.Var)
+		if !ok || v.Name != "urlpatterns" || v.Value == nil {
+			continue
+		}
+		ll, ok := v.Value.(*ir.ListLit)
+		if !ok {
+			continue
+		}
+		for _, el := range ll.Elems {
+			call, ok := el.(*ir.Call)
+			if !ok {
+				continue
+			}
+			fnName, ok := call.Func.(*ir.Name)
+			if !ok || (fnName.N != "path" && fnName.N != "re_path") || len(call.Args) < 2 {
+				continue
+			}
+			routeLit, ok := call.Args[0].(*ir.StrLit)
+			if !ok {
+				continue
+			}
+			viewName, ok := call.Args[1].(*ir.Name)
+			if !ok {
+				continue
+			}
+			fn := g.funcs[viewName.N]
+			if fn == nil {
+				continue
+			}
+			pattern, params := parseDjangoRoute(routeLit.V)
+			byName := map[string]*ir.Type{}
+			for _, p := range params {
+				byName[p.name] = p.ty
+			}
+			fn.Ret = &ir.Type{Kind: ir.TyNamed, Name: "__webResp"}
+			for i := range fn.Params {
+				if i == 0 { // request
+					fn.Params[i].Ty = &ir.Type{Kind: ir.TyNamed, Name: "__webReq"}
+					continue
+				}
+				if ty, ok := byName[fn.Params[i].Name]; ok {
+					fn.Params[i].Ty = ty
+				}
+			}
+			g.usedWeb = true
+			// Empty method = match all HTTP methods (Django dispatches every
+			// method to the view, which inspects request.method itself).
+			g.webRoutes = append(g.webRoutes, webRoute{method: "", path: pattern, fn: fn})
+		}
+	}
+}
+
+// parseDjangoRoute converts a Django route ("hello/<str:name>/", "items/<int:pk>/")
+// into a Go 1.22 ServeMux pattern ("/hello/{name}/", "/items/{pk}/") and the
+// ordered path converters. A missing converter defaults to str; `int` maps to
+// TyInt, everything else (str/slug/uuid/path) to TyStr.
+func parseDjangoRoute(route string) (string, []djangoParam) {
+	var params []djangoParam
+	var b strings.Builder
+	if !strings.HasPrefix(route, "/") {
+		b.WriteByte('/')
+	}
+	for i := 0; i < len(route); {
+		if route[i] != '<' {
+			b.WriteByte(route[i])
+			i++
+			continue
+		}
+		j := strings.IndexByte(route[i:], '>')
+		if j < 0 {
+			b.WriteByte(route[i])
+			i++
+			continue
+		}
+		tok := route[i+1 : i+j]
+		conv, name := "str", tok
+		if c := strings.IndexByte(tok, ':'); c >= 0 {
+			conv, name = tok[:c], tok[c+1:]
+		}
+		ty := &ir.Type{Kind: ir.TyStr}
+		if conv == "int" {
+			ty = &ir.Type{Kind: ir.TyInt}
+		}
+		params = append(params, djangoParam{name: name, ty: ty})
+		b.WriteString("{" + name + "}")
+		i += j + 1
+	}
+	return b.String(), params
+}
+
+// isWebReqParam reports whether a parameter is the Django request shim.
+func isWebReqParam(t *ir.Type) bool {
+	return t != nil && t.Kind == ir.TyNamed && t.Name == "__webReq"
+}
+
+// isWebRespRet reports whether a handler returns the Django response value.
+func isWebRespRet(fn *ir.Func) bool {
+	return fn.Ret != nil && fn.Ret.Kind == ir.TyNamed && fn.Ret.Name == "__webResp"
+}
+
 // webServeCall recognizes a server-start call in GoWeb mode — `app.run(port)`
 // / `app.run(port=…)` (Flask) or `uvicorn.run(app, port=…)` — and returns the
 // listen address (":<port>") and true. Defaults to :8000 when no port given.
@@ -8867,8 +9138,22 @@ func (g *gen) emitWebRoutes() error {
 		}
 	}
 	g.writef("func init() {\n")
+	// Component schemas for each distinct Pydantic-model body, emitted once.
+	emittedSchema := map[string]bool{}
 	for _, r := range g.webRoutes {
-		g.writef("__webMux.HandleFunc(%q, __webH_%s)\n", r.method+" "+r.path, r.fn.Name)
+		if m := g.webRouteBodyModel(r); m != "" && !emittedSchema[m] {
+			emittedSchema[m] = true
+			g.emitWebModelSchema(m)
+		}
+	}
+	for _, r := range g.webRoutes {
+		// An empty method (Django) registers the bare path so the mux matches
+		// every HTTP method; a method (FastAPI verb) registers "METHOD /path".
+		pattern := r.path
+		if r.method != "" {
+			pattern = r.method + " " + r.path
+		}
+		g.writef("__webMux.HandleFunc(%q, __webH_%s)\n", pattern, r.fn.Name)
 		g.emitWebRouteInfo(r)
 	}
 	g.writef("__webInitDocs()\n")
@@ -8876,18 +9161,71 @@ func (g *gen) emitWebRoutes() error {
 	return nil
 }
 
+// webRouteBodyModel returns the Pydantic-model name of a route's body param, or
+// "" if the route has no model body.
+func (g *gen) webRouteBodyModel(r webRoute) string {
+	pathParams := webPathParams(r.path)
+	for _, p := range r.fn.Params {
+		if g.isPydanticParam(p.Ty) && !pathParams[p.Name] {
+			return p.Ty.Name
+		}
+	}
+	return ""
+}
+
+// emitWebModelSchema emits `__webSchemas["<Model>"] = {type:object, properties,
+// required}` from the model's fields, so the OpenAPI doc carries a real schema.
+func (g *gen) emitWebModelSchema(modelName string) {
+	cls := g.classes[modelName]
+	fields := cls.InitArgs
+	if len(fields) == 0 {
+		fields = cls.Fields
+	}
+	g.writef("__webSchemas[%q] = map[string]any{\"type\": \"object\", \"properties\": map[string]any{", modelName)
+	first := true
+	for _, f := range fields {
+		if !first {
+			g.writef(", ")
+		}
+		first = false
+		g.writef("%q: map[string]any{\"type\": %q}", f.Name, webOpenAPIType(f.Ty))
+	}
+	g.writef("}, \"required\": []any{")
+	firstReq := true
+	for _, f := range fields {
+		if f.Default != nil {
+			continue
+		}
+		if !firstReq {
+			g.writef(", ")
+		}
+		firstReq = false
+		g.writef("%q", f.Name)
+	}
+	g.writef("}}\n")
+}
+
 // emitWebRouteInfo appends one route's metadata to __webRouteTable so the Go
 // OpenAPI builder can describe it. Path params are required; query params are
-// required only when they lack a default; a bare-dict param marks a body.
+// required only when they lack a default; a bare-dict / model param marks a
+// body (a model param also records the schema name for a `$ref`).
 func (g *gen) emitWebRouteInfo(r webRoute) {
 	pathParams := webPathParams(r.path)
 	hasBody := false
+	bodyModel := ""
 	g.writef("__webRouteTable = append(__webRouteTable, __webRouteInfo{Method: %q, Path: %q, Name: %q, Params: []__webParamInfo{",
 		r.method, r.path, r.fn.Name)
 	first := true
 	for _, p := range r.fn.Params {
+		// The Django request shim isn't an OpenAPI parameter.
+		if isWebReqParam(p.Ty) {
+			continue
+		}
 		if (webBodyParam(p.Ty) || g.isPydanticParam(p.Ty)) && !pathParams[p.Name] {
 			hasBody = true
+			if g.isPydanticParam(p.Ty) {
+				bodyModel = p.Ty.Name
+			}
 			continue
 		}
 		in := "query"
@@ -8902,7 +9240,7 @@ func (g *gen) emitWebRouteInfo(r webRoute) {
 		first = false
 		g.writef("{Name: %q, In: %q, Type: %q, Required: %t}", p.Name, in, webOpenAPIType(p.Ty), required)
 	}
-	g.writef("}, HasBody: %t})\n", hasBody)
+	g.writef("}, HasBody: %t, BodyModel: %q})\n", hasBody, bodyModel)
 }
 
 // emitWebModelDecode decodes the JSON request body into a Pydantic-model Go
@@ -9004,6 +9342,11 @@ func (g *gen) emitWebHandler(r webRoute) error {
 		g.writef("__v := &__webErrs{}\n")
 	}
 	for _, p := range r.fn.Params {
+		// The Django request shim (first view parameter).
+		if isWebReqParam(p.Ty) {
+			g.writef("%s := __webNewReq(r)\n", p.Name)
+			continue
+		}
 		// A Pydantic-model parameter is the JSON request body, decoded field
 		// by field into the Go struct with required/type validation.
 		if g.isPydanticParam(p.Ty) && !pathParams[p.Name] {
@@ -9049,7 +9392,13 @@ func (g *gen) emitWebHandler(r webRoute) error {
 	if needsValidation {
 		g.writef("if __v.respond(w) { return }\n")
 	}
-	g.writef("__webWriteJSON(w, %s(", r.fn.Name)
+	// Django views return a __webResp the adapter serializes directly; FastAPI
+	// handlers return a JSON value.
+	writer := "__webWriteJSON"
+	if isWebRespRet(r.fn) {
+		writer = "__webWriteResp"
+	}
+	g.writef("%s(w, %s(", writer, r.fn.Name)
 	for i, p := range r.fn.Params {
 		if i > 0 {
 			g.writef(", ")
@@ -9113,6 +9462,7 @@ func (g *gen) registerWebHelpers() {
 	g.addImport("strconv")
 	g.addImport("strings")
 	g.addImport("fmt")
+	g.addImport("io")
 	g.helpers["__web_glue"] = goWebGlueSource
 }
 
@@ -9389,6 +9739,51 @@ func bridgeArgConv(t *ir.Type) string {
 // a package ServeMux, typed path/query parameter parsers, and a JSON response
 // writer that normalizes Python-shaped maps (map[any]any) into string-keyed
 // JSON. No CPython is involved.
+// helperGopyIndex reflectively indexes a value whose static Go type is `any` —
+// specifically a json.loads / json.load result (tagged __JsonAny) — by key or
+// integer index, mirroring Python's `v[k]`. Maps index by key (converting the
+// key to the map's key type when needed); slices/arrays/strings index by
+// integer with negative-index wraparound. Returns nil (None) when absent.
+const helperGopyIndex = `func __gopy_index(v, k any) any {
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map:
+		kv := reflect.ValueOf(k)
+		if kt := rv.Type().Key(); kv.IsValid() && kv.Type() != kt && kv.Type().ConvertibleTo(kt) {
+			kv = kv.Convert(kt)
+		}
+		e := rv.MapIndex(kv)
+		if e.IsValid() {
+			return e.Interface()
+		}
+		return nil
+	case reflect.Slice, reflect.Array, reflect.String:
+		var i int
+		switch n := k.(type) {
+		case int:
+			i = n
+		case int64:
+			i = int(n)
+		case float64:
+			i = int(n)
+		default:
+			return nil
+		}
+		L := rv.Len()
+		if i < 0 {
+			i += L
+		}
+		if i < 0 || i >= L {
+			return nil
+		}
+		if rv.Kind() == reflect.String {
+			return string([]rune(rv.String())[i])
+		}
+		return rv.Index(i).Interface()
+	}
+	return nil
+}`
+
 const goWebGlueSource = `var __webMux = http.NewServeMux()
 
 // __webServe starts the HTTP server on addr (":<port>"), blocking. Panics on a
@@ -9611,9 +10006,14 @@ type __webRouteInfo struct {
 	Method, Path, Name string
 	Params             []__webParamInfo
 	HasBody            bool
+	BodyModel          string // model name when the body is a Pydantic model
 }
 
 var __webRouteTable []__webRouteInfo
+
+// __webSchemas holds OpenAPI component schemas for Pydantic-model bodies,
+// keyed by model name (populated in the generated init()).
+var __webSchemas = map[string]any{}
 
 // __webOpenAPISpec builds an OpenAPI 3.1 document from the collected route
 // table — the same data FastAPI derives from handler signatures, here produced
@@ -9636,9 +10036,13 @@ func __webOpenAPISpec() map[string]any {
 			op["parameters"] = params
 		}
 		if rt.HasBody {
+			schema := map[string]any{"type": "object"}
+			if rt.BodyModel != "" {
+				schema = map[string]any{"$ref": "#/components/schemas/" + rt.BodyModel}
+			}
 			op["requestBody"] = map[string]any{
 				"required": true,
-				"content":  map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "object"}}},
+				"content":  map[string]any{"application/json": map[string]any{"schema": schema}},
 			}
 		}
 		item, ok := paths[rt.Path].(map[string]any)
@@ -9646,13 +10050,21 @@ func __webOpenAPISpec() map[string]any {
 			item = map[string]any{}
 			paths[rt.Path] = item
 		}
-		item[strings.ToLower(rt.Method)] = op
+		method := strings.ToLower(rt.Method)
+		if method == "" {
+			method = "get" // Django all-method route: document as GET
+		}
+		item[method] = op
 	}
-	return map[string]any{
+	doc := map[string]any{
 		"openapi": "3.1.0",
 		"info":    map[string]any{"title": "gopy", "version": "0.1.0"},
 		"paths":   paths,
 	}
+	if len(__webSchemas) > 0 {
+		doc["components"] = map[string]any{"schemas": __webSchemas}
+	}
+	return doc
 }
 
 const __webDocsHTML = ` + "`" + `<!DOCTYPE html><html><head><meta charset="utf-8"><title>docs</title>
@@ -9672,6 +10084,64 @@ func __webInitDocs() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(__webDocsHTML))
 	})
+}
+
+// --- Django front-end (request / response model) ----------------------------
+//
+// Django views take a request and return a JsonResponse / HttpResponse. These
+// map onto small Go value types: a view compiles to a func taking __webReq plus
+// path args and returning __webResp, which the net/http adapter writes.
+
+type __webResp struct {
+	body   any
+	status int
+	ctype  string
+}
+
+// JsonResponse / HttpResponse equivalents — gopy maps the Django constructors
+// to these in GoWeb mode.
+func __djangoJSON(data any) __webResp {
+	return __webResp{body: data, status: 200, ctype: "application/json"}
+}
+
+func __djangoHTTP(content any) __webResp {
+	return __webResp{body: content, status: 200, ctype: "text/html; charset=utf-8"}
+}
+
+// __webReq is the minimal request shim handed to a Django view. Query() reads a
+// query-string value (Django's request.GET.get).
+type __webReq struct{ r *http.Request }
+
+func __webNewReq(r *http.Request) __webReq { return __webReq{r} }
+
+func (q __webReq) Query(name string) string { return q.r.URL.Query().Get(name) }
+
+func (q __webReq) Method() string { return q.r.Method }
+
+// Body returns the raw request body as a string (Django's request.body is
+// bytes; a string round-trips through json.loads the same way).
+func (q __webReq) Body() string {
+	b, _ := io.ReadAll(q.r.Body)
+	return string(b)
+}
+
+// __webWriteResp serializes a Django view's __webResp to the wire.
+func __webWriteResp(w http.ResponseWriter, resp __webResp) {
+	w.Header().Set("Content-Type", resp.ctype)
+	w.WriteHeader(resp.status)
+	if resp.ctype == "application/json" {
+		b, _ := json.Marshal(__webNormalize(resp.body))
+		w.Write(b)
+		return
+	}
+	switch v := resp.body.(type) {
+	case string:
+		w.Write([]byte(v))
+	case []byte:
+		w.Write(v)
+	default:
+		fmt.Fprint(w, v)
+	}
 }`
 
 const bridgeGlueSource = `var __bridgeMods = map[string]*Object{}
@@ -9680,6 +10150,32 @@ var __bridgeMu sync.Mutex
 // __bridgeRaise turns a bridge error into a gopy Exception (message
 // "ExcType: detail") so Python-side failures are catchable by try/except.
 func __bridgeRaise(err error) { panic(NewException(err.Error())) }
+
+// __bridgeDefineClass execs a class definition (with its import preamble) in a
+// fresh namespace in the embedded interpreter and returns the resulting class
+// object. Used for classes whose framework base (e.g. a Django models.Model)
+// can't be a Go struct — they live in CPython and are accessed via the bridge.
+func __bridgeDefineClass(name, src string) *Object {
+	builtins, err := Import("builtins")
+	if err != nil {
+		__bridgeRaise(err)
+	}
+	defer builtins.DecRef()
+	ns, err := builtins.CallMethod("dict")
+	if err != nil {
+		__bridgeRaise(err)
+	}
+	if _, err := builtins.CallMethod("exec", src, ns); err != nil {
+		ns.DecRef()
+		__bridgeRaise(err)
+	}
+	cls, err := ns.GetItem(name)
+	ns.DecRef()
+	if err != nil {
+		__bridgeRaise(err)
+	}
+	return cls
+}
 
 // __bridgeModule lazily imports and caches a Python module by name, raising
 // if the import fails (a missing third-party library is a hard error).
@@ -9855,6 +10351,23 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 		g.registerWebHelpers()
 		g.writef("__webServe(%q)", addr)
 		return nil
+	}
+	// GoWeb (Django): `request.GET.get("q")` reads a query value through the
+	// request shim. (request.GET[k] subscript and POST/body are future work.)
+	if g.opt.GoWeb && m.Method == "get" && len(m.Args) >= 1 {
+		if attr, ok := m.Recv.(*ir.Attribute); ok && attr.Name == "GET" {
+			if rt := g.effectiveType(attr.Recv); isWebReqParam(rt) {
+				if err := g.expr(attr.Recv); err != nil {
+					return err
+				}
+				g.writef(".Query(")
+				if err := g.expr(m.Args[0]); err != nil {
+					return err
+				}
+				g.writef(")")
+				return nil
+			}
+		}
 	}
 	// Bridged module call: `mod.fn(args)` where `mod` was a bare import of a
 	// non-stdlib, non-local module. Route through the embedded CPython

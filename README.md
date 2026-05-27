@@ -6,7 +6,7 @@ Python → Go transpiler written in Go. Reads a typed Python source file (or dir
 
 Early but real — a typed subset of Python sufficient for self-contained programs and small multi-file projects, exercised against a golden-file test suite that compares stdout of the original Python source (run under CPython) with stdout of the transpiled Go binary.
 
-The transpiler is intentionally **library-agnostic**: no code in `ir/`, `transpile/`, or the bundled stdlib shims is dedicated to any single framework. Third-party libraries are supported by transpiling their own Python source alongside the application — so the library must itself be written in the supported subset (no metaclasses, no `__getattr__`, no `setattr` magic).
+The default transpiler is intentionally **library-agnostic**: nothing in the core fast path is dedicated to a single library. Third-party code is supported by transpiling its own Python source alongside the application — so the library must itself be written in the supported subset (no metaclasses, no `__getattr__`, no `setattr` magic). Two opt-in modes extend this: `-bridge` runs unsupported libraries in an embedded CPython, and `-goweb` recognizes FastAPI / Django app shapes and lowers them onto a pure-Go `net/http` server (the only framework-aware codegen, gated behind the flag). Both are described under **Usage** below.
 
 **Detailed feature inventory** (what's supported / not yet supported) lives in [STATUS.md](STATUS.md) — moved out of the README to keep this file scannable.
 
@@ -61,6 +61,24 @@ go run ./cmd/gopy build -o fib tests/fixtures/fib.py
 ```
 
 The `build` subcommand transpiles the input into a temp directory, drops a minimal `go.mod`, and runs `go build` to produce a native executable. Pass `-keep` to retain the intermediate Go source dir for inspection.
+
+### Use a third-party library via the embedded-CPython bridge (`-bridge`)
+
+```bash
+go run ./cmd/gopy build -bridge -o app app.py
+PYTHONPATH=.venv/lib/python3.X/site-packages ./app
+```
+
+When the program imports a library gopy can't transpile (e.g. a C/Rust extension like `pydantic-core`, or any pure-Python package outside the supported subset), `-bridge` links an **embedded CPython** into the binary and routes calls to that module through it — forward calls (Go→Python), reverse callbacks (Python→Go), and Go-function/class introspection so frameworks can read real signatures. Maximally compatible, at the cost of a `libpython` dependency and higher RAM (the interpreter is resident). See the "Embedded-CPython bridge" section of [STATUS.md](STATUS.md).
+
+### Transpile a FastAPI / Django app to a pure-Go server (`-goweb`)
+
+```bash
+go run ./cmd/gopy build -goweb -o app app.py   # CGO disabled, static binary
+./app                                           # serves on the port the app runs
+```
+
+`-goweb` maps a recognized web framework onto a **pure-Go `net/http` server** — no interpreter. A FastAPI app (`app = FastAPI()`, `@app.get("/items/{id}")` handlers, Pydantic models) or a Django app (`urlpatterns = [path(...)]`, `JsonResponse`/`HttpResponse` views) both compile to the same route table + handlers, with path/query params, request-body decoding, FastAPI-shaped 422 validation, and a generated `/openapi.json` + `/docs` (Swagger UI). On a served route this runs ~60× faster at ~3.7× less RAM than the same app under CPython/uvicorn — see [BENCHMARK.md](BENCHMARK.md). Framework coverage is a growing subset; details + gaps in [STATUS.md](STATUS.md).
 
 ### Watch and rebuild on change
 

@@ -262,8 +262,8 @@ var stdlibModules = map[string]stdlibModule{
 	"json": {
 		Funcs: map[string]stdlibFunc{
 			"dumps":      {GoFunc: "__gopy_json_dumps", GoImport: "encoding/json", Helper: helperJSONDumps, HelperImports: []string{"strings"}},
-			"loads":      {GoFunc: "__gopy_json_loads", GoImport: "encoding/json", Helper: helperJSONLoads},
-			"load":       {GoFunc: "__gopy_json_load", GoImport: "encoding/json", Helper: helperJSONLoad, HelperImports: []string{"io"}},
+			"loads":      {GoFunc: "__gopy_json_loads", GoImport: "encoding/json", Helper: helperJSONLoads, RetTag: "__JsonAny"},
+			"load":       {GoFunc: "__gopy_json_load", GoImport: "encoding/json", Helper: helperJSONLoad, HelperImports: []string{"io"}, RetTag: "__JsonAny"},
 			"dump":       {GoFunc: "__gopy_json_dump", GoImport: "encoding/json", Helper: helperJSONDump, HelperImports: []string{"strings"}},
 			"JSONEncoder":      {GoFunc: "__gopy_json_encoder_unused"},
 			"JSONDecoder":      {GoFunc: "__gopy_json_decoder_unused"},

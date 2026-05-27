@@ -169,19 +169,75 @@ and any failures produce a FastAPI-shaped 422 before the handler runs (the
 instance is passed by pointer, matching gopy's class-param ABI). Verified pure-Go:
 valid body → `{"name":"widget","price":9.99,"qty":1}` (default `qty=1` applied);
 missing required `price` → `422 {"type":"missing","loc":["body","price"],"msg":"Field required"}`;
-wrong type → `422 {"type":"float_parsing",...}`. OpenAPI marks the route's
-`requestBody`.
+wrong type → `422 {"type":"float_parsing",...}`. The model is described in
+OpenAPI as a real component schema — `components/schemas/Item` with per-field
+typed properties + a `required` list (excluding defaulted fields), and the
+route's `requestBody` is a `$ref` to it — so `/docs` (Swagger UI) renders the
+model's fields, all generated in Go.
 
-The route table is deliberately framework-neutral so other front-ends feed the
-same `net/http` codegen. **Next:** richer model OpenAPI (component schema with
-per-field properties + `$ref`, vs the current generic object); nested-model /
-list fields in body decode (scalars handled today); middleware; mixed int/float
-arithmetic (gopy doesn't auto-promote, which a model handler like `price * qty`
-hits); and a **Django front-end** (recognize `urlpatterns` / `path(...)` + view
-functions, mapping onto the same route table) — the user's stated longer-term
-target. Heavy C/Rust extensions (pydantic-core validation, numpy) can't be
+**Django front-end — landed (MVP), feeding the same route table.** Proving the
+framework-agnostic design: a Django-style app (`from django.urls import path`,
+`urlpatterns = [path("items/<int:pk>/", view), ...]`, views returning
+`JsonResponse` / `HttpResponse`) now transpiles to the **same pure-Go `net/http`
+server** as the FastAPI front-end. A pre-pass (`collectDjangoRoutes`) reads
+`urlpatterns`, converts each Django route + converter (`<int:pk>` → `{pk}`,
+typed) into a `webRoute`, and rewrites the referenced view's signature in place:
+first param → request shim (`__webReq`), converter params → their Go types, and
+the (un-annotated) return → `__webResp` — since gopy would otherwise emit a
+no-return func. `JsonResponse(d)` / `HttpResponse(s)` map to Go `__webResp`
+constructors the adapter serializes; `runserver(port)` starts the server.
+Verified against real CPython Django (`django==6.0.5`, `settings.configure` +
+test `Client`): `/` → `home`, `/hello/ana/` → `{"hello":"ana"}`, `/items/42/` →
+`{"id":42,"ok":true}` all match byte-for-byte (modulo JSON whitespace). Known MVP
+gap: a bad `<int:>` segment (`/items/abc/`) returns 422 in gopy (pattern matches,
+then validates) vs Django's 404 (converter regex refuses it at the router).
+
+Django routes register method-agnostically (the bare path pattern matches every
+HTTP method, mirroring Django's dispatch-to-view model), and the request shim
+exposes `request.method` (dispatch attribute), `request.GET.get(name)` (query
+read), and `request.body` (raw body string). A full JSON-body view works:
+`data = json.loads(request.body); return JsonResponse({"got": data["name"]})` →
+`POST {"name":"ana"}` yields `{"got":"ana"}`. Verified: a view branching on
+`request.method == "POST"` returns the create vs list branch under `GET`/`POST`
+to the same path; `request.GET.get("q")` reads `?q=…`. (Absent query → `""`
+rather than Python's `None` — a documented MVP gap; `request.GET[k]` subscript
+and `request.POST` form access are future work.)
+
+This needed a general (non-web) fix: **subscripting a `json.loads` / `json.load`
+result**. Those return Go `any`, so `data[k]` was illegal Go; the results now
+carry a `__JsonAny` tag and their subscripts route through a small reflective
+indexer (`__gopy_index`) handling map keys + integer indices. Scoped to that tag
+so concrete-but-untracked values (os.pipe pairs, fds) keep plain `v[k]`; full
+suite stays green. (Separate known gap: `encoding/json` parses every JSON number
+as float64, so `json.loads('{"n":1}')["n"]` is `1.0`, not Python's `1`.)
+
+The route table is deliberately framework-neutral so both front-ends share it.
+**Next:** richer request shim (`request.POST` / headers); converter-accurate
+Django routing (404 vs 422 on a bad `<int:>` segment); nested-model / list
+fields in model body decode (scalars today); middleware; json.loads int-vs-float
+fidelity; and mixed int/float arithmetic (gopy doesn't auto-promote, which a
+handler like `price * qty` hits). Heavy C/Rust extensions (pydantic-core validation, numpy) can't be
 "un-Pythoned" from their wheels (they're built against the CPython C-API); those
 stay on the bridge or bind their underlying native crate/lib directly.
+
+**Hybrid Django (web in Go, ORM via bridge) — foundation landed: bridged classes.**
+The Django ORM (querysets, the SQL compiler, migrations) is metaclass/descriptor
+machinery that can't be a Go struct, so the chosen path is hybrid: routing/views
+in pure Go, the ORM in embedded CPython. The enabling primitive is **bridged
+classes** — a class whose base is an external framework type (`class
+Item(models.Model)`) can't lower to a Go struct, so the AST dumper now captures
+its verbatim source (`ast.get_source_segment`), `ir.Class.IsBridged` flags it,
+and codegen emits `var Item *Object = __bridgeDefineClass("Item", <imports +
+source>)` — re-exec'ing the class in the embedded interpreter and binding the
+name to a bridge object, so `Item(...)` / `Item.objects.filter(...)` route
+through the bridge. Proven end-to-end: `class Child(baselib.Base)` defines itself
+in CPython and `Child(7).shout()` → `HI 7`, matching CPython. **Next for a real
+Django model:** Django requires `settings.configure()` + `django.setup()` (and a
+migration / `schema_editor`) to run in the embedded interpreter *before* the
+model class execs — but the class currently execs at package-init (var
+initializer) while that setup sits in `main()`, so the ordering has to be
+sequenced (run app setup, then define models, then serve). That sequencing is
+the next piece.
 
 ## Supported
 

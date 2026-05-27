@@ -5,15 +5,23 @@ import json
 import sys
 
 
-def node_to_dict(node):
+def node_to_dict(node, src=None):
     if isinstance(node, ast.AST):
         result = {"_type": type(node).__name__}
         for field, value in ast.iter_fields(node):
-            result[field] = node_to_dict(value)
+            result[field] = node_to_dict(value, src)
         if hasattr(node, "lineno"):
             result["lineno"] = node.lineno
         if hasattr(node, "col_offset"):
             result["col_offset"] = node.col_offset
+        # Attach the verbatim source of a class definition so the transpiler
+        # can re-exec it in the embedded CPython interpreter when the class
+        # inherits a bridged base (e.g. a Django `models.Model`) and so can't
+        # be lowered to a Go struct.
+        if isinstance(node, ast.ClassDef) and src is not None:
+            seg = ast.get_source_segment(src, node)
+            if seg is not None:
+                result["_source"] = seg
         # Annotate Constant nodes with their Python primitive type so the
         # Go decoder can distinguish `1` (int) from `1.0` (float) — both
         # land as JSON numbers otherwise.
@@ -48,7 +56,7 @@ def node_to_dict(node):
                 result["value"] = {"real": v.real, "imag": v.imag}
         return result
     if isinstance(node, list):
-        return [node_to_dict(x) for x in node]
+        return [node_to_dict(x, src) for x in node]
     if isinstance(node, (str, int, float, bool)) or node is None:
         return node
     if isinstance(node, bytes):
@@ -65,7 +73,7 @@ def main():
         with open(filename, "r", encoding="utf-8") as f:
             src = f.read()
     tree = ast.parse(src, filename=filename)
-    json.dump(node_to_dict(tree), sys.stdout)
+    json.dump(node_to_dict(tree, src), sys.stdout)
 
 
 if __name__ == "__main__":
