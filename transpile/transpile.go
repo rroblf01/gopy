@@ -75,7 +75,7 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}}
 	g.buildAliases(m)
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
@@ -273,6 +273,18 @@ func (g *gen) buildAliases(m *ir.Module) {
 		segs := splitDotted(imp.From)
 		mod, ok := stdlibModules[segs[0]]
 		if !ok {
+			// `from X import Y` where X is a bridged (non-stdlib, non-local)
+			// module: bind each Y to the module attribute it names so a bare
+			// `Y(...)` / `Y` routes through the bridge.
+			if g.opt.EnableBridge && !g.isLocalModule(imp.From) {
+				for _, n := range imp.Names {
+					local := n.Alias
+					if local == "" {
+						local = n.Name
+					}
+					g.bridgedFrom[local] = bridgeRef{module: imp.From, attr: n.Name}
+				}
+			}
 			continue
 		}
 		for _, p := range segs[1:] {
@@ -529,6 +541,13 @@ func assembleSource(pkg string, imports []string, body string) string {
 	return b.String()
 }
 
+// bridgeRef names a module attribute reached through the embedded-CPython
+// bridge — the (module, attribute) pair behind a `from X import Y` binding.
+type bridgeRef struct {
+	module string
+	attr   string
+}
+
 type gen struct {
 	opt            Options
 	body           strings.Builder
@@ -564,6 +583,14 @@ type gen struct {
 	// usedBridge is set once any bridged call is actually emitted, so the
 	// build driver knows to vendor the bridge source and enable CGO.
 	usedBridge bool
+	// bridgeVars tracks local variable names currently bound to a live
+	// bridge `*Object` (assigned from a bridged call without conversion), so
+	// `x.method()` on them keeps chaining through the bridge.
+	bridgeVars map[string]bool
+	// bridgedFrom maps a local name introduced by `from X import Y` (where X
+	// is a bridged module) to the module + attribute it resolves to, so a
+	// bare `Y(...)` call or `Y` reference routes through the bridge.
+	bridgedFrom map[string]bridgeRef
 	// varTypes records the runtime tag of a local variable when it was
 	// assigned the result of a typed stdlib call (Match, Path, Timedelta).
 	// Codegen consults this for method dispatch (e.g. m.group()) and for
@@ -1080,6 +1107,29 @@ func (g *gen) stmt(s ir.Stmt) error {
 		g.writef("\n")
 		return nil
 	case *ir.Assign:
+		// Bridge object assignment: `v = mod.fn(...)` keeps v as a live
+		// *Object (no conversion) so later `v.method()` chains through the
+		// bridge. The var is tracked in bridgeVars; reads in value contexts
+		// convert via __bridgeVal (see the Name expr case).
+		if g.isBridgeExpr(x.Value) {
+			if _, ok := x.Value.(*ir.MethodCall); ok {
+				g.usedBridge = true
+				g.registerBridgeHelpers()
+				g.bridgeVars[x.Target] = true
+				delete(g.localVarTypes, x.Target)
+				g.writeIndent()
+				op := ":="
+				if !x.Decl && g.globals[x.Target] == nil {
+					op = "="
+				}
+				g.writef("%s %s ", x.Target, op)
+				if err := g.emitBridgeChainValue(x.Value); err != nil {
+					return err
+				}
+				g.writef("\n")
+				return nil
+			}
+		}
 		// `defaultdict(factory)` at the RHS of a typed assignment: the
 		// factory is ignored and we emit a plain empty map of the
 		// declared (K, V). Untyped assignments can't infer K, so they
@@ -4459,6 +4509,27 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.StrLit:
 		g.writef("%s", strconv.Quote(x.V))
 	case *ir.Name:
+		// A local bound to a live bridge *Object, used in a value context
+		// (not as a chain receiver — those read the var directly). Convert
+		// it to a native Go value at the use site.
+		if g.bridgeVars[x.N] {
+			g.usedBridge = true
+			g.registerBridgeHelpers()
+			g.writef("__bridgeVal(%s)", x.N)
+			return nil
+		}
+		// A `from X import Y` binding used as a bare value (not called):
+		// resolve the module attribute and convert it.
+		if _, ok := g.bridgedFrom[x.N]; ok {
+			g.usedBridge = true
+			g.registerBridgeHelpers()
+			g.writef("__bridgeVal(")
+			if err := g.emitBridgeChainValue(x); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
+		}
 		// Bare type/class names appearing in value position (e.g.
 		// `isclass(C)`, `assert_type(x, int)`) — Go has no first-class
 		// type values, so emit a string sentinel instead. The receiving
@@ -5085,6 +5156,20 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.MethodCall:
 		return g.methodCall(x)
 	case *ir.Attribute:
+		// Bridged attribute read in value context: `mod.CONSTANT` /
+		// `obj.field` on a bridged receiver. Fetch via .Attr and convert to
+		// a native Go value. (Chain receivers read raw *Object instead —
+		// see emitBridgeChainValue.)
+		if g.isBridgeExpr(x.Recv) {
+			g.usedBridge = true
+			g.registerBridgeHelpers()
+			g.writef("__bridgeVal(")
+			if err := g.emitBridgeChainValue(x); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
+		}
 		// `Class.field` where Class is registered and field is a class
 		// var → rewrite to module-level `Class_field`. Same shape for
 		// `cls.field` inside a @classmethod, where `cls` was already
@@ -6328,6 +6413,13 @@ func (g *gen) fstring(f *ir.FStr) error {
 }
 
 func (g *gen) call(c *ir.Call) error {
+	// Bridged callable: `Y(args)` where Y is a `from X import Y` binding of a
+	// bridged module, or a local var holding a callable *Object.
+	if name, ok := c.Func.(*ir.Name); ok {
+		if _, isFrom := g.bridgedFrom[name.N]; isFrom || g.bridgeVars[name.N] {
+			return g.emitBridgeFromCall(c)
+		}
+	}
 	if name, ok := c.Func.(*ir.Name); ok {
 		// Alias from `from X import Y` — e.g. `getenv("PATH")` after
 		// `from os import getenv` resolves to os.Getenv.
@@ -8164,18 +8256,156 @@ var taggedAttrs = map[string]map[string]taggedAttrInfo{
 	},
 }
 
-// emitBridgeCall renders a leaf call on a bridged module — `mod.fn(args)` /
-// `mod.fn(args, kw=...)` — as a call through the embedded CPython bridge,
-// converting the result to a native Go value at the boundary. Args are boxed
-// to their canonical Go widths so they cross the `...any` API correctly.
-func (g *gen) emitBridgeCall(mod, method string, args []ir.Expr, kws []ir.Keyword) error {
+// isBridgeExpr reports whether an expression evaluates to a live bridge
+// `*Object` (a bridged module reference or a method call chained off one).
+// Used to decide both whether to route a call through the bridge and where
+// the surrounding `__bridgeGo` conversion belongs.
+func (g *gen) isBridgeExpr(e ir.Expr) bool {
+	switch x := e.(type) {
+	case *ir.Name:
+		if _, ok := g.bridged[x.N]; ok {
+			return true
+		}
+		if _, ok := g.bridgedFrom[x.N]; ok {
+			return true
+		}
+		return g.bridgeVars[x.N]
+	case *ir.MethodCall:
+		return g.isBridgeExpr(x.Recv)
+	case *ir.Attribute:
+		return g.isBridgeExpr(x.Recv)
+	case *ir.Call:
+		return g.isBridgeExpr(x.Func)
+	}
+	return false
+}
+
+// emitBridgeCall renders a (possibly chained) call on a bridged module —
+// `mod.fn(a)` or `mod.Cls(a).method(b)` — through the embedded CPython
+// bridge. The receiver chain produces a single `*Object`; the final method
+// call returns `(*Object, error)`, which this outermost site feeds to
+// `__bridgeGo` to convert the result to a native Go value.
+func (g *gen) emitBridgeCall(m *ir.MethodCall) error {
 	g.usedBridge = true
 	g.registerBridgeHelpers()
-	g.writef("__bridgeGo(__bridgeModule(%q).", mod)
-	if len(kws) == 0 {
-		g.writef("CallMethod(%q", method)
-		for _, a := range args {
-			g.writef(", ")
+	g.writef("__bridgeGo(")
+	if err := g.emitBridgeChainValue(m.Recv); err != nil {
+		return err
+	}
+	if err := g.emitBridgeMethodArgs(m.Method, m.Args, m.Keywords); err != nil {
+		return err
+	}
+	g.writef(")")
+	return nil
+}
+
+// emitBridgeChainValue emits an expression yielding a single `*Object` value
+// (suitable as a method receiver): a bridged module reference becomes
+// `__bridgeModule("mod")`, and each chained call wraps in `__bridgeMust`
+// (which panics on a Python error and yields the lone `*Object`) so further
+// `.CallMethod` links can hang off it.
+func (g *gen) emitBridgeChainValue(e ir.Expr) error {
+	switch x := e.(type) {
+	case *ir.Name:
+		if mod, ok := g.bridged[x.N]; ok {
+			g.writef("__bridgeModule(%q)", mod)
+			return nil
+		}
+		// `from X import Y` binding: resolve to the module attribute object.
+		if ref, ok := g.bridgedFrom[x.N]; ok {
+			g.writef("__bridgeMust(__bridgeModule(%q).Attr(%q))", ref.module, ref.attr)
+			return nil
+		}
+		// A local var already holding a *Object — emit it directly.
+		if g.bridgeVars[x.N] {
+			g.writef("%s", x.N)
+			return nil
+		}
+		return fmt.Errorf("bridge: %q is not a bridged value", x.N)
+	case *ir.MethodCall:
+		g.writef("__bridgeMust(")
+		if err := g.emitBridgeChainValue(x.Recv); err != nil {
+			return err
+		}
+		if err := g.emitBridgeMethodArgs(x.Method, x.Args, x.Keywords); err != nil {
+			return err
+		}
+		g.writef(")")
+		return nil
+	case *ir.Attribute:
+		// `mod.attr` / `obj.attr` on a bridged receiver — fetch via .Attr,
+		// wrapped in __bridgeMust so it stays a single *Object for chaining.
+		g.writef("__bridgeMust(")
+		if err := g.emitBridgeChainValue(x.Recv); err != nil {
+			return err
+		}
+		g.writef(".Attr(%q))", x.Name)
+		return nil
+	case *ir.Call:
+		// `Y(args)` where Y is a bridged callable, appearing as a chain
+		// receiver — invoke and keep the lone *Object via __bridgeMust.
+		g.writef("__bridgeMust(")
+		if err := g.emitBridgeChainValue(x.Func); err != nil {
+			return err
+		}
+		if len(x.Keywords) == 0 {
+			g.writef(".Call(")
+			for i, a := range x.Args {
+				if i > 0 {
+					g.writef(", ")
+				}
+				if err := g.boxedExpr(a); err != nil {
+					return err
+				}
+			}
+			g.writef("))")
+			return nil
+		}
+		g.writef(".CallKw([]any{")
+		for i, a := range x.Args {
+			if i > 0 {
+				g.writef(", ")
+			}
+			if err := g.boxedExpr(a); err != nil {
+				return err
+			}
+		}
+		g.writef("}, map[string]any{")
+		for i, kw := range x.Keywords {
+			if kw.Name == "**" {
+				return fmt.Errorf("bridge: **kwargs splat not yet supported on bridged calls")
+			}
+			if i > 0 {
+				g.writef(", ")
+			}
+			g.writef("%q: ", kw.Name)
+			if err := g.boxedExpr(kw.Value); err != nil {
+				return err
+			}
+		}
+		g.writef("}))")
+		return nil
+	}
+	return fmt.Errorf("bridge: cannot emit non-bridge expression %T in chain", e)
+}
+
+// emitBridgeFromCall renders `Y(args)` where Y is a `from X import Y` binding
+// (or a local var holding a callable *Object): the callable object is
+// resolved via the chain, then invoked with `.Call` / `.CallKw`, and the
+// result converted to a native Go value.
+func (g *gen) emitBridgeFromCall(c *ir.Call) error {
+	g.usedBridge = true
+	g.registerBridgeHelpers()
+	g.writef("__bridgeGo(")
+	if err := g.emitBridgeChainValue(c.Func); err != nil {
+		return err
+	}
+	if len(c.Keywords) == 0 {
+		g.writef(".Call(")
+		for i, a := range c.Args {
+			if i > 0 {
+				g.writef(", ")
+			}
 			if err := g.boxedExpr(a); err != nil {
 				return err
 			}
@@ -8183,7 +8413,48 @@ func (g *gen) emitBridgeCall(mod, method string, args []ir.Expr, kws []ir.Keywor
 		g.writef("))")
 		return nil
 	}
-	g.writef("CallMethodKw(%q, []any{", method)
+	g.writef(".CallKw([]any{")
+	for i, a := range c.Args {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if err := g.boxedExpr(a); err != nil {
+			return err
+		}
+	}
+	g.writef("}, map[string]any{")
+	for i, kw := range c.Keywords {
+		if kw.Name == "**" {
+			return fmt.Errorf("bridge: **kwargs splat not yet supported on bridged calls")
+		}
+		if i > 0 {
+			g.writef(", ")
+		}
+		g.writef("%q: ", kw.Name)
+		if err := g.boxedExpr(kw.Value); err != nil {
+			return err
+		}
+	}
+	g.writef("}))")
+	return nil
+}
+
+// emitBridgeMethodArgs writes the `.CallMethod(...)` / `.CallMethodKw(...)`
+// suffix for one link in a bridge chain. Args are boxed to their canonical
+// Go widths so they cross the `...any` API correctly.
+func (g *gen) emitBridgeMethodArgs(method string, args []ir.Expr, kws []ir.Keyword) error {
+	if len(kws) == 0 {
+		g.writef(".CallMethod(%q", method)
+		for _, a := range args {
+			g.writef(", ")
+			if err := g.boxedExpr(a); err != nil {
+				return err
+			}
+		}
+		g.writef(")")
+		return nil
+	}
+	g.writef(".CallMethodKw(%q, []any{", method)
 	for i, a := range args {
 		if i > 0 {
 			g.writef(", ")
@@ -8205,8 +8476,7 @@ func (g *gen) emitBridgeCall(mod, method string, args []ir.Expr, kws []ir.Keywor
 			return err
 		}
 	}
-	// Close map literal, CallMethodKw(, and the wrapping __bridgeGo(.
-	g.writef("}))")
+	g.writef("})")
 	return nil
 }
 
@@ -8249,6 +8519,25 @@ func __bridgeGo(o *Object, err error) any {
 		panic(err)
 	}
 	return v
+}
+
+// __bridgeMust unwraps a bridge call result for further chaining, panicking on
+// a Python-side error and yielding the lone *Object.
+func __bridgeMust(o *Object, err error) *Object {
+	if err != nil {
+		panic(err)
+	}
+	return o
+}
+
+// __bridgeVal converts a live bridge *Object to a native Go value at a use
+// site (print, return, etc.), panicking on a conversion error.
+func __bridgeVal(o *Object) any {
+	v, err := o.Go()
+	if err != nil {
+		panic(err)
+	}
+	return v
 }`
 
 func (g *gen) methodCall(m *ir.MethodCall) error {
@@ -8257,10 +8546,8 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	// interpreter. Leaf form only — the result is converted to a native Go
 	// value at the call boundary via __bridge_go, so chaining further method
 	// calls on the result (`mod.Cls(...).method()`) is not yet supported.
-	if recvName, ok := m.Recv.(*ir.Name); ok {
-		if mod, isBridged := g.bridged[recvName.N]; isBridged {
-			return g.emitBridgeCall(mod, m.Method, m.Args, m.Keywords)
-		}
+	if g.isBridgeExpr(m) {
+		return g.emitBridgeCall(m)
 	}
 	// complex.conjugate() — `c.conjugate()` returns a complex with the
 	// imaginary part negated. Maps to math/cmplx.Conj.

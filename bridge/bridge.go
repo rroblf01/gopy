@@ -84,6 +84,7 @@ import "C"
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 	"unsafe"
 )
@@ -417,6 +418,55 @@ func toPy(v any) *C.PyObject {
 				return nil
 			}
 			C.PyDict_SetItem(d, pk, pv) // does NOT steal — decref ours
+			C.Py_DecRef(pk)
+			C.Py_DecRef(pv)
+		}
+		return d
+	case *Object:
+		// Pass a live bridge object straight through, taking a new reference
+		// since the caller (e.g. PyTuple_SetItem) will steal one.
+		if x == nil || x.p == nil {
+			return C.gopy_none()
+		}
+		C.Py_IncRef(x.p)
+		return x.p
+	}
+	// Reflection fallback: typed Go collections (map[string]string, []int64,
+	// []string, …) that don't match the fast cases above still convert by
+	// walking their elements. Keeps the bridge generic over concrete element
+	// types the transpiler emits.
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		n := rv.Len()
+		lst := C.PyList_New(C.Py_ssize_t(n))
+		if lst == nil {
+			return nil
+		}
+		for i := 0; i < n; i++ {
+			pe := toPy(rv.Index(i).Interface())
+			if pe == nil {
+				C.Py_DecRef(lst)
+				return nil
+			}
+			C.PyList_SetItem(lst, C.Py_ssize_t(i), pe) // steals
+		}
+		return lst
+	case reflect.Map:
+		d := C.PyDict_New()
+		if d == nil {
+			return nil
+		}
+		for _, mk := range rv.MapKeys() {
+			pk := toPy(mk.Interface())
+			pv := toPy(rv.MapIndex(mk).Interface())
+			if pk == nil || pv == nil {
+				C.Py_XDECREF(pk)
+				C.Py_XDECREF(pv)
+				C.Py_DecRef(d)
+				return nil
+			}
+			C.PyDict_SetItem(d, pk, pv)
 			C.Py_DecRef(pk)
 			C.Py_DecRef(pv)
 		}

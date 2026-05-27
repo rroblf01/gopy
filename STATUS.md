@@ -32,7 +32,20 @@ Bridge API surface:
 
 Verified end-to-end: `import mymod` + `mymod.double(21)` / `mymod.greet("ana")` / `mymod.addkw(5, b=100)` transpiles, links libpython, and matches CPython output (`42` / `hi ana` / `105`) with `mymod` on `PYTHONPATH`. The feature is fully gated — without `-bridge`, `EnableBridge` stays false, `g.bridged` is empty, and existing single-file / project builds are byte-for-byte unchanged.
 
-**Next step — chained object flow + bridged attribute access.** Leaf calls convert at the boundary, so chaining a method on a bridged result (`pydantic_core.SchemaValidator({...}).validate_python("42")`) is not yet supported: the intermediate `*Object` is already collapsed to a Go value. This needs a `*Object`-typed value path threaded through the type system so codegen knows whether a value is a live `*Object` (keep calling bridge methods / subscripting it) or an already-converted Go value. Bridged module attribute reads (`mod.CONSTANT`, not a call) and `from X import Y` of bridged modules are also still pending.
+**Chained object flow — landed.** Bridge results now stay live `*Object` through method chains and assigned variables, converting to a native Go value only at use sites. A bridge chain emits the receiver via `emitBridgeChainValue` (a bridged module → `__bridgeModule("mod")`; each inner call wrapped in `__bridgeMust(...)` to yield a single `*Object`), and the outermost call feeds `__bridgeGo`. Assigning a bridged call to a variable (`v = mod.Cls({...})`) keeps it as `*Object` and records `v` in `g.bridgeVars`; a later `v.method(...)` chains, while reading `v` in a value context emits `__bridgeVal(v)` to convert. `toPy` gained a reflection fallback so typed Go collections (`map[string]string`, `[]int64`, …) and live `*Object` args convert without a hand-written case per type.
+
+Verified end-to-end against the real Rust extension:
+- direct chain — `pydantic_core.SchemaValidator({"type": "int"}).validate_python("42")` → `42`, `{"type": "str"}` / `"hello"` → `hello`;
+- assigned chain — `v = pydantic_core.SchemaValidator({"type": "int"}); v.validate_python("42")` → `42`;
+both match CPython, and the leaf-call demo (`mymod.double/greet/addkw`) still passes.
+
+**Attribute reads + from-imports — landed.** `isBridgeExpr` / `emitBridgeChainValue` now also cover `Attribute` and `Call` nodes, so a bridged value flows through any mix of calls and attribute reads as a single `*Object`, converting only at the outer value boundary:
+- module attribute reads — `mymod.VERSION` → `1.2.3`, `mymod.MAX` → `100`;
+- chained call+attr — `mymod.get_config().name` → `cfg`;
+- `from X import Y` of a bridged module — `from mymod import double, get_config` then `double(21)` → `42` and `get_config().name` → `cfg`. A `from`-bound name resolves to `__bridgeMust(__bridgeModule("X").Attr("Y"))`; calling it uses `.Call` / `.CallKw`. `from`-bound names are tracked in `g.bridgedFrom`.
+All verified end-to-end against `mymod` on `PYTHONPATH` and matching CPython.
+
+**Next step — native-type interop on bridge values.** Using a bridge value in native Go arithmetic / comparison (`n = mymod.double(21); n + 1`) still doesn't work: a bridge var is a `*Object` that converts to `any` on read, which Go's `+` won't accept without a concrete type. The fix is to let an annotation or inferred target type drive a typed conversion (`__bridgeInt(o) int64`, `__bridgeStr(o) string`, …) at the use site. Also pending: bridged subscripting (`obj[key]`), iterating a bridged sequence (`for x in obj:`), and surfacing Python exceptions as catchable gopy exceptions rather than Go panics.
 
 Trade-offs accepted: binary depends on `libpython3.X.so` (no longer a pure static Go binary), every Go↔Python crossing pays marshaling + GIL serialization, and the ~640 stdlib-parity fixtures validate only the fast path.
 
