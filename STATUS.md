@@ -91,11 +91,92 @@ The framework-integration primitives are now all proven against real libraries: 
 
 **Module-level bridged variables — landed.** A module-scope `app = framework.Router()` whose call is bridged now emits a package-level `var app *Object = __bridgeMust(...)` (initialized at startup) and records `app` in `bridgeVars`, so functions referencing `app` chain through the bridge. Verified: `app = router.Router()` then `app.add("/a", "alpha")` / `app.count()` from `main()` → `2`, matching CPython. This is the prerequisite shape every framework app uses (`app = FastAPI()` / `app = Flask(__name__)`).
 
-**Bridged decorators (route registration) — landed.** A top-level handler decorated with a bridged decorator (`@app.get("/x")` where `app` is an embedded-CPython object) is now wired end-to-end. The lowering preserves the full decorator expression (`ir.Func.Decorators`); codegen detects the bridge decorator, emits the handler as a normal Go function plus a reverse-bridge adapter `func __pyadapter_<name>(__args []any, __kwargs map[string]any) any` (coercing each positional arg to the declared Go type via `__argInt`/`__argFloat`/`__argStr`/`__argBool`, forwarding untyped params as-is, and boxing the return), and emits a single `init()` that exposes the handler to Python with a real signature via `RegisterTypedFunc(name, []Param{…}, retAnnotation, adapter)` and then applies the bridged decorator(s) (`app.get("/x")(typedFn)`, bottom-up). Eligibility is conservative — scalar/`any` params, no `*args`/`**kwargs`, single non-tuple/non-named return — and ineligible handlers fall back to the existing accept-and-ignore decorator behavior, so nothing regresses. The build driver now vendors `reverse.go` + `introspect.go` alongside `bridge.go` when the bridge is used. Verified (`/tmp/bridgetest/routes.py`) against CPython: `app = miniapp.App()`, two `@app.get(...)` handlers, then `app.list_paths()` → `['/add', '/greet']`, `app.call("/add", 3, 4)` → `7`, `app.call("/greet", "bob")` → `hi bob` — exercising the full Python→Go→Python round trip (the framework calls back into the registered Go handler through the adapter).
+**Bridged decorators (route registration) — landed.** A top-level handler decorated with a bridged decorator (`@app.get("/x")` where `app` is an embedded-CPython object) is now wired end-to-end. The lowering preserves the full decorator expression (`ir.Func.Decorators`); codegen detects the bridge decorator, emits the handler as a normal Go function plus a reverse-bridge adapter `func __pyadapter_<name>(__args []any, __kwargs map[string]any) any` (coercing each positional arg to the declared Go type via `__argInt`/`__argFloat`/`__argStr`/`__argBool`, forwarding untyped params as-is, and boxing the return), and emits a single `init()` that exposes the handler to Python with a real signature via `RegisterTypedFunc(name, []Param{…}, retAnnotation, adapter)` and then applies the bridged decorator(s) (`app.get("/x")(typedFn)`, bottom-up). Eligibility is conservative — scalar/`any` params, no `*args`/`**kwargs`, single non-tuple/non-named return — and ineligible handlers fall back to the existing accept-and-ignore decorator behavior, so nothing regresses. Literal parameter defaults (`q: str = "all"`, `limit: int = 10`) carry through to the exposed `Param{HasDefault, Default}`, so `inspect.signature(handler)` reports them as optional with the right default (a query param in FastAPI) and omitted args resolve via the wrapper's `apply_defaults`. The build driver now vendors `reverse.go` + `introspect.go` alongside `bridge.go` when the bridge is used. Verified (`/tmp/bridgetest/routes.py`) against CPython: `app = miniapp.App()`, two `@app.get(...)` handlers, then `app.list_paths()` → `['/add', '/greet']`, `app.call("/add", 3, 4)` → `7`, `app.call("/greet", "bob")` → `hi bob` — exercising the full Python→Go→Python round trip (the framework calls back into the registered Go handler through the adapter).
 
-**Next steps toward a real framework.** Remaining: methods on Go-backed classes (rich `self` handle now exists, so this is unblocked); registering whole modules of typed functions at once; list/dict (and model) handler params — the adapter currently restricts params to scalars/`any`, so a Pydantic-model request body needs element/model coercion in `__pyadapter_*`; and bridged decorators on *methods* (only top-level handlers are wired so far).
+**Real FastAPI app — running end-to-end. 🎯** A genuine FastAPI program transpiles, builds, and serves requests: `from fastapi import FastAPI`, `app = FastAPI()`, two `@app.get("/items/{item_id}")` / `@app.get("/hello/{name}")` handlers (typed params + `-> dict`), then a `TestClient(app)` driving real HTTP through the Starlette ASGI stack. The embedded CPython runs the real `fastapi` / `starlette` / `pydantic` wheels (installed in a `uv` venv; binary finds them via `PYTHONPATH=<venv>/site-packages`); FastAPI does path/query parsing + validation off `inspect.signature` of the exposed Go handlers and calls back into the transpiled Go code through the reverse-bridge adapters. Verified (`/tmp/bridgetest/fapi.py`) byte-for-byte against the same app under venv CPython: `client.get("/items/42?q=hello")` → `200 42 hello`, `/items/7` → `7 none` (default applied), `/hello/ana` → `hi ana`.
+
+Two general (non-bridge) fixes this unlocked: (1) `moduleVar` and local `Assign` now keep `Call` / `Attribute` / `Subscript` bridge results as live `*Object`s (previously only `MethodCall`), so `app = FastAPI()` and `client = TestClient(app)` chain correctly; (2) a bare `dict` / `list` return annotation (`-> dict` → `map[any]any`, `-> list` → `[]any`) now coerces a returned composite literal (`{"id": n}` inferred as `map[string]any`) into the declared type at the `return` site, since Go won't implicitly convert between those map/slice types.
+
+Known caveats on the bridge path: Go maps are unordered, so a handler returning a dict literal scrambles key order vs CPython's insertion order (JSON values are correct; only key ordering differs — semantically fine for an API, visibly different in a raw `repr`); and `sorted()` / other builtins don't yet accept a bridge iterable directly (materialize via indexing or a comprehension first).
+
+**Next steps toward a real framework.** Remaining: methods on Go-backed classes (rich `self` handle now exists, so this is unblocked); registering whole modules of typed functions at once; list/dict (and Pydantic-model) handler params — the adapter currently restricts params to scalars/`any`, so a model request body needs element/model coercion in `__pyadapter_*`; bridged decorators on *methods* (only top-level handlers are wired so far); `sorted`/builtins over bridge iterables; and an insertion-ordered dict model so dict-returning handlers match CPython key order exactly.
+
+**FastAPI benchmarks — landed in [BENCHMARK.md](BENCHMARK.md).** Now that the FastAPI path dispatches end-to-end, `BENCHMARK.md` collects all results: the pure-Go fast path (24–57× faster, ~2× less RAM) and the bridge path measured against native venv CPython on the same app. Key honest finding — the bridge has a crossover: trivial handlers run ~15% *slower* than CPython (the framework stays interpreted and each request pays a Python→Go→Python marshaling hop), while a compute-heavy handler is **9× faster** (the compiled-Go body dominates); RAM is ~10–27% *higher* on the bridge path since both the Go runtime and the full embedded CPython are resident. Next: a load-test (uvicorn + concurrent clients) for req/s under concurrency, and reducing per-request marshaling overhead.
 
 Trade-offs accepted: binary depends on `libpython3.X.so` (no longer a pure static Go binary), every Go↔Python crossing pays marshaling + GIL serialization, and the ~640 stdlib-parity fixtures validate only the fast path.
+
+### Go-native web runtime (`-goweb`) — pure Go, no CPython
+
+Chosen direction (vs. keeping everything on the bridge): map a recognized web
+framework onto a **pure-Go `net/http` server**, so the binary carries no
+interpreter and uses minimal RAM. The bridge proved that the embedded-CPython
+path, while maximally compatible, *costs* RAM (~60–108 MB; Go runtime + full
+CPython resident) and adds a per-request marshaling hop — the opposite of the
+"solo Go, poca RAM" goal. `-goweb` reimplements the framework's routing layer in
+Go instead of running it.
+
+**Landed (MVP).** `gopy build -goweb app.py` recognizes `app = FastAPI()` /
+`Flask(...)` as a virtual app handle (no Go value emitted, no Python), collects
+`@app.<verb>("/path")` decorators into a **framework-agnostic route table**
+(`webRoute{method, path, fn}`), and emits a `net/http` server: a package
+`ServeMux`, one `HandlerFunc` adapter per route (path params via Go 1.22
+`r.PathValue`, query params via `r.URL.Query().Get` honoring literal defaults,
+typed coercion, JSON response that normalizes gopy's `map[any]any` to
+string-keyed JSON), an `init()` registering `"GET /items/{item_id}"`-style
+patterns, and `app.run(port)` / `uvicorn.run(app, port=…)` → blocking
+`http.ListenAndServe`. **No CGO, no libpython** — `CGO_ENABLED=0` builds a
+statically-linked binary. Verified (`/tmp/bridgetest/goweb.py`): four routes
+(`/items/{item_id}?q=`, `/hello/{name}`, `/add/{a}/{b}`) serve correct JSON via
+`curl`, default query params apply, and **peak RSS is 6.6 MB** (vs ~60–108 MB
+for the same app on the bridge) — ~10–16× less memory, zero interpreter.
+
+**POST / JSON request bodies — landed.** A bare-`dict` handler parameter on a
+body method (`@app.post("/echo")`, `def echo(payload: dict) -> dict`) is decoded
+from the JSON request body via `__webBodyMap` (into gopy's `map[any]any`), so the
+handler sees the parsed object. Verified: `curl -X POST /echo -d
+'{"name":"ana","n":3}'` → `{"got":{"n":3,"name":"ana"},"ok":true}`, still pure Go
+(~6.4 MB RSS). GoWeb eligibility (`webRouteEligible`) allows this one body param
+on top of the scalar/`any` params.
+
+**Data validation + Swagger/OpenAPI — landed, in Go.** Toward the goal of "if
+FastAPI is transpiled, its validation and Swagger come along too": rather than
+transpile FastAPI's Python (blocked anyway — pydantic-core is Rust, Starlette is
+async), GoWeb reproduces the *behavior* natively. (1) **Validation:** a typed
+path/query param whose input can't parse emits a FastAPI-shaped **HTTP 422**
+before the handler runs — `GET /items/abc` →
+`{"detail":[{"type":"int_parsing","loc":["path","item_id"],"msg":"Input should be a valid integer, unable to parse string as an integer","input":"abc"}]}`,
+field-for-field identical to FastAPI/pydantic-core. (2) **OpenAPI/Swagger:** the
+route table is turned into an OpenAPI 3.1 document in Go and served at
+`/openapi.json` (paths, methods, typed parameters with `in` path/query +
+required, request bodies), with `/docs` rendering Swagger UI against it. All
+generated from the same framework-agnostic `webRoute` table, no Python.
+
+**Benchmarked vs native FastAPI** (see [BENCHMARK.md](BENCHMARK.md) §3): serving
+the same `GET /compute/{n}` route over real HTTP (`wrk`), the pure-Go `-goweb`
+binary does **185k req/s @ 0.34 ms** vs uvicorn/CPython's **3.0k req/s @ 15.7 ms**
+(~61× throughput, ~46× latency) at **14.9 MB RSS vs 55.4 MB** (~3.7× less). This
+is the regime that actually delivers "solo Go, poca RAM" for a web service.
+
+**Pydantic models → Go structs — foundation landed.** A `class X(BaseModel)`
+(narrow trigger: a base named exactly `BaseModel`) now lowers like a dataclass:
+the BaseModel base is dropped and each annotated member becomes a struct field
+with its default, so the model transpiles to a plain Go data struct
+(`ir.Class.IsPydantic` marks it). Verified pure-Go vs CPython:
+`Item(name="widget", price=9.99, qty=3)` → field access + the `qty=1` default
+both match. This is the prerequisite for model-typed request/response bodies.
+**Next (model wiring):** make `webRouteEligible` accept a single `BaseModel`-typed
+body param; in `emitWebHandler`, decode the JSON body field-by-field into the Go
+struct with required/type checks → field-level 422 (reusing `__webErrs`); and add
+the model to OpenAPI `components/schemas` with a `requestBody` `$ref`.
+
+The route table is deliberately framework-neutral so other front-ends feed the
+same `net/http` codegen. **Next:** finish Pydantic model bodies (above);
+middleware; mixed int/float arithmetic (gopy doesn't auto-promote, which a model
+handler like `price * qty` hits); and a **Django front-end** (recognize
+`urlpatterns` / `path(...)` + view functions, mapping onto the same route
+table) — the user's stated longer-term target. Heavy C/Rust extensions (pydantic-core validation, numpy) can't be
+"un-Pythoned" from their wheels (they're built against the CPython C-API); those
+stay on the bridge or bind their underlying native crate/lib directly.
 
 ## Supported
 

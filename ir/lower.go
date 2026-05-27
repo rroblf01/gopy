@@ -542,6 +542,19 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 			break
 		}
 	}
+	// Pydantic BaseModel: lower like a dataclass (annotated members become
+	// struct fields with defaults) and drop the BaseModel base — gopy emits a
+	// plain data struct that the GoWeb runtime decodes + validates. Narrow
+	// trigger: a base named exactly "BaseModel".
+	pydanticModel := false
+	for i, b := range rawBases {
+		if b == "BaseModel" {
+			pydanticModel = true
+			class.IsPydantic = true
+			rawBases = append(rawBases[:i], rawBases[i+1:]...)
+			break
+		}
+	}
 	class.Bases = append(class.Bases, rawBases...)
 	if class.IsEnum {
 		nextAuto := int64(1)
@@ -582,8 +595,9 @@ func lowerClass(n parser.Node) ([]Decl, error) {
 	// @dataclass / @dataclasses.dataclass synthesizes __init__ from
 	// class-level annotated fields. Detect the decorator(s) here so the
 	// body walk can pick up the AnnAssign nodes that would otherwise
-	// trip the "only methods supported" rule.
-	isDataclass := false
+	// trip the "only methods supported" rule. Pydantic models follow the
+	// same field-from-annotation shape, so they share this path.
+	isDataclass := pydanticModel
 	for _, d := range n.Children("decorator_list") {
 		if d.Type() == "Name" {
 			switch d.Str("id") {

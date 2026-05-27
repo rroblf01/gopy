@@ -173,6 +173,11 @@ type Class struct {
 	// Used by dataclasses.is_dataclass() and downstream helpers that need
 	// to distinguish data-style classes from regular ones.
 	IsDataclass bool
+	// IsPydantic marks subclasses of pydantic's BaseModel. They are lowered
+	// like dataclasses (annotated members become struct fields with defaults),
+	// and the GoWeb runtime treats a handler parameter of this type as a JSON
+	// request body to decode + validate.
+	IsPydantic bool
 	// DataclassOrder marks @dataclass(order=True). Codegen emits
 	// __lt__ / __le__ / __gt__ / __ge__ comparing the field tuple
 	// lexicographically.

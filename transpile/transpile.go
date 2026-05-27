@@ -44,6 +44,15 @@ type Options struct {
 	// the same build (same Go package). Used only when EnableBridge is set,
 	// to avoid mistaking a local cross-module import for a bridged one.
 	LocalModules []string
+	// GoWeb opts the module into the Go-native web runtime: a recognized web
+	// framework app (`app = FastAPI()`, `Flask(__name__)`, …) and its route
+	// decorators (`@app.get("/x")`) are lowered onto a pure-Go net/http server
+	// instead of the embedded-CPython bridge. The framework itself does not
+	// run — gopy maps the route table + handlers onto net/http, so the binary
+	// is pure Go (no interpreter, low RAM). The route model is framework-
+	// agnostic so other front-ends (e.g. Django urlpatterns) can target it
+	// later. Off by default; mutually exclusive with the bridge for the app.
+	GoWeb bool
 }
 
 // ModuleMeta exposes codegen by-products that the caller (typically the
@@ -75,7 +84,7 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
 	g.buildAliases(m)
 	// First pass: register class names so call-site lowering can rewrite
 	// `Foo(...)` → `NewFoo(...)`, and so method codegen can look up bases
@@ -142,6 +151,11 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	// Bridged-decorator route registration: emit adapters + an init() that
 	// exposes each decorated handler to Python and applies its decorator.
 	if err := g.emitBridgeRoutes(); err != nil {
+		return nil, nil, err
+	}
+	// GoWeb: emit the net/http server (mux registration + handler adapters)
+	// from the framework-agnostic route table.
+	if err := g.emitWebRoutes(); err != nil {
 		return nil, nil, err
 	}
 	// Post-codegen Exception promotion: any helper that calls
@@ -215,11 +229,20 @@ func pruneUnusedImports(imports []string, body string) []string {
 // ones honor the annotation so untyped numeric literals don't drift to Go
 // defaults that disagree with Python's int64 / float64 model.
 func (g *gen) moduleVar(v *ir.Var) error {
+	// GoWeb: `app = FastAPI()` / `Flask(__name__)` is a virtual web-app handle.
+	// It maps onto a net/http server, so emit no Go variable — just record the
+	// name so `@app.get(...)` decorators and `app.run(...)` are recognized.
+	if g.opt.GoWeb && v.Value != nil && g.isWebAppCtor(v.Value) {
+		g.usedWeb = true
+		g.webAppVars[v.Name] = true
+		return nil
+	}
 	// Module-level bridged value: `app = framework.Router()` at module scope
 	// becomes a package-level `*Object` initialized at startup, tracked in
 	// bridgeVars so functions referencing `app` chain through the bridge.
 	if v.Value != nil && g.isBridgeExpr(v.Value) {
-		if _, isMC := v.Value.(*ir.MethodCall); isMC {
+		switch v.Value.(type) {
+		case *ir.MethodCall, *ir.Call, *ir.Attribute, *ir.Subscript:
 			g.usedBridge = true
 			g.registerBridgeHelpers()
 			g.bridgeVars[v.Name] = true
@@ -642,6 +665,17 @@ type gen struct {
 	// (with a real signature via RegisterTypedFunc) and applies the bridged
 	// decorator to register it with the framework.
 	bridgeRoutes []bridgeRoute
+	// webAppVars tracks names bound to a recognized web-framework app
+	// (`app = FastAPI()`) in GoWeb mode, so `@app.get(...)` decorators are
+	// recognized as routes and `app.run(...)` as the server entrypoint.
+	webAppVars map[string]bool
+	// webRoutes is the collected route table (GoWeb mode), emitted as a
+	// net/http server after the decl loop.
+	webRoutes []webRoute
+	// webServePort is set when an `app.run(port)` / `uvicorn.run(app, port=…)`
+	// call is recognized; codegen emits http.ListenAndServe on it. 0 → :8000.
+	webServePort int
+	usedWeb      bool
 }
 
 // bridgeRoute pairs a transpiled top-level function with the bridged
@@ -649,6 +683,16 @@ type gen struct {
 type bridgeRoute struct {
 	fn         *ir.Func
 	decorators []ir.Expr
+}
+
+// webRoute is one entry in the framework-agnostic route table built in GoWeb
+// mode: an HTTP method + path pattern bound to a transpiled Go handler. Front-
+// ends (FastAPI decorators now, Django urlpatterns later) populate this; the
+// net/http codegen consumes it without knowing which framework produced it.
+type webRoute struct {
+	method string   // "GET", "POST", … (uppercased)
+	path   string   // "/items/{item_id}" — Go 1.22 ServeMux pattern syntax
+	fn     *ir.Func // the handler
 }
 
 // tryReturnCtx records the locals a `try` IIFE writes to so the enclosing
@@ -839,7 +883,11 @@ func (g *gen) fn(fn *ir.Func) error {
 	// apply the decorator after the decl loop. The function itself still
 	// emits as a normal Go function below.
 	if fn.Receiver == nil && !fn.IsGenerator {
-		if decs := g.bridgeDecorators(fn); len(decs) > 0 {
+		if g.opt.GoWeb {
+			if routes := g.webDecorators(fn); len(routes) > 0 {
+				g.webRoutes = append(g.webRoutes, routes...)
+			}
+		} else if decs := g.bridgeDecorators(fn); len(decs) > 0 {
 			g.bridgeRoutes = append(g.bridgeRoutes, bridgeRoute{fn: fn, decorators: decs})
 		}
 	}
@@ -1173,12 +1221,15 @@ func (g *gen) stmt(s ir.Stmt) error {
 				return nil
 			}
 		}
-		// Bridge object assignment: `v = mod.fn(...)` keeps v as a live
-		// *Object (no conversion) so later `v.method()` chains through the
-		// bridge. The var is tracked in bridgeVars; reads in value contexts
-		// convert via __bridgeVal (see the Name expr case).
+		// Bridge object assignment: `v = mod.fn(...)` / `v = Cls(...)` /
+		// `v = obj.attr` / `v = obj[k]` keeps v as a live *Object (no
+		// conversion) so later `v.method()` chains through the bridge. The var
+		// is tracked in bridgeVars; reads in value contexts convert via
+		// __bridgeVal (see the Name expr case). Plain Name aliases are left to
+		// the default path.
 		if g.isBridgeExpr(x.Value) {
-			if _, ok := x.Value.(*ir.MethodCall); ok {
+			switch x.Value.(type) {
+			case *ir.MethodCall, *ir.Call, *ir.Attribute, *ir.Subscript:
 				g.usedBridge = true
 				g.registerBridgeHelpers()
 				g.bridgeVars[x.Target] = true
@@ -1693,6 +1744,36 @@ func (g *gen) stmt(s ir.Stmt) error {
 				}
 				g.writef("\n")
 				return nil
+			}
+		}
+		// Coerce a returned composite literal to a bare `dict` / `list` return
+		// annotation. `-> dict` is modeled as map[any]any and `-> list` as
+		// []any, but a literal like `{"id": n}` infers as map[string]any (and
+		// `[1, 2]` as []int64). Go won't implicitly convert between those map /
+		// slice types, so re-emit the literal with the declared element types —
+		// string keys / int values still satisfy `any`. (Common in handlers
+		// annotated `-> dict`, e.g. FastAPI endpoints.)
+		if g.currentFn != nil && g.currentFn.Ret != nil {
+			rt := g.currentFn.Ret
+			if rt.Kind == ir.TyDict && isAnyType(rt.Key) && isAnyType(rt.Val) {
+				if dl, ok := x.X.(*ir.DictLit); ok && len(dl.Keys) > 0 {
+					g.writef("return ")
+					if err := g.emitDictLitTyped(dl, rt.Key, rt.Val); err != nil {
+						return err
+					}
+					g.writef("\n")
+					return nil
+				}
+			}
+			if rt.Kind == ir.TyList && isAnyType(rt.Elem) {
+				if ll, ok := x.X.(*ir.ListLit); ok && len(ll.Elems) > 0 {
+					g.writef("return ")
+					if err := g.emitListLitTyped(ll, rt.Elem); err != nil {
+						return err
+					}
+					g.writef("\n")
+					return nil
+				}
 			}
 		}
 		g.writef("return ")
@@ -5809,20 +5890,7 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		g.writef("}")
 	case *ir.DictLit:
-		g.writef("map[%s]%s{", g.goType(x.KeyTy), g.goType(x.ValTy))
-		for i := range x.Keys {
-			if i > 0 {
-				g.writef(", ")
-			}
-			if err := g.expr(x.Keys[i]); err != nil {
-				return err
-			}
-			g.writef(": ")
-			if err := g.expr(x.Vals[i]); err != nil {
-				return err
-			}
-		}
-		g.writef("}")
+		return g.emitDictLitTyped(x, x.KeyTy, x.ValTy)
 	case *ir.FStr:
 		return g.fstring(x)
 	case *ir.Lambda:
@@ -8651,6 +8719,403 @@ func (g *gen) emitBridgeMethodArgs(method string, args []ir.Expr, kws []ir.Keywo
 	return nil
 }
 
+// --- Go-native web runtime (GoWeb mode) ---------------------------------
+//
+// In GoWeb mode a recognized web-framework app and its route decorators are
+// lowered onto a pure-Go net/http server. The codegen is framework-agnostic:
+// the recognizers below build a route table (webRoute), and emitWebRoutes
+// turns that table into a ServeMux + handler adapters, independent of which
+// front-end (FastAPI decorators today, Django urlpatterns tomorrow) produced
+// it. No CPython is involved, so the binary stays pure Go / low-RAM.
+
+// webCtorNames are the callables whose construction marks a web-app handle.
+var webCtorNames = map[string]bool{
+	"FastAPI": true, "Flask": true, "APIRouter": true, "Starlette": true,
+}
+
+// webHTTPVerbs maps a decorator method name to its HTTP method. `route` (Flask)
+// defaults to GET for this MVP.
+var webHTTPVerbs = map[string]string{
+	"get": "GET", "post": "POST", "put": "PUT", "delete": "DELETE",
+	"patch": "PATCH", "head": "HEAD", "options": "OPTIONS", "route": "GET",
+}
+
+// isWebAppCtor reports whether an expression constructs a recognized web app
+// (`FastAPI()`, `flask.Flask(__name__)`), so the assignment target becomes a
+// virtual app handle rather than a real Go value.
+func (g *gen) isWebAppCtor(e ir.Expr) bool {
+	switch x := e.(type) {
+	case *ir.Call:
+		if n, ok := x.Func.(*ir.Name); ok {
+			return webCtorNames[n.N]
+		}
+	case *ir.MethodCall:
+		return webCtorNames[x.Method]
+	}
+	return false
+}
+
+// webRouteEligible is the GoWeb-mode handler eligibility: like the bridge's,
+// but it additionally allows a JSON-body parameter — either a bare `dict` or a
+// Pydantic-model (`BaseModel` subclass) type. Params are otherwise scalars/
+// `any`; no *args/**kwargs; a single non-tuple/non-named return.
+func (g *gen) webRouteEligible(fn *ir.Func) bool {
+	if fn.Vararg != nil || fn.Kwarg != nil {
+		return false
+	}
+	for _, p := range fn.Params {
+		if bridgeArgKindOK(p.Ty) || webBodyParam(p.Ty) || g.isPydanticParam(p.Ty) {
+			continue
+		}
+		return false
+	}
+	return bridgeRetKindOK(fn.Ret)
+}
+
+// isPydanticParam reports whether a type names a Pydantic model class declared
+// in this module (so a handler parameter of it is a JSON request body).
+func (g *gen) isPydanticParam(t *ir.Type) bool {
+	if t == nil || t.Kind != ir.TyNamed {
+		return false
+	}
+	c, ok := g.classes[t.Name]
+	return ok && c.IsPydantic
+}
+
+// webBodyParam reports whether a parameter type is a bare `dict` (map[any]any),
+// which GoWeb sources from the JSON request body.
+func webBodyParam(t *ir.Type) bool {
+	return t != nil && t.Kind == ir.TyDict && isAnyType(t.Key) && isAnyType(t.Val)
+}
+
+// webDecorators parses a handler's decorators for `@<appvar>.<verb>("/path")`
+// route registrations and returns the resulting route-table entries. Returns
+// nil when the handler isn't a recognized/adaptable route.
+func (g *gen) webDecorators(fn *ir.Func) []webRoute {
+	if !g.webRouteEligible(fn) {
+		return nil
+	}
+	var out []webRoute
+	for _, d := range fn.Decorators {
+		mc, ok := d.(*ir.MethodCall)
+		if !ok {
+			continue
+		}
+		recv, ok := mc.Recv.(*ir.Name)
+		if !ok || !g.webAppVars[recv.N] {
+			continue
+		}
+		verb, ok := webHTTPVerbs[mc.Method]
+		if !ok || len(mc.Args) == 0 {
+			continue
+		}
+		sl, ok := mc.Args[0].(*ir.StrLit)
+		if !ok {
+			continue
+		}
+		out = append(out, webRoute{method: verb, path: sl.V, fn: fn})
+	}
+	return out
+}
+
+// webServeCall recognizes a server-start call in GoWeb mode — `app.run(port)`
+// / `app.run(port=…)` (Flask) or `uvicorn.run(app, port=…)` — and returns the
+// listen address (":<port>") and true. Defaults to :8000 when no port given.
+func (g *gen) webServeCall(m *ir.MethodCall) (string, bool) {
+	if !g.opt.GoWeb || m.Method != "run" {
+		return "", false
+	}
+	isServe := false
+	if recv, ok := m.Recv.(*ir.Name); ok && g.webAppVars[recv.N] {
+		isServe = true // app.run(...)
+	} else if len(m.Args) > 0 {
+		if n, ok := m.Args[0].(*ir.Name); ok && g.webAppVars[n.N] {
+			isServe = true // uvicorn.run(app, ...)
+		}
+	}
+	if !isServe {
+		return "", false
+	}
+	port := int64(8000)
+	for _, a := range m.Args {
+		if il, ok := a.(*ir.IntLit); ok {
+			port = il.V
+		}
+	}
+	for _, kw := range m.Keywords {
+		if kw.Name == "port" {
+			if il, ok := kw.Value.(*ir.IntLit); ok {
+				port = il.V
+			}
+		}
+	}
+	return fmt.Sprintf(":%d", port), true
+}
+
+// emitWebRoutes renders the collected route table as a net/http server: one
+// HandlerFunc adapter per route (path/query param extraction → typed Go call →
+// JSON response) plus an init() that registers them on the package ServeMux.
+func (g *gen) emitWebRoutes() error {
+	if len(g.webRoutes) == 0 {
+		return nil
+	}
+	g.usedWeb = true
+	g.registerWebHelpers()
+	for _, r := range g.webRoutes {
+		if err := g.emitWebHandler(r); err != nil {
+			return err
+		}
+	}
+	g.writef("func init() {\n")
+	for _, r := range g.webRoutes {
+		g.writef("__webMux.HandleFunc(%q, __webH_%s)\n", r.method+" "+r.path, r.fn.Name)
+		g.emitWebRouteInfo(r)
+	}
+	g.writef("__webInitDocs()\n")
+	g.writef("}\n")
+	return nil
+}
+
+// emitWebRouteInfo appends one route's metadata to __webRouteTable so the Go
+// OpenAPI builder can describe it. Path params are required; query params are
+// required only when they lack a default; a bare-dict param marks a body.
+func (g *gen) emitWebRouteInfo(r webRoute) {
+	pathParams := webPathParams(r.path)
+	hasBody := false
+	g.writef("__webRouteTable = append(__webRouteTable, __webRouteInfo{Method: %q, Path: %q, Name: %q, Params: []__webParamInfo{",
+		r.method, r.path, r.fn.Name)
+	first := true
+	for _, p := range r.fn.Params {
+		if (webBodyParam(p.Ty) || g.isPydanticParam(p.Ty)) && !pathParams[p.Name] {
+			hasBody = true
+			continue
+		}
+		in := "query"
+		required := p.Default == nil
+		if pathParams[p.Name] {
+			in = "path"
+			required = true
+		}
+		if !first {
+			g.writef(", ")
+		}
+		first = false
+		g.writef("{Name: %q, In: %q, Type: %q, Required: %t}", p.Name, in, webOpenAPIType(p.Ty), required)
+	}
+	g.writef("}, HasBody: %t})\n", hasBody)
+}
+
+// emitWebModelDecode decodes the JSON request body into a Pydantic-model Go
+// struct field by field: present fields are coerced (recording a type error on
+// mismatch), absent fields fall back to their model default or, if required,
+// record a "missing" validation error.
+func (g *gen) emitWebModelDecode(varName, modelName string) {
+	cls := g.classes[modelName]
+	fields := cls.InitArgs
+	if len(fields) == 0 {
+		fields = cls.Fields
+	}
+	g.writef("%s := %s{}\n", varName, modelName)
+	g.writef("__b%s := __webBodyMap(r)\n", varName)
+	for _, f := range fields {
+		as := webModelFieldAs(f.Ty)
+		if as == "" {
+			continue // non-scalar field: left at zero value (MVP)
+		}
+		g.writef("if __raw, __ok := __b%s[%q]; __ok {\n", varName, f.Name)
+		g.writef("%s.%s = %s(%q, __raw, __v)\n", varName, f.Name, as, f.Name)
+		g.writef("} else {\n")
+		if f.Default != nil {
+			lit, ok := bridgeParamDefault(f.Default)
+			if !ok {
+				lit = webZeroLit(f.Ty)
+			}
+			g.writef("%s.%s = %s\n", varName, f.Name, lit)
+		} else {
+			g.writef("__v.missing(%q, %q)\n", "body", f.Name)
+		}
+		g.writef("}\n")
+	}
+}
+
+// webModelFieldAs returns the body-field coercion helper for a scalar model
+// field type, or "" for a non-scalar field (skipped in this MVP).
+func webModelFieldAs(t *ir.Type) string {
+	if t == nil {
+		return ""
+	}
+	switch t.Kind {
+	case ir.TyStr:
+		return "__webAsStr"
+	case ir.TyInt:
+		return "__webAsInt"
+	case ir.TyFloat:
+		return "__webAsFloat"
+	case ir.TyBool:
+		return "__webAsBool"
+	}
+	return ""
+}
+
+// webOpenAPIType maps an IR parameter type to an OpenAPI schema type name.
+func webOpenAPIType(t *ir.Type) string {
+	if t == nil {
+		return "string"
+	}
+	switch t.Kind {
+	case ir.TyInt:
+		return "integer"
+	case ir.TyFloat:
+		return "number"
+	case ir.TyBool:
+		return "boolean"
+	case ir.TyDict:
+		return "object"
+	case ir.TyList:
+		return "array"
+	}
+	return "string"
+}
+
+// emitWebHandler writes the net/http adapter for one route: each handler
+// parameter is sourced from the URL path (when its name appears as `{name}` in
+// the pattern), the JSON body (bare dict), or the query string (otherwise,
+// honoring a literal default). Typed path/query params validate their input and
+// a parse failure yields a FastAPI-shaped 422 before the handler runs.
+func (g *gen) emitWebHandler(r webRoute) error {
+	pathParams := webPathParams(r.path)
+	// A param needs validation when its scalar type can fail to parse, or when
+	// it's a model body (required-field / field-type checks).
+	needsValidation := false
+	for _, p := range r.fn.Params {
+		if webBodyParam(p.Ty) && !pathParams[p.Name] {
+			continue
+		}
+		if g.isPydanticParam(p.Ty) && !pathParams[p.Name] {
+			needsValidation = true
+			continue
+		}
+		if p.Ty != nil && (p.Ty.Kind == ir.TyInt || p.Ty.Kind == ir.TyFloat || p.Ty.Kind == ir.TyBool) {
+			needsValidation = true
+		}
+	}
+	g.writef("func __webH_%s(w http.ResponseWriter, r *http.Request) {\n", r.fn.Name)
+	if needsValidation {
+		g.writef("__v := &__webErrs{}\n")
+	}
+	for _, p := range r.fn.Params {
+		// A Pydantic-model parameter is the JSON request body, decoded field
+		// by field into the Go struct with required/type validation.
+		if g.isPydanticParam(p.Ty) && !pathParams[p.Name] {
+			g.emitWebModelDecode(p.Name, p.Ty.Name)
+			continue
+		}
+		// A bare-dict parameter is the JSON request body.
+		if webBodyParam(p.Ty) && !pathParams[p.Name] {
+			g.writef("%s := __webBodyMap(r)\n", p.Name)
+			continue
+		}
+		kind := "Str"
+		validates := false
+		switch {
+		case p.Ty == nil:
+		case p.Ty.Kind == ir.TyInt:
+			kind, validates = "Int", true
+		case p.Ty.Kind == ir.TyFloat:
+			kind, validates = "Float", true
+		case p.Ty.Kind == ir.TyBool:
+			kind, validates = "Bool", true
+		}
+		if pathParams[p.Name] {
+			if validates {
+				g.writef("%s := __webPath%s(r, %q, __v)\n", p.Name, kind, p.Name)
+			} else {
+				g.writef("%s := __webPath%s(r, %q)\n", p.Name, kind, p.Name)
+			}
+			continue
+		}
+		def := webZeroLit(p.Ty)
+		if p.Default != nil {
+			if lit, ok := bridgeParamDefault(p.Default); ok && lit != "nil" {
+				def = lit
+			}
+		}
+		if validates {
+			g.writef("%s := __webQuery%s(r, %q, %s, __v)\n", p.Name, kind, p.Name, def)
+		} else {
+			g.writef("%s := __webQuery%s(r, %q, %s)\n", p.Name, kind, p.Name, def)
+		}
+	}
+	if needsValidation {
+		g.writef("if __v.respond(w) { return }\n")
+	}
+	g.writef("__webWriteJSON(w, %s(", r.fn.Name)
+	for i, p := range r.fn.Params {
+		if i > 0 {
+			g.writef(", ")
+		}
+		// User-class (model) instances are passed by pointer, matching how
+		// gopy declares class-typed parameters.
+		if g.isPydanticParam(p.Ty) && !webPathParams(r.path)[p.Name] {
+			g.writef("&%s", p.Name)
+		} else {
+			g.writef("%s", p.Name)
+		}
+	}
+	g.writef("))\n}\n")
+	return nil
+}
+
+// webPathParams returns the set of `{name}` tokens in a ServeMux path pattern.
+func webPathParams(path string) map[string]bool {
+	out := map[string]bool{}
+	for {
+		i := strings.IndexByte(path, '{')
+		if i < 0 {
+			break
+		}
+		j := strings.IndexByte(path[i:], '}')
+		if j < 0 {
+			break
+		}
+		name := path[i+1 : i+j]
+		// Strip a `{name...}` wildcard suffix and `{$}` end-of-path marker.
+		name = strings.TrimSuffix(name, "...")
+		if name != "" && name != "$" {
+			out[name] = true
+		}
+		path = path[i+j+1:]
+	}
+	return out
+}
+
+// webZeroLit is the Go zero literal for a query-param type lacking a default.
+func webZeroLit(t *ir.Type) string {
+	if t == nil {
+		return `""`
+	}
+	switch t.Kind {
+	case ir.TyInt:
+		return "0"
+	case ir.TyFloat:
+		return "0"
+	case ir.TyBool:
+		return "false"
+	}
+	return `""`
+}
+
+// registerWebHelpers installs the net/http runtime glue (mux, param parsers,
+// JSON writer) once, and pulls in the stdlib packages they need.
+func (g *gen) registerWebHelpers() {
+	g.addImport("net/http")
+	g.addImport("encoding/json")
+	g.addImport("strconv")
+	g.addImport("strings")
+	g.addImport("fmt")
+	g.helpers["__web_glue"] = goWebGlueSource
+}
+
 // registerBridgeHelpers installs the once-emitted runtime glue the bridged
 // calls rely on: a cached module importer and an error-checking converter.
 // Both reference the vendored bridge symbols (Import / *Object) that
@@ -8775,7 +9240,16 @@ func (g *gen) emitBridgeRoutes() error {
 			if j > 0 {
 				g.writef(", ")
 			}
-			g.writef("{Name: %q, Annotation: %q}", p.Name, bridgeAnnotation(p.Ty))
+			g.writef("{Name: %q, Annotation: %q", p.Name, bridgeAnnotation(p.Ty))
+			// A literal default carries through to the Python signature so the
+			// framework treats the param as optional with that default (a query
+			// param in FastAPI). Non-literal defaults are left as required.
+			if p.Default != nil {
+				if lit, ok := bridgeParamDefault(p.Default); ok {
+					g.writef(", HasDefault: true, Default: %s", lit)
+				}
+			}
+			g.writef("}")
 		}
 		g.writef("}, %q, __pyadapter_%s))\n", bridgeAnnotation(fn.Ret), fn.Name)
 		// Apply decorators bottom-up (Python applies the closest one first),
@@ -8825,6 +9299,73 @@ func (g *gen) emitRouteAdapter(idx int, fn *ir.Func) error {
 	return nil
 }
 
+// isAnyType reports whether t is the untyped/any element type (nil, TyAny, or
+// TyUnknown) — used to detect bare `dict` / `list` annotations that model as
+// map[any]any / []any.
+func isAnyType(t *ir.Type) bool {
+	return t == nil || t.Kind == ir.TyAny || t.Kind == ir.TyUnknown
+}
+
+// emitDictLitTyped writes a dict literal with explicit key/value Go types,
+// letting a caller force the declared map type (e.g. coercing a string-keyed
+// literal into a map[any]any return slot).
+func (g *gen) emitDictLitTyped(dl *ir.DictLit, keyTy, valTy *ir.Type) error {
+	g.writef("map[%s]%s{", g.goType(keyTy), g.goType(valTy))
+	for i := range dl.Keys {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if err := g.expr(dl.Keys[i]); err != nil {
+			return err
+		}
+		g.writef(": ")
+		if err := g.expr(dl.Vals[i]); err != nil {
+			return err
+		}
+	}
+	g.writef("}")
+	return nil
+}
+
+// emitListLitTyped writes a list literal with an explicit element Go type, so a
+// caller can force the declared slice type (e.g. coercing []int64 into []any).
+func (g *gen) emitListLitTyped(ll *ir.ListLit, elemTy *ir.Type) error {
+	g.writef("[]%s{", g.goType(elemTy))
+	for i, el := range ll.Elems {
+		if i > 0 {
+			g.writef(", ")
+		}
+		if err := g.expr(el); err != nil {
+			return err
+		}
+	}
+	g.writef("}")
+	return nil
+}
+
+// bridgeParamDefault renders a literal handler-parameter default as the Go
+// expression to store in a Param.Default (boxed to its canonical Go width so
+// it round-trips to the right Python type). Non-literal defaults are not
+// representable here and report false.
+func bridgeParamDefault(e ir.Expr) (string, bool) {
+	switch x := e.(type) {
+	case *ir.IntLit:
+		return fmt.Sprintf("int64(%d)", x.V), true
+	case *ir.FloatLit:
+		return fmt.Sprintf("float64(%v)", x.V), true
+	case *ir.StrLit:
+		return fmt.Sprintf("%q", x.V), true
+	case *ir.BoolLit:
+		if x.V {
+			return "true", true
+		}
+		return "false", true
+	case *ir.NoneLit:
+		return "nil", true
+	}
+	return "", false
+}
+
 // bridgeArgConv returns the adapter-side coercion helper for a scalar handler
 // parameter, or "" for an untyped (any) parameter forwarded as-is.
 func bridgeArgConv(t *ir.Type) string {
@@ -8843,6 +9384,295 @@ func bridgeArgConv(t *ir.Type) string {
 	}
 	return ""
 }
+
+// goWebGlueSource is the pure-Go net/http runtime emitted once in GoWeb mode:
+// a package ServeMux, typed path/query parameter parsers, and a JSON response
+// writer that normalizes Python-shaped maps (map[any]any) into string-keyed
+// JSON. No CPython is involved.
+const goWebGlueSource = `var __webMux = http.NewServeMux()
+
+// __webServe starts the HTTP server on addr (":<port>"), blocking. Panics on a
+// listen error so failures surface rather than silently exiting.
+func __webServe(addr string) {
+	if err := http.ListenAndServe(addr, __webMux); err != nil {
+		panic(err)
+	}
+}
+
+// __webErrs accumulates parameter-validation failures for one request and,
+// when non-empty, writes a FastAPI-shaped 422 response (a "detail" array of
+// {type, loc, msg, input} objects).
+type __webErrs struct{ items []map[string]any }
+
+// add records one validation failure in FastAPI's shape: a "<t>_parsing" type
+// (int_parsing / float_parsing / bool_parsing) and matching message. t is the
+// short form ("int" / "float" / "bool").
+func (e *__webErrs) add(t, in, name, input string) {
+	disp := map[string]string{"int": "integer", "float": "number", "bool": "boolean", "str": "string"}[t]
+	article := "a"
+	if t == "int" {
+		article = "an"
+	}
+	e.items = append(e.items, map[string]any{
+		"type":  t + "_parsing",
+		"loc":   []any{in, name},
+		"msg":   "Input should be a valid " + disp + ", unable to parse string as " + article + " " + disp,
+		"input": input,
+	})
+}
+
+// missing records a required-field-absent failure (FastAPI type "missing").
+func (e *__webErrs) missing(in, name string) {
+	e.items = append(e.items, map[string]any{
+		"type":  "missing",
+		"loc":   []any{in, name},
+		"msg":   "Field required",
+		"input": nil,
+	})
+}
+
+// __webAsStr / __webAsInt / __webAsFloat / __webAsBool coerce a JSON body field
+// (decoded by encoding/json: numbers are float64) to a model struct field's Go
+// type, recording a typed validation error on mismatch.
+func __webAsStr(name string, v any, e *__webErrs) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	e.add("str", "body", name, fmt.Sprint(v))
+	return ""
+}
+
+func __webAsInt(name string, v any, e *__webErrs) int64 {
+	if f, ok := v.(float64); ok {
+		return int64(f)
+	}
+	e.add("int", "body", name, fmt.Sprint(v))
+	return 0
+}
+
+func __webAsFloat(name string, v any, e *__webErrs) float64 {
+	if f, ok := v.(float64); ok {
+		return f
+	}
+	e.add("float", "body", name, fmt.Sprint(v))
+	return 0
+}
+
+func __webAsBool(name string, v any, e *__webErrs) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	e.add("bool", "body", name, fmt.Sprint(v))
+	return false
+}
+
+// respond writes the 422 body and reports true when validation failed.
+func (e *__webErrs) respond(w http.ResponseWriter) bool {
+	if len(e.items) == 0 {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	b, _ := json.Marshal(map[string]any{"detail": e.items})
+	w.Write(b)
+	return true
+}
+
+func __webPathStr(r *http.Request, name string) string { return r.PathValue(name) }
+
+func __webPathInt(r *http.Request, name string, e *__webErrs) int64 {
+	s := r.PathValue(name)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		e.add("int", "path", name, s)
+	}
+	return n
+}
+
+func __webPathFloat(r *http.Request, name string, e *__webErrs) float64 {
+	s := r.PathValue(name)
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		e.add("float", "path", name, s)
+	}
+	return f
+}
+
+func __webPathBool(r *http.Request, name string, e *__webErrs) bool {
+	s := r.PathValue(name)
+	b, err := strconv.ParseBool(s)
+	if err != nil {
+		e.add("bool", "path", name, s)
+	}
+	return b
+}
+
+func __webQueryStr(r *http.Request, name, def string) string {
+	if v := r.URL.Query().Get(name); v != "" {
+		return v
+	}
+	return def
+}
+
+func __webQueryInt(r *http.Request, name string, def int64, e *__webErrs) int64 {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		e.add("int", "query", name, v)
+	}
+	return n
+}
+
+func __webQueryFloat(r *http.Request, name string, def float64, e *__webErrs) float64 {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		e.add("float", "query", name, v)
+	}
+	return f
+}
+
+func __webQueryBool(r *http.Request, name string, def bool, e *__webErrs) bool {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		e.add("bool", "query", name, v)
+	}
+	return b
+}
+
+// __webNormalize recursively rewrites Python-shaped containers so encoding/json
+// accepts them: map[any]any (gopy's bare 'dict') becomes map[string]any with
+// stringified keys; nested maps/slices are normalized too.
+func __webNormalize(v any) any {
+	switch m := v.(type) {
+	case map[any]any:
+		out := make(map[string]any, len(m))
+		for k, vv := range m {
+			out[fmt.Sprint(k)] = __webNormalize(vv)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(m))
+		for k, vv := range m {
+			out[k] = __webNormalize(vv)
+		}
+		return out
+	case []any:
+		out := make([]any, len(m))
+		for i, vv := range m {
+			out[i] = __webNormalize(vv)
+		}
+		return out
+	}
+	return v
+}
+
+// __webBodyMap decodes the JSON request body into a bare 'dict' (map[any]any)
+// handler parameter. An empty / invalid body yields an empty map.
+func __webBodyMap(r *http.Request) map[any]any {
+	var m map[string]any
+	json.NewDecoder(r.Body).Decode(&m)
+	out := make(map[any]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// __webWriteJSON encodes a handler's return value as a JSON response.
+func __webWriteJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	b, err := json.Marshal(__webNormalize(v))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Write(b)
+}
+
+// --- OpenAPI / Swagger (generated in Go from the route table) ---------------
+
+type __webParamInfo struct {
+	Name, In, Type string // In: "path" | "query"; Type: OpenAPI schema type
+	Required       bool
+}
+
+type __webRouteInfo struct {
+	Method, Path, Name string
+	Params             []__webParamInfo
+	HasBody            bool
+}
+
+var __webRouteTable []__webRouteInfo
+
+// __webOpenAPISpec builds an OpenAPI 3.1 document from the collected route
+// table — the same data FastAPI derives from handler signatures, here produced
+// entirely in Go (no Python).
+func __webOpenAPISpec() map[string]any {
+	paths := map[string]any{}
+	for _, rt := range __webRouteTable {
+		params := []any{}
+		for _, p := range rt.Params {
+			params = append(params, map[string]any{
+				"name": p.Name, "in": p.In, "required": p.Required,
+				"schema": map[string]any{"type": p.Type},
+			})
+		}
+		op := map[string]any{
+			"summary":   rt.Name,
+			"responses": map[string]any{"200": map[string]any{"description": "Successful Response"}},
+		}
+		if len(params) > 0 {
+			op["parameters"] = params
+		}
+		if rt.HasBody {
+			op["requestBody"] = map[string]any{
+				"required": true,
+				"content":  map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "object"}}},
+			}
+		}
+		item, ok := paths[rt.Path].(map[string]any)
+		if !ok {
+			item = map[string]any{}
+			paths[rt.Path] = item
+		}
+		item[strings.ToLower(rt.Method)] = op
+	}
+	return map[string]any{
+		"openapi": "3.1.0",
+		"info":    map[string]any{"title": "gopy", "version": "0.1.0"},
+		"paths":   paths,
+	}
+}
+
+const __webDocsHTML = ` + "`" + `<!DOCTYPE html><html><head><meta charset="utf-8"><title>docs</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist/swagger-ui.css"></head>
+<body><div id="swagger-ui"></div>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist/swagger-ui-bundle.js"></script>
+<script>window.onload=function(){SwaggerUIBundle({url:"/openapi.json",dom_id:"#swagger-ui"})}</script>
+</body></html>` + "`" + `
+
+// __webInitDocs registers the OpenAPI JSON + Swagger UI routes. Called from the
+// generated init() after the route table is populated.
+func __webInitDocs() {
+	__webMux.HandleFunc("GET /openapi.json", func(w http.ResponseWriter, r *http.Request) {
+		__webWriteJSON(w, __webOpenAPISpec())
+	})
+	__webMux.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(__webDocsHTML))
+	})
+}`
 
 const bridgeGlueSource = `var __bridgeMods = map[string]*Object{}
 var __bridgeMu sync.Mutex
@@ -9018,6 +9848,14 @@ func __argBool(v any) bool {
 }`
 
 func (g *gen) methodCall(m *ir.MethodCall) error {
+	// GoWeb server start: `app.run(port)` / `uvicorn.run(app, port=…)` becomes
+	// a blocking http.ListenAndServe on the package ServeMux.
+	if addr, ok := g.webServeCall(m); ok {
+		g.usedWeb = true
+		g.registerWebHelpers()
+		g.writef("__webServe(%q)", addr)
+		return nil
+	}
 	// Bridged module call: `mod.fn(args)` where `mod` was a bare import of a
 	// non-stdlib, non-local module. Route through the embedded CPython
 	// interpreter. Leaf form only — the result is converted to a native Go

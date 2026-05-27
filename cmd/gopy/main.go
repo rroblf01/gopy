@@ -150,8 +150,9 @@ func runBuild(args []string) {
 	python := fs.String("python", "", "Python interpreter to use (default: ./.venv/bin/python3 if present, else python3)")
 	keep := fs.Bool("keep", false, "keep the intermediate Go source directory (printed to stderr)")
 	bridge := fs.Bool("bridge", false, "enable the embedded-CPython bridge for non-stdlib imports (requires CGO + libpython)")
+	goweb := fs.Bool("goweb", false, "map a recognized web framework (FastAPI/Flask) app onto a pure-Go net/http server")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: gopy build [-o binary] [-keep] [-bridge] <input.py|dir>")
+		fmt.Fprintln(os.Stderr, "usage: gopy build [-o binary] [-keep] [-bridge] [-goweb] <input.py|dir>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -177,7 +178,7 @@ func runBuild(args []string) {
 	absBin, err := filepath.Abs(binPath)
 	check(err)
 
-	goSrc, usedBridge := transpileFileBridge(src, "main", *python, *dumper, *bridge)
+	goSrc, usedBridge := transpileFileBridge(src, "main", *python, *dumper, *bridge, *goweb)
 
 	tmp, err := os.MkdirTemp("", "gopy-build-")
 	check(err)
@@ -377,14 +378,14 @@ func detectProjectName(dir string) string {
 }
 
 func transpileFile(src, pkg, python, dumper string) []byte {
-	goSrc, _ := transpileFileBridge(src, pkg, python, dumper, false)
+	goSrc, _ := transpileFileBridge(src, pkg, python, dumper, false, false)
 	return goSrc
 }
 
 // transpileFileBridge transpiles a single file, optionally enabling the
 // embedded-CPython bridge. It returns the Go source and whether any bridged
 // call was emitted (so the build driver knows to vendor the bridge + CGO).
-func transpileFileBridge(src, pkg, python, dumper string, enableBridge bool) ([]byte, bool) {
+func transpileFileBridge(src, pkg, python, dumper string, enableBridge, goWeb bool) ([]byte, bool) {
 	dumperPath := dumper
 	if dumperPath == "" {
 		dumperPath = locateDumper()
@@ -405,6 +406,7 @@ func transpileFileBridge(src, pkg, python, dumper string, enableBridge bool) ([]
 		PackageName:  pkg,
 		SourceModule: modName,
 		EnableBridge: enableBridge,
+		GoWeb:        goWeb,
 	})
 	check(err)
 	return goSrc, meta.UsedBridge
