@@ -45,7 +45,11 @@ both match CPython, and the leaf-call demo (`mymod.double/greet/addkw`) still pa
 - `from X import Y` of a bridged module — `from mymod import double, get_config` then `double(21)` → `42` and `get_config().name` → `cfg`. A `from`-bound name resolves to `__bridgeMust(__bridgeModule("X").Attr("Y"))`; calling it uses `.Call` / `.CallKw`. `from`-bound names are tracked in `g.bridgedFrom`.
 All verified end-to-end against `mymod` on `PYTHONPATH` and matching CPython.
 
-**Next step — native-type interop on bridge values.** Using a bridge value in native Go arithmetic / comparison (`n = mymod.double(21); n + 1`) still doesn't work: a bridge var is a `*Object` that converts to `any` on read, which Go's `+` won't accept without a concrete type. The fix is to let an annotation or inferred target type drive a typed conversion (`__bridgeInt(o) int64`, `__bridgeStr(o) string`, …) at the use site. Also pending: bridged subscripting (`obj[key]`), iterating a bridged sequence (`for x in obj:`), and surfacing Python exceptions as catchable gopy exceptions rather than Go panics.
+**Subscript + catchable exceptions — landed.**
+- Bridged subscript: `obj[key]` on a bridged receiver routes through `*Object.GetItem` (kept as `*Object` mid-chain, converted at the boundary). Verified `mymod.make_dict()["a"]` → `1`.
+- Python exceptions are now **catchable by type**. `lastError` returns `"ExcType: detail"` (the cgo error fetch reads `type(exc).__name__`), and the bridge glue raises gopy Exceptions via `__bridgeRaise(err) → panic(NewException(err.Error()))`. gopy's prefix-based dispatch then routes `except ValueError` etc. Verified `try: mymod.boom() except ValueError as e: print("caught:", e)` → `caught: kaboom`, matching CPython.
+
+**Next step — native-type interop + iteration.** Using a bridge value in native Go arithmetic / comparison (`n = mymod.double(21); n + 1`) still doesn't work: a bridge var converts to `any` on read, which Go's `+` won't accept without a concrete type. The fix is to let an annotation or inferred target type drive a typed conversion (`__bridgeInt(o) int64`, `__bridgeStr(o) string`, …) at the use site. Iterating a bridged sequence (`for x in obj:`) and bridged subscript *assignment* (`obj[key] = v`) are also still pending.
 
 Trade-offs accepted: binary depends on `libpython3.X.so` (no longer a pure static Go binary), every Go↔Python crossing pays marshaling + GIL serialization, and the ~640 stdlib-parity fixtures validate only the fast path.
 

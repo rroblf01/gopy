@@ -65,16 +65,32 @@ static int gopy_list_check(PyObject* o)     { return PyList_Check(o); }
 static int gopy_tuple_check(PyObject* o)    { return PyTuple_Check(o); }
 static int gopy_dict_check(PyObject* o)     { return PyDict_Check(o); }
 
-// Fetch + clear the current exception, returning its str() as a C string the
-// caller must free. Returns NULL when no exception is set.
+// Fetch + clear the current exception, returning "ExcType: message" as a C
+// string the caller must free. The "Type: " prefix lets the gopy side route
+// `except ValueError`-style handlers via its prefix-based dispatch. Returns
+// NULL when no exception is set.
 static char* gopy_err_fetch() {
     if (!PyErr_Occurred()) return NULL;
     PyObject *t, *v, *tb;
     PyErr_Fetch(&t, &v, &tb);
     PyErr_NormalizeException(&t, &v, &tb);
-    PyObject* s = v ? PyObject_Str(v) : PyUnicode_FromString("<no value>");
-    const char* utf = s ? PyUnicode_AsUTF8(s) : "<unprintable>";
-    char* out = utf ? strdup(utf) : strdup("<unprintable>");
+    // Exception type name (e.g. "ValueError").
+    const char* tn = "Exception";
+    PyObject* tnObj = NULL;
+    if (t) {
+        tnObj = PyObject_GetAttrString(t, "__name__");
+        if (tnObj) {
+            const char* s = PyUnicode_AsUTF8(tnObj);
+            if (s) tn = s;
+        }
+    }
+    PyObject* s = v ? PyObject_Str(v) : PyUnicode_FromString("");
+    const char* msg = s ? PyUnicode_AsUTF8(s) : "";
+    if (!msg) msg = "";
+    size_t n = strlen(tn) + 2 + strlen(msg) + 1;
+    char* out = (char*)malloc(n);
+    snprintf(out, n, "%s: %s", tn, msg);
+    Py_XDECREF(tnObj);
     Py_XDECREF(s);
     Py_XDECREF(t); Py_XDECREF(v); Py_XDECREF(tb);
     return out;
@@ -132,15 +148,17 @@ func withGIL(fn func()) {
 	fn()
 }
 
-// lastError returns the current Python exception as a Go error, or nil.
-// Must be called while holding the GIL.
+// lastError returns the current Python exception as a Go error, or nil. The
+// message is "ExcType: detail" (e.g. "ValueError: ...") so the gopy side can
+// route `except ValueError`-style handlers via prefix dispatch. Must be
+// called while holding the GIL.
 func lastError() error {
 	cs := C.gopy_err_fetch()
 	if cs == nil {
 		return nil
 	}
 	defer C.free(unsafe.Pointer(cs))
-	return fmt.Errorf("python: %s", C.GoString(cs))
+	return fmt.Errorf("%s", C.GoString(cs))
 }
 
 // Import imports a module by dotted name (e.g. "pydantic_core").

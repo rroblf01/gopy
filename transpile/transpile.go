@@ -5428,6 +5428,18 @@ func (g *gen) expr(e ir.Expr) error {
 		}
 		g.writef(".%s", x.Name)
 	case *ir.Subscript:
+		// Bridged subscript in value context: `obj[key]` on a bridged
+		// receiver — index via the bridge and convert the result.
+		if g.isBridgeExpr(x.Value) {
+			g.usedBridge = true
+			g.registerBridgeHelpers()
+			g.writef("__bridgeVal(")
+			if err := g.emitBridgeChainValue(x); err != nil {
+				return err
+			}
+			g.writef(")")
+			return nil
+		}
 		// User-class `__getitem__` dispatch — emit `recv.Getitem(idx)`
 		// instead of `recv[idx]` when the receiver is a known class with
 		// the method.
@@ -8276,6 +8288,8 @@ func (g *gen) isBridgeExpr(e ir.Expr) bool {
 		return g.isBridgeExpr(x.Recv)
 	case *ir.Call:
 		return g.isBridgeExpr(x.Func)
+	case *ir.Subscript:
+		return g.isBridgeExpr(x.Value)
 	}
 	return false
 }
@@ -8340,6 +8354,19 @@ func (g *gen) emitBridgeChainValue(e ir.Expr) error {
 			return err
 		}
 		g.writef(".Attr(%q))", x.Name)
+		return nil
+	case *ir.Subscript:
+		// `obj[key]` on a bridged receiver — index via .GetItem, kept as a
+		// single *Object via __bridgeMust for further chaining.
+		g.writef("__bridgeMust(")
+		if err := g.emitBridgeChainValue(x.Value); err != nil {
+			return err
+		}
+		g.writef(".GetItem(")
+		if err := g.boxedExpr(x.Index); err != nil {
+			return err
+		}
+		g.writef("))")
 		return nil
 	case *ir.Call:
 		// `Y(args)` where Y is a bridged callable, appearing as a chain
@@ -8487,12 +8514,19 @@ func (g *gen) emitBridgeMethodArgs(method string, args []ir.Expr, kws []ir.Keywo
 func (g *gen) registerBridgeHelpers() {
 	g.addImport("sync")
 	g.helpers["__bridge_glue"] = bridgeGlueSource
+	// Bridge errors are raised as gopy Exceptions so Python-side failures are
+	// catchable by `try` / `except` in the transpiled program.
+	g.needsException = true
 }
 
 const bridgeGlueSource = `var __bridgeMods = map[string]*Object{}
 var __bridgeMu sync.Mutex
 
-// __bridgeModule lazily imports and caches a Python module by name, panicking
+// __bridgeRaise turns a bridge error into a gopy Exception (message
+// "ExcType: detail") so Python-side failures are catchable by try/except.
+func __bridgeRaise(err error) { panic(NewException(err.Error())) }
+
+// __bridgeModule lazily imports and caches a Python module by name, raising
 // if the import fails (a missing third-party library is a hard error).
 func __bridgeModule(name string) *Object {
 	__bridgeMu.Lock()
@@ -8502,40 +8536,40 @@ func __bridgeModule(name string) *Object {
 	}
 	m, err := Import(name)
 	if err != nil {
-		panic(err)
+		__bridgeRaise(err)
 	}
 	__bridgeMods[name] = m
 	return m
 }
 
-// __bridgeGo unwraps a bridge call result, panicking on a Python-side error,
+// __bridgeGo unwraps a bridge call result, raising on a Python-side error,
 // and converts the returned object to a native Go value.
 func __bridgeGo(o *Object, err error) any {
 	if err != nil {
-		panic(err)
+		__bridgeRaise(err)
 	}
 	v, err := o.Go()
 	if err != nil {
-		panic(err)
+		__bridgeRaise(err)
 	}
 	return v
 }
 
-// __bridgeMust unwraps a bridge call result for further chaining, panicking on
+// __bridgeMust unwraps a bridge call result for further chaining, raising on
 // a Python-side error and yielding the lone *Object.
 func __bridgeMust(o *Object, err error) *Object {
 	if err != nil {
-		panic(err)
+		__bridgeRaise(err)
 	}
 	return o
 }
 
 // __bridgeVal converts a live bridge *Object to a native Go value at a use
-// site (print, return, etc.), panicking on a conversion error.
+// site (print, return, etc.), raising on a conversion error.
 func __bridgeVal(o *Object) any {
 	v, err := o.Go()
 	if err != nil {
-		panic(err)
+		__bridgeRaise(err)
 	}
 	return v
 }`
