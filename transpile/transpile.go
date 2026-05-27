@@ -4376,6 +4376,30 @@ func (g *gen) forEach(x *ir.ForEach) error {
 		// Fall through to forEachBody for the user body + closing brace.
 		return g.forEachBody(x)
 	}
+	// Bridged iteration: `for v in obj` where obj is a bridged value.
+	// Materialize the Python iterable into a []any via the bridge and range.
+	if g.isBridgeExpr(x.Iter) {
+		g.usedBridge = true
+		g.registerBridgeHelpers()
+		g.writeIndent()
+		switch x.Var {
+		case "_":
+			g.writef("for range __bridgeIter(")
+		default:
+			g.writef("for _, %s := range __bridgeIter(", x.Var)
+		}
+		if err := g.emitBridgeChainValue(x.Iter); err != nil {
+			return err
+		}
+		g.writef(") {\n")
+		g.indent++
+		if x.Var != "_" {
+			g.writeIndent()
+			g.writef("_ = %s\n", x.Var)
+		}
+		g.indent--
+		return g.forEachBody(x)
+	}
 	// User-class iteration: `for v in obj` where obj's class defines
 	// __iter__ returning a list/iterable. Emit `for _, v := range obj.Iter()`
 	// after binding the loop var's element type for downstream attr access.
@@ -8572,6 +8596,16 @@ func __bridgeVal(o *Object) any {
 		__bridgeRaise(err)
 	}
 	return v
+}
+
+// __bridgeIter materializes a bridged iterable into a []any for ranging,
+// raising on a Python-side error.
+func __bridgeIter(o *Object) []any {
+	xs, err := o.Iter()
+	if err != nil {
+		__bridgeRaise(err)
+	}
+	return xs
 }`
 
 func (g *gen) methodCall(m *ir.MethodCall) error {

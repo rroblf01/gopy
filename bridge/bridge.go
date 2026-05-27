@@ -43,6 +43,9 @@ static PyObject* gopy_getitem(PyObject* o, PyObject* key) {
     return PyObject_GetItem(o, key);
 }
 
+static PyObject* gopy_getiter(PyObject* o) { return PyObject_GetIter(o); }
+static PyObject* gopy_iternext(PyObject* it) { return PyIter_Next(it); }
+
 static Py_ssize_t gopy_len(PyObject* o) { return PyObject_Length(o); }
 static int gopy_is_true_obj(PyObject* o) { return PyObject_IsTrue(o); }
 static PyObject* gopy_repr(PyObject* o) { return PyObject_Repr(o); }
@@ -307,6 +310,40 @@ func (o *Object) GetItem(key any) (*Object, error) {
 		obj = &Object{p: p}
 	})
 	return obj, err
+}
+
+// Iter materializes a Python iterable into a slice of native Go values via
+// the iterator protocol (iter() / next()). Each element is converted with
+// fromPy. Errors if the object isn't iterable or an element conversion fails.
+func (o *Object) Iter() ([]any, error) {
+	var out []any
+	var err error
+	withGIL(func() {
+		it := C.gopy_getiter(o.p)
+		if it == nil {
+			err = lastError()
+			return
+		}
+		defer C.Py_DecRef(it)
+		for {
+			item := C.gopy_iternext(it)
+			if item == nil {
+				// Either exhausted (no error) or a real error mid-iteration.
+				if e := lastError(); e != nil {
+					err = e
+				}
+				return
+			}
+			gv, cerr := fromPy(item)
+			C.Py_DecRef(item)
+			if cerr != nil {
+				err = cerr
+				return
+			}
+			out = append(out, gv)
+		}
+	})
+	return out, err
 }
 
 // Len returns len(obj). Errors when the object has no length.
