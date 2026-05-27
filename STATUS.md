@@ -157,24 +157,29 @@ binary does **185k req/s @ 0.34 ms** vs uvicorn/CPython's **3.0k req/s @ 15.7 ms
 (~61× throughput, ~46× latency) at **14.9 MB RSS vs 55.4 MB** (~3.7× less). This
 is the regime that actually delivers "solo Go, poca RAM" for a web service.
 
-**Pydantic models → Go structs — foundation landed.** A `class X(BaseModel)`
-(narrow trigger: a base named exactly `BaseModel`) now lowers like a dataclass:
-the BaseModel base is dropped and each annotated member becomes a struct field
-with its default, so the model transpiles to a plain Go data struct
-(`ir.Class.IsPydantic` marks it). Verified pure-Go vs CPython:
-`Item(name="widget", price=9.99, qty=3)` → field access + the `qty=1` default
-both match. This is the prerequisite for model-typed request/response bodies.
-**Next (model wiring):** make `webRouteEligible` accept a single `BaseModel`-typed
-body param; in `emitWebHandler`, decode the JSON body field-by-field into the Go
-struct with required/type checks → field-level 422 (reusing `__webErrs`); and add
-the model to OpenAPI `components/schemas` with a `requestBody` `$ref`.
+**Pydantic models → Go structs + request-body validation — landed.** A
+`class X(BaseModel)` (narrow trigger: a base named exactly `BaseModel`) lowers
+like a dataclass — the BaseModel base is dropped and each annotated member
+becomes a struct field with its default (`ir.Class.IsPydantic` marks it). A
+handler taking a model param (`def create(item: Item)`) on a body method then
+decodes the JSON body **field by field** into the Go struct: present fields are
+coerced to the field's Go type (recording a typed error on mismatch), absent
+fields fall back to the model default or, if required, record a `missing` error,
+and any failures produce a FastAPI-shaped 422 before the handler runs (the
+instance is passed by pointer, matching gopy's class-param ABI). Verified pure-Go:
+valid body → `{"name":"widget","price":9.99,"qty":1}` (default `qty=1` applied);
+missing required `price` → `422 {"type":"missing","loc":["body","price"],"msg":"Field required"}`;
+wrong type → `422 {"type":"float_parsing",...}`. OpenAPI marks the route's
+`requestBody`.
 
 The route table is deliberately framework-neutral so other front-ends feed the
-same `net/http` codegen. **Next:** finish Pydantic model bodies (above);
-middleware; mixed int/float arithmetic (gopy doesn't auto-promote, which a model
-handler like `price * qty` hits); and a **Django front-end** (recognize
-`urlpatterns` / `path(...)` + view functions, mapping onto the same route
-table) — the user's stated longer-term target. Heavy C/Rust extensions (pydantic-core validation, numpy) can't be
+same `net/http` codegen. **Next:** richer model OpenAPI (component schema with
+per-field properties + `$ref`, vs the current generic object); nested-model /
+list fields in body decode (scalars handled today); middleware; mixed int/float
+arithmetic (gopy doesn't auto-promote, which a model handler like `price * qty`
+hits); and a **Django front-end** (recognize `urlpatterns` / `path(...)` + view
+functions, mapping onto the same route table) — the user's stated longer-term
+target. Heavy C/Rust extensions (pydantic-core validation, numpy) can't be
 "un-Pythoned" from their wheels (they're built against the CPython C-API); those
 stay on the bridge or bind their underlying native crate/lib directly.
 
