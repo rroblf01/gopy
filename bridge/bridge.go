@@ -104,6 +104,7 @@ import "C"
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"sync"
 	"unsafe"
 )
@@ -141,11 +142,16 @@ func Init() error {
 
 // withGIL runs fn while holding the GIL. It serializes all interpreter
 // access through gilMu (coarse but correct) and acquires/releases the GIL
-// with the PyGILState API, which is goroutine-thread-safe. Callers return
-// their results via captured variables in the closure.
+// with the PyGILState API. The goroutine is pinned to its OS thread for the
+// whole section: PyGILState_Ensure/Release and the per-thread Python thread
+// state are thread-specific, and Go may otherwise migrate the goroutine
+// between Ensure and Release, corrupting that state (intermittent SIGSEGV).
+// Callers return their results via captured variables in the closure.
 func withGIL(fn func()) {
 	gilMu.Lock()
 	defer gilMu.Unlock()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	gil := C.PyGILState_Ensure()
 	defer C.PyGILState_Release(gil)
 	fn()
