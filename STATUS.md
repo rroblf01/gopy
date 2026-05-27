@@ -32,6 +32,13 @@ Bridge API surface:
 
 Verified end-to-end: `import mymod` + `mymod.double(21)` / `mymod.greet("ana")` / `mymod.addkw(5, b=100)` transpiles, links libpython, and matches CPython output (`42` / `hi ana` / `105`) with `mymod` on `PYTHONPATH`. The feature is fully gated — without `-bridge`, `EnableBridge` stays false, `g.bridged` is empty, and existing single-file / project builds are byte-for-byte unchanged.
 
+**Recursive transpilation with per-module bridge fallback — landed.** `gopy build <entry.py>` discovers the local import graph (`discoverLocalModules`): each `import X` / `from X import …` is resolved to a sibling `X.py`, parsed for *its* imports, and so on. Two-phase build:
+
+1. **Pure recursion** — the entry and every discovered sibling are transpiled into one shared `package main` (helpers consolidated in `gopy_runtime.go`), with `LocalModules` set so qualified `mod.fn(...)` / `mod.NAME` accesses drop the qualifier (the whole project is one Go package). If this builds, the binary is pure Go — no CPython, no CGO.
+2. **Bridge fallback** (only with `-bridge`) — if the pure build fails because a sibling falls outside the supported subset (untyped, dynamic features, …), the build retries with the deps left to the embedded interpreter: only the entry is transpiled, and `import dep` routes through the bridge. This is what the user asked for — *transpile the pure-Python deps recursively, bridge only the leaves that can't be.*
+
+Verified: a typed sibling (`import helper; helper.shout(...)` + `from helper import GREETING`) transpiles to pure Go and matches CPython; an untyped sibling used as a bridged base (`class Child(baselib.Base)`, `baselib` untyped) trips the pure build, falls back, and runs `Child(7).shout()` → `HI 7` via embedded CPython. Covered by `TestCLIBuildRecursive` and the `geometry` multi-file fixture. **Constraint (the honest ceiling):** compiled C-extension `.so`s (pydantic_core, numpy, psycopg2's C parts) are bound to the CPython ABI — they call back into libpython for refcounting/types/GIL, so they can't run "through a Go interface" without *being* an embedded CPython. The bridge already is that interface; eliminating CPython for such a library means reimplementing its behavior in Go (as `-goweb` did for FastAPI/Flask routing), per-library. Pure-Python recursion shrinks the bridge surface to exactly those C-extension leaves.
+
 **Chained object flow — landed.** Bridge results now stay live `*Object` through method chains and assigned variables, converting to a native Go value only at use sites. A bridge chain emits the receiver via `emitBridgeChainValue` (a bridged module → `__bridgeModule("mod")`; each inner call wrapped in `__bridgeMust(...)` to yield a single `*Object`), and the outermost call feeds `__bridgeGo`. Assigning a bridged call to a variable (`v = mod.Cls({...})`) keeps it as `*Object` and records `v` in `g.bridgeVars`; a later `v.method(...)` chains, while reading `v` in a value context emits `__bridgeVal(v)` to convert. `toPy` gained a reflection fallback so typed Go collections (`map[string]string`, `[]int64`, …) and live `*Object` args convert without a hand-written case per type.
 
 Verified end-to-end against the real Rust extension:
@@ -220,24 +227,57 @@ handler like `price * qty` hits). Heavy C/Rust extensions (pydantic-core validat
 "un-Pythoned" from their wheels (they're built against the CPython C-API); those
 stay on the bridge or bind their underlying native crate/lib directly.
 
-**Hybrid Django (web in Go, ORM via bridge) — foundation landed: bridged classes.**
+**Hybrid Django (web in Go, ORM via bridge) — Django ORM runs end-to-end.**
 The Django ORM (querysets, the SQL compiler, migrations) is metaclass/descriptor
 machinery that can't be a Go struct, so the chosen path is hybrid: routing/views
 in pure Go, the ORM in embedded CPython. The enabling primitive is **bridged
 classes** — a class whose base is an external framework type (`class
-Item(models.Model)`) can't lower to a Go struct, so the AST dumper now captures
-its verbatim source (`ast.get_source_segment`), `ir.Class.IsBridged` flags it,
-and codegen emits `var Item *Object = __bridgeDefineClass("Item", <imports +
-source>)` — re-exec'ing the class in the embedded interpreter and binding the
-name to a bridge object, so `Item(...)` / `Item.objects.filter(...)` route
-through the bridge. Proven end-to-end: `class Child(baselib.Base)` defines itself
-in CPython and `Child(7).shout()` → `HI 7`, matching CPython. **Next for a real
-Django model:** Django requires `settings.configure()` + `django.setup()` (and a
-migration / `schema_editor`) to run in the embedded interpreter *before* the
-model class execs — but the class currently execs at package-init (var
-initializer) while that setup sits in `main()`, so the ordering has to be
-sequenced (run app setup, then define models, then serve). That sequencing is
-the next piece.
+Item(models.Model)`) can't lower to a Go struct, so the AST dumper captures its
+verbatim source (`ast.get_source_segment`), `ir.Class.IsBridged` flags it, and
+codegen re-execs the class in the embedded interpreter (`__bridgeDefineClass`),
+binding the name to a bridge object so `Item(...)` / `Item.objects.filter(...)`
+route through the bridge.
+
+A full single-file Django ORM script now transpiles and produces byte-identical
+output to CPython. The reference (`settings.configure()` + `django.setup()`, a
+`models.Model` subclass, `with connection.schema_editor() as se:
+se.create_model(Item)`, then `Item.objects.create(...)` / `.count()` / `.all()`
+/ `.filter(...).first()`) prints the same `count 2` / `names ['widget', 'bolt']`
+/ `filter bolt` from the transpiled Go binary as from `python3`. Five pieces made
+that work:
+
+- **Module-level executable statements** — a bare `settings.configure()`, a
+  top-level `with` / `for` / `if`, an attribute/subscript assignment, etc. are
+  collected into a synthesized `func main()` in source order (`isExecutableTopLevel`
+  in `ir/lower.go`). Plain `name = expr` / `name: T = expr` stay package vars, so
+  existing top-level lowering is unchanged. This is general, not Django-specific:
+  ordinary script-style Python (no `if __name__` guard) now transpiles. A
+  top-level `def main()` *and* leftover module statements is a hard error.
+- **Deferred bridged-class definition** — solves the setup-before-define ordering
+  Go's init rules otherwise forbid (package-var initializers run before any
+  `init()`). When a synthesized main exists, a bridged class emits only `var Item
+  *Object` at package scope; the `__bridgeDefineClass` call is emitted as a
+  `BridgeClassDef` statement at the class's source position *inside* main, after
+  `settings.configure()` / `django.setup()` have run in the same process.
+  (Django's `settings`/app registry are process globals, so a fresh exec
+  namespace still sees the configured framework.)
+- **Bridged context-manager protocol** — `with <bridged> as se:` drives the
+  manager through the bridge: `__cm.CallMethod("__enter__")` on entry, a deferred
+  `__exit__(None, None, None)` on exit, with the as-var bound as a bridge object.
+- **Bridged iteration in comprehensions / `for`** — `[i.name for i in
+  Item.objects.all()]` materializes the QuerySet via `__bridgeIter` and treats
+  each element as a live object. Elements arrive boxed as `any`, so an
+  `any`-typed loop var is tracked in `bridgeObjVars` and unwrapped via
+  `__bridgeObj(v)` before chained `.Attr` / `.CallMethod`.
+- **`__main__.__file__` at interpreter init** — the embedded interpreter's
+  `__main__` is synthetic and has no `__file__`, which breaks Django's single-file
+  `INSTALLED_APPS=["__main__"]` idiom (AppConfig derives the app path from it).
+  Init now sets `__main__.__file__` to a cwd-relative path; harmless otherwise.
+
+**Next:** wire ORM calls from Go HTTP handlers (`-goweb`) so a real request flow
+hits the bridged ORM — the standalone script proves the ORM path; the hybrid web
++ ORM composition is the remaining integration. Deferred: converter-accurate
+Django 404, request.POST/headers, middleware.
 
 ## Supported
 
@@ -271,7 +311,7 @@ the next piece.
 - `x if cond else y` IIFE now falls back to the user-function return type when the branches' static type wasn't pinned at lower time (e.g. forward calls to a sibling nested function whose declaration the lower pass hadn't yet seen)
 - `__call__` dispatch on user classes (`c()` lowers to `c.Call()`) now applies parameter defaults at the call site: `def __call__(self, step: int = 1)` lets `c()` fill in `step=1` automatically. Previously the call required every positional arg to be supplied explicitly
 - `dict.keys()` / `dict.values()` standalone return slices; `.items()` only via for-loop unpacking
-- Multi-file projects in a single directory (each `.py` → sibling `.go`, shared `package main`)
+- Multi-file projects in a single directory (each `.py` → sibling `.go`, shared `package main`). `gopy build <entry.py>` also follows the import graph **recursively**: a sibling `mod.py` reached via `import mod` / `from mod import ...` is transpiled into the same package, and qualified access `mod.fn(...)` / `mod.NAME` drops the qualifier (`Options.LocalModules`). Module-level executable statements in any module become a synthesized `main()`
 - Stdlib shims: `sys.argv`, `sys.exit(n)`, `os.getenv(k)`, `time.time()`, `time.sleep(s)`, `json.dumps(x)`, `json.loads(s)`, `datetime.datetime.now()` returns a Datetime supporting `.year/.month/.day/.hour/.minute/.second/.isoformat()` and `+ timedelta` / `- timedelta` / `dt - dt` arithmetic, `datetime.timedelta(days)`, `pathlib.Path(...)` with `.exists()` / `.is_file()` / `.is_dir()` / `.read_text()` / `.write_text(s)`, `re.findall(p, s)`, `re.search(p, s)`, `re.match(p, s)`, `re.sub(p, repl, s)` — `search` and `match` return a Match object exposing `.group([n])` and `.groups()`; `x is None` / `x is not None` and truthy `if m:` checks work on these nullable returns; `csv.reader(lines)` parses a list of CSV lines into a `list[list[str]]`; `math` (`pi`, `e`, `inf`, `sqrt`, `floor`, `ceil`, `log`, `log2`, `log10`, `exp`, `sin`, `cos`, `tan`, `atan`, `atan2`, `pow`); `random.random()` / `random.randint(a, b)` / `random.seed(n)` (CPython and Go use different PRNGs, so deterministic-output fixtures must compare ranges, not values); `hashlib.sha256(b).hexdigest()` / `hashlib.sha1(b).hexdigest()` / `hashlib.sha512(b).hexdigest()` / `hashlib.md5(b).hexdigest()`; `base64.b64encode(b)` / `base64.b64decode(s)` (str in/out — `.encode()` / `.decode()` are no-ops); `from urllib.parse import quote, unquote`; `from collections import Counter` (typed dict-of-counts inline); `from itertools import chain, accumulate` (eagerly materialized as lists); `str.encode()` / `bytes.decode()` (no-op pass-through, since gopy uses `string` for both); `urllib.parse.urlencode(d)` for `dict[str, str]` (keys sorted for deterministic output); `string` constants (`ascii_lowercase`, `ascii_uppercase`, `ascii_letters`, `digits`, `hexdigits`, `octdigits`, `punctuation`, `whitespace`, `printable`); `collections.defaultdict(factory)` when the assignment carries a `dict[K, V]` annotation (the factory is ignored — Go's zero value covers missing keys); `subprocess.run(["cmd", ...])` returning a `CompletedProcess` with `returncode` / `stdout` / `stderr` attributes (CPython kwargs like `capture_output=True` / `text=True` are accepted at the call site and silently ignored)
 - Context manager: `with open(path[, mode]) as fh:` — `fh.read()` and `fh.write(s)`. Multi-item form (`with A() as a, B() as b: body`) also supported — desugars to nested `with` statements so each item gets its own context-manager lifecycle (innermost closes first, matching CPython)
 - Slice assignment with empty RHS (`xs[i:j] = []`) propagates the target's static element type to the rebuilt list literal so the empty-list assignment doesn't collapse to `[]any{}`

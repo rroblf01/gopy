@@ -84,7 +84,7 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgeObjVars: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgeObjVars: map[string]bool{}, localMods: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
 	g.buildAliases(m)
 	if opt.EnableBridge || opt.GoWeb {
 		g.bridgeImportSrc = g.buildBridgeImportSrc(m)
@@ -310,6 +310,16 @@ func (g *gen) buildAliases(m *ir.Module) {
 			for _, n := range imp.Names {
 				if n.Alias != "" {
 					g.aliases[n.Alias] = n.Name
+				}
+				// A bare `import mod` of a sibling .py transpiled into this same
+				// Go package: record the binding name so qualified `mod.fn(...)`
+				// / `mod.NAME` accesses drop the qualifier.
+				if g.isLocalModule(n.Name) {
+					local := n.Alias
+					if local == "" {
+						local = n.Name
+					}
+					g.localMods[local] = true
 				}
 				// Bridge candidacy: a bare module import that is neither a
 				// stdlib shim nor a local sibling module gets routed through
@@ -633,6 +643,12 @@ type gen struct {
 	// `import X as Y`) to a dotted stdlib path the codegen knows about.
 	// Example: `from datetime import datetime` → aliases["datetime"] = "datetime.datetime".
 	aliases map[string]string
+	// localMods is the set of local binding names introduced by `import mod`
+	// / `import mod as alias` where `mod` is a sibling .py transpiled into the
+	// same Go package. Since the whole project shares one package, a qualified
+	// access `mod.fn(...)` / `mod.NAME` drops the qualifier and resolves to the
+	// bare package-level symbol.
+	localMods map[string]bool
 	// bridged maps a local Python name bound by a bare `import X` (or
 	// `import X as Y`) whose module is neither a stdlib shim nor a local
 	// transpilable module. Calls on such names route through the embedded
@@ -5463,6 +5479,13 @@ func (g *gen) expr(e ir.Expr) error {
 	case *ir.MethodCall:
 		return g.methodCall(x)
 	case *ir.Attribute:
+		// Local-module attribute read: `mod.NAME` where `mod` is a sibling .py
+		// in the same package. Drop the qualifier — `NAME` is a package-level
+		// symbol.
+		if recv, ok := x.Recv.(*ir.Name); ok && g.localMods[recv.N] {
+			g.writef("%s", x.Name)
+			return nil
+		}
 		// Bridged attribute read in value context: `mod.CONSTANT` /
 		// `obj.field` on a bridged receiver. Fetch via .Attr and convert to
 		// a native Go value. (Chain receivers read raw *Object instead —
@@ -10517,6 +10540,16 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 				return nil
 			}
 		}
+	}
+	// Local-module call: `mod.fn(args)` where `mod` is a sibling .py transpiled
+	// into this same package. Drop the qualifier and emit a bare free call —
+	// `fn(args)` resolves to the package-level function.
+	if recv, ok := m.Recv.(*ir.Name); ok && g.localMods[recv.N] {
+		return g.call(&ir.Call{
+			Func:     &ir.Name{N: m.Method},
+			Args:     m.Args,
+			Keywords: m.Keywords,
+		})
 	}
 	// Bridged module call: `mod.fn(args)` where `mod` was a bare import of a
 	// non-stdlib, non-local module. Route through the embedded CPython

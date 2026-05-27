@@ -96,6 +96,46 @@ func TestCLIBuildSharedRuntime(t *testing.T) {
 	}
 }
 
+// TestCLIBuildRecursive runs `gopy build <entry.py>` on a single entry file
+// that imports a sibling module both qualified (`mod.fn(...)`) and via
+// `from mod import NAME`. The build must follow the import to the sibling .py,
+// transpile it into the shared package, and strip the qualifier — proving the
+// single-file entry point recursively pulls in local pure-Python deps.
+func TestCLIBuildRecursive(t *testing.T) {
+	root := repoRoot(t)
+	gopyBin := buildGopyCLI(t, root)
+	tmp := t.TempDir()
+	files := map[string]string{
+		"helper.py": "GREETING = \"hi\"\n\n" +
+			"def shout(s: str) -> str:\n    return s.upper()\n",
+		"app.py": "import helper\n" +
+			"from helper import GREETING\n" +
+			"def main() -> None:\n" +
+			"    print(GREETING, helper.shout(\"world\"))\n" +
+			"if __name__ == \"__main__\":\n    main()\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outBin := filepath.Join(tmp, "recur-bin")
+	cmd := exec.Command(gopyBin, "build", "-o", outBin, filepath.Join(tmp, "app.py"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gopy build (recursive): %v\n%s", err, out)
+	}
+	var got bytes.Buffer
+	run := exec.Command(outBin)
+	run.Stdout = &got
+	if err := run.Run(); err != nil {
+		t.Fatalf("run binary: %v", err)
+	}
+	want := "hi WORLD\n"
+	if got.String() != want {
+		t.Fatalf("output mismatch\nwant %q\n got %q", want, got.String())
+	}
+}
+
 // TestCLIBuildProject runs `gopy build <dir>` against a multi-file fixture
 // and checks the resulting binary's stdout matches running `python3 main.py`
 // from inside that directory. Covers the directory entry point that lets

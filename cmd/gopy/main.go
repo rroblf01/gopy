@@ -178,7 +178,22 @@ func runBuild(args []string) {
 	absBin, err := filepath.Abs(binPath)
 	check(err)
 
-	goSrc, usedBridge := transpileFileBridge(src, "main", *python, *dumper, *bridge, *goweb)
+	// Resolve the toolchain paths once so import-graph discovery and per-module
+	// transpilation agree on which Python / dumper to use.
+	dumperPath := *dumper
+	if dumperPath == "" {
+		dumperPath = locateDumper()
+		if dumperPath == "" {
+			die("cannot locate py_ast_dump.py (pass -dumper)")
+		}
+	}
+	pyBin := *python
+	if pyBin == "" {
+		pyBin = parser.LocatePython(filepath.Dir(src))
+	}
+	// Follow the import graph to sibling .py modules so a single-file build
+	// recursively transpiles the local pure-Python deps it imports.
+	deps, localMods := discoverLocalModules(src, pyBin, dumperPath)
 
 	tmp, err := os.MkdirTemp("", "gopy-build-")
 	check(err)
@@ -187,27 +202,105 @@ func runBuild(args []string) {
 	} else {
 		fmt.Fprintf(os.Stderr, "gopy: keeping intermediate dir %s\n", tmp)
 	}
-	goFile := filepath.Join(tmp, "main.go")
-	check(os.WriteFile(goFile, goSrc, 0o644))
-	modContent := "module gopy-build\n\ngo 1.22\n"
-	check(os.WriteFile(filepath.Join(tmp, "go.mod"), []byte(modContent), 0o644))
+	check(os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module gopy-build\n\ngo 1.22\n"), 0o644))
 
+	if len(deps) == 0 {
+		// No local deps: single self-contained main.go (helpers inline).
+		goSrc, meta := transpileModule(src, "main", pyBin, dumperPath, *bridge, *goweb, false, nil)
+		check(os.WriteFile(filepath.Join(tmp, "main.go"), goSrc, 0o644))
+		runGoBuild(tmp, absBin, meta.UsedBridge)
+		return
+	}
+
+	// Recursive multi-file build. transpileDeps lists the discovered sibling
+	// modules to transpile into the shared package; lm is the set of local
+	// module names whose qualified `mod.fn(...)` access drops the qualifier.
+	// Returns the go-build error (nil on success) without exiting, so the
+	// caller can fall back to bridging.
+	buildOnce := func(transpileDeps, lm []string) error {
+		// Clear any .go from a previous attempt (keep go.mod) so a stale dep
+		// translation can't leak into a fallback build.
+		if matches, _ := filepath.Glob(filepath.Join(tmp, "*.go")); matches != nil {
+			for _, m := range matches {
+				os.Remove(m)
+			}
+		}
+		sharedHelpers := map[string]string{}
+		sharedImports := map[string]bool{}
+		usedBridge := false
+		emit := func(path, goName string) error {
+			goSrc, meta, err := tryTranspileModule(path, "main", pyBin, dumperPath, *bridge, *goweb, true, lm)
+			if err != nil {
+				return fmt.Errorf("%s: %w", filepath.Base(path), err)
+			}
+			for k, v := range meta.Helpers {
+				sharedHelpers[k] = v
+			}
+			for _, i := range meta.Imports {
+				sharedImports[i] = true
+			}
+			if meta.UsedBridge {
+				usedBridge = true
+			}
+			return os.WriteFile(filepath.Join(tmp, goName), goSrc, 0o644)
+		}
+		// The entry must transpile — it can't be bridged.
+		if err := emit(src, "main.go"); err != nil {
+			die(fmt.Sprintf("%s", err))
+		}
+		for _, d := range transpileDeps {
+			if err := emit(d, strings.TrimSuffix(filepath.Base(d), ".py")+".go"); err != nil {
+				return err
+			}
+		}
+		if len(sharedHelpers) > 0 {
+			check(os.WriteFile(filepath.Join(tmp, "gopy_runtime.go"), renderProjectRuntime("main", sharedHelpers, sharedImports), 0o644))
+		}
+		return runGoBuildErr(tmp, absBin, usedBridge)
+	}
+
+	// Phase 1: transpile the entry and every discovered sibling (pure Go).
+	err = buildOnce(deps, localMods)
+	if err == nil {
+		return
+	}
+	// Phase 2 (only with -bridge): a dep fell outside the supported subset
+	// (untyped, dynamic features, …), so the pure build failed. Re-run with the
+	// deps left to the embedded interpreter — only the entry is transpiled, and
+	// `import dep` routes through the bridge. This is what keeps the transpiler
+	// optimistic (transpile what fits) while still running the rest.
+	if *bridge {
+		fmt.Fprintf(os.Stderr, "gopy: pure recursion failed (%v); retrying with local deps bridged\n", err)
+		if err2 := buildOnce(nil, nil); err2 != nil {
+			die("go build failed: " + err2.Error())
+		}
+		return
+	}
+	die(fmt.Sprintf("go build failed: %v (pass -bridge to run unsupported local deps in embedded CPython)", err))
+}
+
+// runGoBuild compiles the staged package in tmp into absBin, vendoring the
+// bridge sources and enabling CGO when the program calls into embedded CPython.
+// Exits on failure.
+func runGoBuild(tmp, absBin string, usedBridge bool) {
+	if err := runGoBuildErr(tmp, absBin, usedBridge); err != nil {
+		die("go build failed: " + err.Error())
+	}
+}
+
+// runGoBuildErr is runGoBuild that returns the error instead of exiting.
+func runGoBuildErr(tmp, absBin string, usedBridge bool) error {
 	cmd := exec.Command("go", "build", "-o", absBin, ".")
 	cmd.Dir = tmp
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
-	// When the program calls into the embedded interpreter, vendor the bridge
-	// implementation as package main and build with CGO enabled so it links
-	// libpython. Without bridged calls the binary stays pure Go.
 	if usedBridge {
 		check(os.WriteFile(filepath.Join(tmp, "gopy_bridge.go"), []byte(bridgepkg.MainPackageSource()), 0o644))
 		check(os.WriteFile(filepath.Join(tmp, "gopy_bridge_reverse.go"), []byte(bridgepkg.ReverseSource()), 0o644))
 		check(os.WriteFile(filepath.Join(tmp, "gopy_bridge_introspect.go"), []byte(bridgepkg.IntrospectSource()), 0o644))
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	}
-	if err := cmd.Run(); err != nil {
-		die("go build failed: " + err.Error())
-	}
+	return cmd.Run()
 }
 
 // buildProject handles `gopy build <dir>`: transpiles every .py in the dir
@@ -249,6 +342,14 @@ func buildProject(srcDir, outFlag, python, dumper string, keep bool) {
 	check(os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module gopy-build\n\ngo 1.22\n"), 0o644))
 	entries, err := os.ReadDir(srcDir)
 	check(err)
+	// Every .py stem is a sibling module in the shared package, so qualified
+	// `mod.fn(...)` accesses drop the qualifier.
+	var localMods []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") {
+			localMods = append(localMods, strings.TrimSuffix(e.Name(), ".py"))
+		}
+	}
 	wrote := 0
 	sharedHelpers := map[string]string{}
 	sharedImports := map[string]bool{}
@@ -269,6 +370,7 @@ func buildProject(srcDir, outFlag, python, dumper string, keep bool) {
 			PackageName:  "main",
 			SkipHelpers:  true,
 			SourceModule: e.Name(),
+			LocalModules: localMods,
 		})
 		if err != nil {
 			die(fmt.Sprintf("%s: %v", pyPath, err))
@@ -386,6 +488,24 @@ func transpileFile(src, pkg, python, dumper string) []byte {
 // embedded-CPython bridge. It returns the Go source and whether any bridged
 // call was emitted (so the build driver knows to vendor the bridge + CGO).
 func transpileFileBridge(src, pkg, python, dumper string, enableBridge, goWeb bool) ([]byte, bool) {
+	goSrc, meta := transpileModule(src, pkg, python, dumper, enableBridge, goWeb, false, nil)
+	return goSrc, meta.UsedBridge
+}
+
+// transpileModule parses, lowers, and transpiles one .py file. localMods names
+// sibling modules transpiled into the same Go package (so `mod.fn(...)` drops
+// the qualifier); skipHelpers omits inline runtime helpers so the caller can
+// emit them once into a shared gopy_runtime.go for a multi-file build.
+func transpileModule(src, pkg, python, dumper string, enableBridge, goWeb, skipHelpers bool, localMods []string) ([]byte, *transpile.ModuleMeta) {
+	goSrc, meta, err := tryTranspileModule(src, pkg, python, dumper, enableBridge, goWeb, skipHelpers, localMods)
+	check(err)
+	return goSrc, meta
+}
+
+// tryTranspileModule is transpileModule that returns the error instead of
+// exiting — used to probe whether a discovered local module is in the
+// supported subset (and otherwise fall back to bridging it).
+func tryTranspileModule(src, pkg, python, dumper string, enableBridge, goWeb, skipHelpers bool, localMods []string) ([]byte, *transpile.ModuleMeta, error) {
 	dumperPath := dumper
 	if dumperPath == "" {
 		dumperPath = locateDumper()
@@ -398,18 +518,87 @@ func transpileFileBridge(src, pkg, python, dumper string, enableBridge, goWeb bo
 		pyBin = parser.LocatePython(src)
 	}
 	root, err := parser.ParseFileWith(pyBin, dumperPath, src)
-	check(err)
+	if err != nil {
+		return nil, nil, err
+	}
 	modName := filepath.Base(src)
 	mod, err := ir.Lower(modName, root)
-	check(err)
-	goSrc, meta, err := transpile.ModuleWithMeta(mod, transpile.Options{
+	if err != nil {
+		return nil, nil, err
+	}
+	return transpile.ModuleWithMeta(mod, transpile.Options{
 		PackageName:  pkg,
 		SourceModule: modName,
 		EnableBridge: enableBridge,
 		GoWeb:        goWeb,
+		SkipHelpers:  skipHelpers,
+		LocalModules: localMods,
 	})
-	check(err)
-	return goSrc, meta.UsedBridge
+}
+
+// scanImports returns the module names referenced by top-level `import X` /
+// `from X import ...` statements in a parsed module.
+func scanImports(root parser.Node) []string {
+	var out []string
+	for _, stmt := range root.Children("body") {
+		switch stmt.Type() {
+		case "Import":
+			for _, a := range stmt.Children("names") {
+				if nm := a.Str("name"); nm != "" {
+					out = append(out, nm)
+				}
+			}
+		case "ImportFrom":
+			if m := stmt.Str("module"); m != "" {
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+// discoverLocalModules walks the import graph from entryPath, following
+// `import X` / `from X import ...` to sibling `X.py` files in the entry's
+// directory (single-segment names only — subpackages are not yet resolved).
+// It returns the dependency files (excluding the entry) in discovery order and
+// the set of local module names used for qualifier stripping. Imports that
+// don't resolve to a sibling file (stdlib / third-party) are left alone.
+func discoverLocalModules(entryPath, pyBin, dumperPath string) (deps []string, modNames []string) {
+	dir := filepath.Dir(entryPath)
+	entryAbs, _ := filepath.Abs(entryPath)
+	seen := map[string]bool{entryAbs: true}
+	nameSet := map[string]bool{}
+	queue := []string{entryAbs}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		root, err := parser.ParseFileWith(pyBin, dumperPath, cur)
+		if err != nil {
+			continue // unparseable: don't discover through it
+		}
+		for _, name := range scanImports(root) {
+			seg := name
+			if i := strings.IndexByte(seg, '.'); i >= 0 {
+				seg = seg[:i]
+			}
+			cand := filepath.Join(dir, seg+".py")
+			if _, err := os.Stat(cand); err != nil {
+				continue // not a local sibling
+			}
+			nameSet[seg] = true
+			abs, _ := filepath.Abs(cand)
+			if !seen[abs] {
+				seen[abs] = true
+				queue = append(queue, abs)
+				deps = append(deps, cand)
+			}
+		}
+	}
+	for n := range nameSet {
+		modNames = append(modNames, n)
+	}
+	sort.Strings(modNames)
+	return deps, modNames
 }
 
 // locateDumper walks up from the caller's source dir, or from CWD, looking

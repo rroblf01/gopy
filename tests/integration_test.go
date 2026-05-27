@@ -113,6 +113,14 @@ func TestMultiFile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Every .py stem is a sibling module in the shared package, so
+			// qualified `mod.fn(...)` accesses drop the qualifier.
+			var localMods []string
+			for _, e := range entries {
+				if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") {
+					localMods = append(localMods, strings.TrimSuffix(e.Name(), ".py"))
+				}
+			}
 			for _, e := range entries {
 				if e.IsDir() || !strings.HasSuffix(e.Name(), ".py") {
 					continue
@@ -126,7 +134,7 @@ func TestMultiFile(t *testing.T) {
 				if err != nil {
 					t.Fatalf("lower %s: %v", pyPath, err)
 				}
-				src, err := transpile.Module(mod, transpile.Options{PackageName: "main"})
+				src, err := transpile.Module(mod, transpile.Options{PackageName: "main", LocalModules: localMods})
 				if err != nil {
 					t.Fatalf("transpile %s: %v\n%s", pyPath, err, src)
 				}
