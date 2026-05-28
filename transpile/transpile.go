@@ -7086,7 +7086,7 @@ func (g *gen) call(c *ir.Call) error {
 				if il, ok := c.Args[0].(*ir.IntLit); ok {
 					port = il.V
 				}
-				g.writef("__webServe(\":%d\")", port)
+				g.emitServeCall(fmt.Sprintf(":%d", port))
 				return nil
 			case "JsonResponse":
 				g.usedWeb = true
@@ -9322,7 +9322,7 @@ func (g *gen) webRouteEligible(fn *ir.Func) bool {
 		return false
 	}
 	for _, p := range fn.Params {
-		if bridgeArgKindOK(p.Ty) || webBodyParam(p.Ty) || g.isPydanticParam(p.Ty) {
+		if g.bridgeArgKindOK(p.Ty) || webBodyParam(p.Ty) || g.isPydanticParam(p.Ty) {
 			continue
 		}
 		return false
@@ -9867,6 +9867,22 @@ func (g *gen) registerWebHelpers() {
 	g.helpers["__web_glue"] = goWebGlueSource
 }
 
+// emitServeCall writes the runtime entry — `__webServe(addr)` for a pure-Go
+// build, or the bridge-augmented `__webServeOrCmd(addr)` (Django management
+// dispatch + serve) when bridge + goweb are both active. The latter requires
+// bridge helpers to be registered too.
+func (g *gen) emitServeCall(addr string) {
+	if g.opt.EnableBridge && g.opt.GoWeb {
+		g.addImport("os")
+		g.registerBridgeHelpers()
+		g.usedBridge = true
+		g.helpers["__web_serve_or_cmd"] = goWebServeOrCmdSource
+		g.writef("__webServeOrCmd(%q)", addr)
+		return
+	}
+	g.writef("__webServe(%q)", addr)
+}
+
 // registerBridgeHelpers installs the once-emitted runtime glue the bridged
 // calls rely on: a cached module importer and an error-checking converter.
 // Both reference the vendored bridge symbols (Import / *Object) that
@@ -9886,7 +9902,7 @@ func (g *gen) registerBridgeHelpers() {
 // but not adaptable falls back to the existing accept-and-ignore behavior
 // (empty result), so it still compiles.
 func (g *gen) bridgeDecorators(fn *ir.Func) []ir.Expr {
-	if len(fn.Decorators) == 0 || !bridgeRouteEligible(fn) {
+	if len(fn.Decorators) == 0 || !g.bridgeRouteEligible(fn) {
 		return nil
 	}
 	var out []ir.Expr
@@ -9899,26 +9915,42 @@ func (g *gen) bridgeDecorators(fn *ir.Func) []ir.Expr {
 }
 
 // bridgeRouteEligible reports whether a handler's signature can be adapted to
-// a reverse-bridge callback: no *args/**kwargs, parameters limited to scalars
-// or untyped (any), and a single non-tuple/non-named return.
-func bridgeRouteEligible(fn *ir.Func) bool {
+// a reverse-bridge callback: no *args/**kwargs, parameters limited to scalars,
+// untyped (any), or a transpiled Pydantic-model class (body param, decoded
+// from the JSON object the framework hands us), and a single non-tuple/non-
+// named return.
+func (g *gen) bridgeRouteEligible(fn *ir.Func) bool {
 	if fn.Vararg != nil || fn.Kwarg != nil {
 		return false
 	}
 	for _, p := range fn.Params {
-		if !bridgeArgKindOK(p.Ty) {
+		if !g.bridgeArgKindOK(p.Ty) {
 			return false
 		}
 	}
 	return bridgeRetKindOK(fn.Ret)
 }
 
-func bridgeArgKindOK(t *ir.Type) bool {
+// isPydanticModelTy reports whether `t` references a transpiled Pydantic model
+// class — used to widen bridge handler eligibility (model body params) and to
+// route adapter conversion through the dict→struct path.
+func (g *gen) isPydanticModelTy(t *ir.Type) bool {
+	if t == nil || t.Kind != ir.TyNamed {
+		return false
+	}
+	c, ok := g.classes[t.Name]
+	return ok && c.IsPydantic
+}
+
+func (g *gen) bridgeArgKindOK(t *ir.Type) bool {
 	if t == nil {
 		return true
 	}
 	switch t.Kind {
 	case ir.TyInt, ir.TyFloat, ir.TyStr, ir.TyBool, ir.TyAny, ir.TyUnknown:
+		return true
+	}
+	if g.isPydanticModelTy(t) {
 		return true
 	}
 	return false
@@ -9939,7 +9971,7 @@ func bridgeRetKindOK(t *ir.Type) bool {
 // bridgeAnnotation maps an IR type to the Python type-name string the
 // introspection factory (_gopy_resolve) understands, so a framework reading
 // inspect.signature on the exposed handler sees the right annotation.
-func bridgeAnnotation(t *ir.Type) string {
+func (g *gen) bridgeAnnotation(t *ir.Type) string {
 	if t == nil {
 		return ""
 	}
@@ -9959,6 +9991,15 @@ func bridgeAnnotation(t *ir.Type) string {
 	case ir.TyNone:
 		return "None"
 	case ir.TyNamed:
+		// Pydantic model body params surface to the framework as `dict`: the
+		// framework parses the JSON body into a plain dict, hands it to the
+		// adapter, and the adapter reconstructs the typed Go struct field by
+		// field. Routing the framework through a transpiled Go struct as a
+		// real Python type isn't possible — the struct is Go, not a Python
+		// class object.
+		if g.isPydanticModelTy(t) {
+			return "dict"
+		}
 		return t.Name
 	}
 	return ""
@@ -9991,7 +10032,7 @@ func (g *gen) emitBridgeRoutes() error {
 			if j > 0 {
 				g.writef(", ")
 			}
-			g.writef("{Name: %q, Annotation: %q", p.Name, bridgeAnnotation(p.Ty))
+			g.writef("{Name: %q, Annotation: %q", p.Name, g.bridgeAnnotation(p.Ty))
 			// A literal default carries through to the Python signature so the
 			// framework treats the param as optional with that default (a query
 			// param in FastAPI). Non-literal defaults are left as required.
@@ -10002,7 +10043,7 @@ func (g *gen) emitBridgeRoutes() error {
 			}
 			g.writef("}")
 		}
-		g.writef("}, %q, __pyadapter_%s))\n", bridgeAnnotation(fn.Ret), fn.Name)
+		g.writef("}, %q, __pyadapter_%s))\n", g.bridgeAnnotation(fn.Ret), fn.Name)
 		// Apply decorators bottom-up (Python applies the closest one first),
 		// each wrapping the running result. The decorator chain itself emits
 		// as a single *Object via emitBridgeChainValue.
@@ -10025,6 +10066,23 @@ func (g *gen) emitBridgeRoutes() error {
 func (g *gen) emitRouteAdapter(idx int, fn *ir.Func) error {
 	g.writef("func __pyadapter_%s(__args []any, __kwargs map[string]any) any {\n", fn.Name)
 	g.writef("_ = __kwargs\n")
+	// Pre-build any Pydantic-body params from the incoming dict so the typed
+	// handler call below sees a *Cls. The framework annotated the param as
+	// `dict` (see bridgeAnnotation), so __args[j] is a map[string]any (or any
+	// containing it) coming back from the reverse-bridge fromPy conversion.
+	for j, p := range fn.Params {
+		if !g.isPydanticModelTy(p.Ty) {
+			continue
+		}
+		cls := g.classes[p.Ty.Name]
+		g.writef("var __body_%d *%s\n", j, p.Ty.Name)
+		g.writef("if __m, __ok := __args[%d].(map[string]any); __ok {\n", j)
+		g.writef("__body_%d = &%s{}\n", j, p.Ty.Name)
+		for _, f := range cls.Fields {
+			g.emitPydanticFieldDecode(fmt.Sprintf("__body_%d", j), f)
+		}
+		g.writef("}\n")
+	}
 	hasRet := fn.Ret != nil && fn.Ret.Kind != ir.TyNone && fn.Ret.Kind != ir.TyUnknown
 	if hasRet {
 		g.writef("return ")
@@ -10033,6 +10091,10 @@ func (g *gen) emitRouteAdapter(idx int, fn *ir.Func) error {
 	for j, p := range fn.Params {
 		if j > 0 {
 			g.writef(", ")
+		}
+		if g.isPydanticModelTy(p.Ty) {
+			g.writef("__body_%d", j)
+			continue
 		}
 		conv := bridgeArgConv(p.Ty)
 		if conv == "" {
@@ -10048,6 +10110,36 @@ func (g *gen) emitRouteAdapter(idx int, fn *ir.Func) error {
 	}
 	g.writef("}\n")
 	return nil
+}
+
+// emitPydanticFieldDecode writes one `if v, ok := __m[<key>].(<T>); ok { recv.<field> = v }`
+// for a struct field, narrowing the gopy-canonical Go scalar from the JSON-
+// decoded map. Defaults remain whatever the struct zero-value is, since
+// emission goes through the dataclass-style struct emit elsewhere.
+func (g *gen) emitPydanticFieldDecode(recv string, f ir.Param) {
+	if f.Ty == nil {
+		g.writef("if __v, __ok := __m[%q]; __ok { %s.%s = __v }\n", f.Name, recv, f.Name)
+		return
+	}
+	switch f.Ty.Kind {
+	case ir.TyInt:
+		// JSON numbers decode to float64 through encoding/json; accept either.
+		g.writef("if __v, __ok := __m[%q].(int64); __ok { %s.%s = __v } else if __v, __ok := __m[%q].(float64); __ok { %s.%s = int64(__v) } else if __v, __ok := __m[%q].(int); __ok { %s.%s = int64(__v) }\n",
+			f.Name, recv, f.Name,
+			f.Name, recv, f.Name,
+			f.Name, recv, f.Name)
+	case ir.TyFloat:
+		g.writef("if __v, __ok := __m[%q].(float64); __ok { %s.%s = __v } else if __v, __ok := __m[%q].(int64); __ok { %s.%s = float64(__v) } else if __v, __ok := __m[%q].(int); __ok { %s.%s = float64(__v) }\n",
+			f.Name, recv, f.Name,
+			f.Name, recv, f.Name,
+			f.Name, recv, f.Name)
+	case ir.TyStr:
+		g.writef("if __v, __ok := __m[%q].(string); __ok { %s.%s = __v }\n", f.Name, recv, f.Name)
+	case ir.TyBool:
+		g.writef("if __v, __ok := __m[%q].(bool); __ok { %s.%s = __v }\n", f.Name, recv, f.Name)
+	default:
+		g.writef("if __v, __ok := __m[%q]; __ok { %s.%s, _ = __v.(%s) }\n", f.Name, recv, f.Name, g.goType(f.Ty))
+	}
 }
 
 // isAnyType reports whether t is the untyped/any element type (nil, TyAny, or
@@ -10193,6 +10285,64 @@ func __webServe(addr string) {
 	if err := http.ListenAndServe(addr, __webMux); err != nil {
 		panic(err)
 	}
+}`
+
+// goWebServeOrCmdSource is the bridge-augmented entrypoint: any extra argv
+// (a subcommand like "shell_plus", "migrate", …) is handed to Django's
+// `django.core.management.execute_from_command_line`, so the same binary
+// doubles as a manage.py replacement. With no argv tail, behaves like
+// __webServe. Only emitted when both -goweb and -bridge are set, and the
+// transpiler has already initialised Django above this call (the synthesized
+// main runs settings.configure() + django.setup() before reaching here).
+const goWebServeOrCmdSource = `func __webServeOrCmd(addr string) {
+	if len(os.Args) > 1 {
+		// Make the embedded interpreter's stdout/stderr line-buffered so
+		// management-command output reaches the terminal before a SystemExit
+		// short-circuits us out of the Python world. reconfigure is a no-op
+		// when the stream doesn't support it (older Python, redirected pipe).
+		sys := __bridgeModule("sys")
+		if so, err := sys.Attr("stdout"); err == nil {
+			_, _ = so.CallMethodKw("reconfigure", nil, map[string]any{"line_buffering": true, "write_through": true})
+		}
+		if se, err := sys.Attr("stderr"); err == nil {
+			_, _ = se.CallMethodKw("reconfigure", nil, map[string]any{"line_buffering": true, "write_through": true})
+		}
+		// Inject a stub urlpatterns into Python's __main__ so Django's URL
+		// discovery (shell_plus, show_urls, runserver_plus, …) doesn't fail
+		// when ROOT_URLCONF resolves to __main__ — the real urlpatterns live
+		// in the Go-native router, not the Python module.
+		__bridgeSetAttr(__bridgeModule("__main__"), "urlpatterns", []any{})
+		argv := make([]any, 0, len(os.Args))
+		argv = append(argv, "manage.py")
+		for _, a := range os.Args[1:] {
+			argv = append(argv, a)
+		}
+		_, err := __bridgeModule("django.core.management").CallMethod("execute_from_command_line", argv)
+		if err != nil {
+			// Django's management commands exit via sys.exit(code) on
+			// --help / argparse failures / clean completion of some commands.
+			// SystemExit propagates as a Python exception through the bridge;
+			// translate it back into the process's exit code rather than a
+			// Go panic so the binary behaves like manage.py.
+			msg := err.Error()
+			if strings.Contains(msg, "SystemExit") {
+				code := 0
+				// Trim either "SystemExit: 0" or a bare "0" carried from str(SystemExit(0)).
+				tail := strings.TrimPrefix(msg, "SystemExit:")
+				if tail == msg {
+					tail = msg
+				}
+				tail = strings.TrimSpace(tail)
+				if n, perr := strconv.Atoi(tail); perr == nil {
+					code = n
+				}
+				os.Exit(code)
+			}
+			panic(err)
+		}
+		return
+	}
+	__webServe(addr)
 }
 
 // __webErrs accumulates parameter-validation failures for one request and,
@@ -10761,7 +10911,7 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	if addr, ok := g.webServeCall(m); ok {
 		g.usedWeb = true
 		g.registerWebHelpers()
-		g.writef("__webServe(%q)", addr)
+		g.emitServeCall(addr)
 		return nil
 	}
 	// GoWeb (Django): `request.GET.get("q")` reads a query value through the

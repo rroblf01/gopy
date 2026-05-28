@@ -1,0 +1,8 @@
+# Django runs inside the embedded CPython interpreter (the bridge). It is NOT
+# transpiled — gopy maps `urlpatterns` onto net/http directly, and the ORM /
+# metaclasses live in CPython. uvicorn / daphne / gunicorn are NOT needed:
+# the Go binary IS the HTTP server.
+django
+django-extensions
+ipython
+

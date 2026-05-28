@@ -1619,6 +1619,16 @@ func lowerFunc(n parser.Node) (*Func, error) {
 	if args == nil {
 		return nil, fmt.Errorf("FunctionDef %q missing args", f.Name)
 	}
+	// posonlyargs (before `/`) lower the same as regular args; they're just
+	// excluded from keyword-call matching, which gopy doesn't enforce.
+	posonlyNodes := args.Children("posonlyargs")
+	for _, a := range posonlyNodes {
+		ty, err := lowerAnnotation(a.Child("annotation"))
+		if err != nil {
+			return nil, fmt.Errorf("posonly param %q: %w", a.Str("arg"), err)
+		}
+		f.Params = append(f.Params, Param{Name: a.Str("arg"), Ty: ty})
+	}
 	paramNodes := args.Children("args")
 	for _, a := range paramNodes {
 		ty, err := lowerAnnotation(a.Child("annotation"))
@@ -1627,6 +1637,7 @@ func lowerFunc(n parser.Node) (*Func, error) {
 		}
 		f.Params = append(f.Params, Param{Name: a.Str("arg"), Ty: ty})
 	}
+	positionalCount := len(posonlyNodes) + len(paramNodes)
 	// *args (single python `arg` node under args.vararg) becomes a []T
 	// slice — T from the annotation when present, []any otherwise.
 	if va := args.Child("vararg"); va != nil {
@@ -1673,11 +1684,18 @@ func lowerFunc(n parser.Node) (*Func, error) {
 			f.Params = append(f.Params, p)
 		}
 	}
-	// Python aligns `args.defaults` to the END of the positional params:
-	// for `def f(a, b, c=1, d=2)`, defaults == [1, 2] aligns to c, d.
+	// Python aligns `args.defaults` to the END of the positional params
+	// (posonly + args, NOT kwonly): for `def f(a, b, c=1, d=2)` defaults =
+	// [1, 2] aligns to c, d. Compute the offset against `positionalCount`
+	// rather than `len(f.Params)` — kwonly was just appended above, and using
+	// the full slice length here would shift the defaults onto kwonly slots
+	// (or underflow when kwonly itself outnumbers positional defaults).
 	defaults := args.Children("defaults")
 	if n := len(defaults); n > 0 {
-		off := len(f.Params) - n
+		if n > positionalCount {
+			return nil, fmt.Errorf("more defaults (%d) than positional params (%d)", n, positionalCount)
+		}
+		off := positionalCount - n
 		// Defaults are evaluated in a scope that already has the earlier
 		// params declared (Python evaluates them at def-time in the
 		// enclosing scope; we approximate by using an empty scope here

@@ -439,6 +439,93 @@ excited=True)` / `mylib.add(3, b=4)` (kwargs + defaults + reExport +
 methodCall combo) all match CPython, in a pure-Go static binary. Full suite
 green.
 
+**Keyword-only / positional-only parameters — now lower.** `def f(a, *, b=1)`
+panicked in `lowerFunc:1686` because `args.defaults` (positional only) was
+indexed against `len(f.Params)` AFTER kwonly args were appended, producing
+a negative slice bound on shapes like `def run(app, *, host=..., port=...)`
+where positional defaults are absent but kwonly are dense. Defaults now use
+`positionalCount = len(posonlyargs) + len(args)`, computed BEFORE kwonly
+appends; `posonlyargs` (before `/`) are also lowered now (they were
+silently skipped). Verified end-to-end: `def f(a, b=1, *, c=2, d=3)` with
+all four call shapes (`f(10)`, `f(10, 20)`, `f(10, c=100)`,
+`f(10, 20, c=100, d=200)`) match CPython.
+
+**Nested-tuple unpack in for-loops — now lowers.** `for k, (a, b) in pairs:`
+used to error with "for-loop unpacking targets must be Names". A new
+`destructureTarget` helper recursively binds Name targets and hoists nested
+Tuple targets into fresh temps + recurses over each subscript;
+`lowerForTupleN` is the common entry for any nested case (2-elt nested no
+longer falls into the enumerate/items/zip patterns of `lowerForTuple`).
+
+**Per-module bridge fallback for venv deps — landed.** Phase 2 used to
+collapse the whole build into bridge mode if ANY dep failed to lower; that
+nuked the survivors. The driver now lowers each dep once during setup
+(panic-guarded) and tracks `loweredOK`. Failed deps + every ancestor package
+(cascade) are pruned from `localMods` / `localModulePaths` / `localPathSet`
+/ `reExports`, so an `import <pruned>` flips to bridged in
+`transpile.buildAliases` (under `-bridge`) while the survivors keep
+transpiling to Go. Cascade matters because a package whose `__init__.py`
+lowers but whose submodule fails has a broken re-export API — demoting
+just the submodule leaves dangling references.
+
+**Pydantic-model body params on bridged routes — landed.** A bridged
+`@app.post("/x")` handler with a typed `payload: ItemIn` (Pydantic /
+dataclass body) used to be ineligible (`bridgeArgKindOK` only allowed
+scalars/`any`), so the route never registered — fastapi answered 405. The
+bridge now treats a `TyNamed` ref to an `IsPydantic` class as adaptable: the
+annotation exposed to the framework is `dict` (a Go struct can't be a Python
+class, so the framework decodes the JSON body into a dict), and
+`emitRouteAdapter` reconstructs the typed Go struct field by field from
+that dict (`__bridge_<field>` decode handles int/float/str/bool with the
+expected JSON-number widening). The Go handler then sees a real `*ItemIn`.
+
+**Django management commands — the binary doubles as `manage.py`.** When
+both `-goweb` and `-bridge` are active, the synthesized `main()` calls
+`__webServeOrCmd(addr)` instead of `__webServe(addr)`: with no extra argv it
+runs the Go HTTP server; with any subcommand it injects a stub `urlpatterns
+= []` into Python `__main__` (so URL discovery doesn't fail), line-buffers
+the embedded interpreter's stdout/stderr, and hands `["manage.py"] +
+os.Args[1:]` to `django.core.management.execute_from_command_line` via the
+bridge. `SystemExit` propagated from Django (`--help`, argparse failures,
+clean completion) is caught and translated back into the process exit code
+rather than panicking. With `django-extensions` in `INSTALLED_APPS` (and
+the venv), `./app shell_plus --plain` opens a real Django REPL with all
+models / `django.db` imports pre-loaded:
+
+```
+>>> apps: ['contenttypes', 'auth', 'django_extensions']
+>>> models: ['ContentType', 'Permission', 'Group', 'User', 'Item']
+```
+
+`./app show_template_tags`, `./app migrate`, `./app shell --command "..."`,
+`./app help` all work end-to-end. Known cosmetic gap: bridged classes live
+in the bridge's class-definition namespace (`__module__ == "builtins"`),
+so `shell_plus`'s "auto-import models from each app" pass fails for them
+— `--dont-load <app>` works around it; `apps.get_model(...)` always works.
+
+**End-to-end: a FastAPI CRUD with the framework + libraries from the venv
+runs via the bridge.** All five pieces above combine to make the user's
+vision concrete: the demo's `examples/fastapi-crud/app.py` transpiles under
+`gopy build -bridge -venv-deps -python .venv/bin/python app.py` and serves
+the full CRUD through **REAL** fastapi / starlette / pydantic / uvicorn /
+pydantic_core (Rust extension) loaded by the embedded interpreter from the
+uv `.venv`. Verified:
+- `POST /items` → `{"id":1,"name":"widget","price":9.99}`
+- `GET /items` → `[{"id":1,...}]`
+- `PUT /items/1` → updates
+- `GET /items/1` → returns the item
+- `DELETE /items/1` → `{"deleted":1}`
+- `GET /` → `{"service":"gopy-fastapi-crud","items":0}`
+
+uvicorn's access log confirms each request hits the real framework. The
+business logic is compiled Go; the framework runs in the embedded
+interpreter; C-extension libraries (pydantic_core) work because they bind
+to that interpreter. Honest scope: this is the hybrid model, not pure Go —
+the binary needs `libpython3.X.so` at runtime and `PYTHONPATH` pointed at
+the venv's `site-packages`. Pure-Go FastAPI remains the `-goweb`
+reimplementation; recursive-from-venv only delivers pure Go for libraries
+that fit the supported subset (proven with `mylib`).
+
 ## Supported
 
 - Functions, parameters, return values

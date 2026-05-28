@@ -268,6 +268,12 @@ func runBuild(args []string) {
 	// resolution, and a kwarg call against it will fall back to the
 	// existing error path).
 	localFuncs := map[string]*ir.Func{}
+	// loweredOK tracks which discovered files lowered cleanly. A dep that
+	// fails (parse panic / unsupported subset feature) is DEMOTED from
+	// "local" so its imports route through the embedded-CPython bridge
+	// (under -bridge) instead of collapsing the whole build into Phase 2.
+	// The survivors still transpile to Go; only the broken deps are bridged.
+	loweredOK := map[string]bool{}
 	for _, f := range allFiles {
 		root, err := parser.ParseFileWith(pyBin, dumperPath, f)
 		if err != nil {
@@ -284,8 +290,12 @@ func runBuild(args []string) {
 			mod, err = ir.Lower(filepath.Base(f), root)
 		}()
 		if err != nil || mod == nil {
+			if os.Getenv("GOPY_TRACE_LOWER") != "" {
+				fmt.Fprintf(os.Stderr, "gopy: lower FAIL %s (path=%s)\n", filepath.Base(f), pathOf[f])
+			}
 			continue
 		}
+		loweredOK[f] = true
 		modPath := pathOf[f]
 		for _, d := range mod.Decls {
 			fn, ok := d.(*ir.Func)
@@ -299,6 +309,89 @@ func runBuild(args []string) {
 			sig.Name = mangled
 			localFuncs[mangled] = &sig
 		}
+	}
+	// If any dep failed to lower, prune the "local" classification so its
+	// imports flip to bridged in transpile.buildAliases. Survivors stay
+	// local and transpile normally. The entry must be in loweredOK — a
+	// failed entry has no fallback (the entry is the program).
+	if len(loweredOK) < len(allFiles) && *bridge {
+		// Cascade demotion: a package whose `__init__.py` lowers fine but
+		// whose submodule failed has a broken API (re-exports point at
+		// nothing). Demote any ancestor package of a failed dep so the
+		// whole subtree routes through the bridge — the user's call to
+		// `uvicorn.run(...)` then hits the bridge with kwargs intact instead
+		// of resolving to a half-translated `uvicorn_main_run`.
+		failedAncestors := map[string]bool{}
+		for _, f := range allFiles {
+			if loweredOK[f] {
+				continue
+			}
+			p := pathOf[f]
+			for p != "" {
+				failedAncestors[p] = true
+				if idx := strings.LastIndex(p, "."); idx >= 0 {
+					p = p[:idx]
+				} else {
+					p = ""
+				}
+			}
+		}
+		// Topological caveat: a survivor dep that imports a pruned dep will
+		// still try to transpile, but its `import <pruned>` is now bridged
+		// (good). A survivor that consumes the pruned dep's TYPES through
+		// the codegen path may still error; that error is the existing
+		// subset-gap path, not a regression.
+		bridgedDeps := 0
+		newDeps := deps[:0:len(deps)]
+		newLocalPathSet := map[string]bool{}
+		newLocalModulePaths := localModulePaths[:0]
+		for _, d := range deps {
+			p := pathOf[d.path]
+			if loweredOK[d.path] && !failedAncestors[p] {
+				newDeps = append(newDeps, d)
+				if p != "" {
+					newLocalPathSet[p] = true
+					newLocalModulePaths = append(newLocalModulePaths, p)
+				}
+			} else {
+				bridgedDeps++
+			}
+		}
+		sort.Strings(newLocalModulePaths)
+		// Rebuild localMods (qualifier-strip set) from the surviving deps.
+		nameSet := map[string]bool{}
+		for _, d := range newDeps {
+			p := pathOf[d.path]
+			parts := strings.Split(p, ".")
+			nameSet[parts[len(parts)-1]] = true
+			if len(parts) > 1 {
+				nameSet[p] = true
+			}
+		}
+		newLocalMods := make([]string, 0, len(nameSet))
+		for n := range nameSet {
+			newLocalMods = append(newLocalMods, n)
+		}
+		sort.Strings(newLocalMods)
+		// Drop reExports whose source module was pruned (the re-export
+		// target no longer transpiles, so an outside `from pkg import x`
+		// must NOT rewrite to a non-existent mangled symbol).
+		for pkg, names := range reExports {
+			if !newLocalPathSet[pkg] {
+				delete(reExports, pkg)
+				continue
+			}
+			for n, r := range names {
+				if !newLocalPathSet[r.fromMod] {
+					delete(names, n)
+				}
+			}
+		}
+		fmt.Fprintf(os.Stderr, "gopy: %d venv dep(s) failed to lower; routing them through the bridge\n", bridgedDeps)
+		deps = newDeps
+		localPathSet = newLocalPathSet
+		localModulePaths = newLocalModulePaths
+		localMods = newLocalMods
 	}
 
 	// Recursive multi-file build. transpileDeps lists the discovered local
