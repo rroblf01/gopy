@@ -13,6 +13,15 @@ import (
 )
 
 // Options controls code generation.
+// ReExport records the source of a name re-bound by a package `__init__.py`:
+// `from .submod import name [as bind]` in `pkg/__init__.py` gives
+// `LocalReExports["pkg"][bind] = {FromMod: "pkg.submod", OrigName: "name"}`.
+// The build driver collapses chains to a fixed point before passing in.
+type ReExport struct {
+	FromMod  string
+	OrigName string
+}
+
 type Options struct {
 	PackageName string // defaults to "main"
 	RuntimePath string // import path of the gopy runtime; "" disables import
@@ -63,6 +72,19 @@ type Options struct {
 	// `from P import sub`) to that module's dotted path, so `A.fn(...)` mangles
 	// to A's symbol. Also resolved by the build driver.
 	ModuleBindings map[string]string
+	// LocalReExports[pkg][name] = {FromMod, OrigName} records each rebinding
+	// done inside a package's `__init__.py` (`from .submod import name [as bind]`),
+	// collapsed transitively by the build driver. Consulted at
+	// `pkg.name(...)` / `pkg.name` sites so the call/read resolves to the true
+	// defining module's mangled symbol instead of `pkg_name` (which wouldn't
+	// exist when the symbol lives in `pkg.submod`).
+	LocalReExports map[string]map[string]ReExport
+	// LocalFuncs maps a cross-module mangled function name to its signature
+	// (params + defaults + vararg/kwarg) so a caller can match keyword
+	// arguments against the callee's parameter list. The driver lowers each
+	// dependency once during setup and populates the map; values are
+	// signature skeletons (no body), keyed by fully-mangled symbol.
+	LocalFuncs map[string]*ir.Func
 	// GoWeb opts the module into the Go-native web runtime: a recognized web
 	// framework app (`app = FastAPI()`, `Flask(__name__)`, …) and its route
 	// decorators (`@app.get("/x")`) are lowered onto a pure-Go net/http server
@@ -103,7 +125,7 @@ func ModuleWithMeta(m *ir.Module, opt Options) ([]byte, *ModuleMeta, error) {
 	if opt.PackageName == "" {
 		opt.PackageName = "main"
 	}
-	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgeObjVars: map[string]bool{}, localMods: map[string]bool{}, modOf: map[string]string{}, modBind: map[string]string{}, localModPathSet: map[string]bool{}, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
+	g := &gen{opt: opt, classes: map[string]*ir.Class{}, funcs: map[string]*ir.Func{}, methods: map[string]map[string]*ir.Func{}, helpers: map[string]string{}, fileVars: map[string]bool{}, generators: map[string]bool{}, aliases: map[string]string{}, bridged: map[string]string{}, bridgeVars: map[string]bool{}, bridgeObjVars: map[string]bool{}, localMods: map[string]bool{}, modOf: map[string]string{}, modBind: map[string]string{}, localModPathSet: map[string]bool{}, modReExports: opt.LocalReExports, crossFuncs: opt.LocalFuncs, bridgedFrom: map[string]bridgeRef{}, varTypes: map[string]string{}, localVarTypes: map[string]*ir.Type{}, globals: map[string]*ir.Type{}, webAppVars: map[string]bool{}}
 	g.buildAliases(m)
 	if opt.EnableBridge || opt.GoWeb {
 		g.bridgeImportSrc = g.buildBridgeImportSrc(m)
@@ -475,6 +497,21 @@ func (g *gen) mangle(path, name string) string {
 	return strings.ReplaceAll(path, ".", "_") + "_" + name
 }
 
+// resolveReExport collapses `pkg.name` to its true defining module + name when
+// `pkg/__init__.py` re-binds the name from a submodule (e.g.
+// `from .submod import name as bind` → resolveReExport("pkg", "bind") →
+// ("pkg.submod", "name")). Passes path/name through unchanged otherwise.
+func (g *gen) resolveReExport(path, name string) (string, string) {
+	if g.modReExports != nil {
+		if m, ok := g.modReExports[path]; ok {
+			if r, ok := m[name]; ok {
+				return r.FromMod, r.OrigName
+			}
+		}
+	}
+	return path, name
+}
+
 // declName mangles a top-level declaration emitted by this module.
 func (g *gen) declName(name string) string {
 	if !g.manglingActive {
@@ -789,6 +826,16 @@ type gen struct {
 	// symbols → opt.ModulePath, names from `from M import n` (M local) → M. Drives
 	// symbol mangling so modules sharing one flat Go package don't collide.
 	modOf map[string]string
+	// modReExports[pkgPath][name] = (fromMod, origName) records each package
+	// __init__'s re-bindings. Consulted at `pkg.name(...)` / `pkg.name` sites
+	// to mangle to the symbol's true defining module.
+	modReExports map[string]map[string]ReExport
+	// crossFuncs holds cross-module function signature skeletons keyed by
+	// fully-mangled name. Consulted as a fallback in the user-func call path
+	// so a kwarg call against a sibling module's function resolves against the
+	// callee's parameter list. Kept separate from g.funcs to avoid accidental
+	// emission of the cross-module def in this compilation unit.
+	crossFuncs map[string]*ir.Func
 	// modBind maps a name bound to a module (`import M`, `from P import sub`) to
 	// that module's dotted path, so `M.fn(...)` mangles to M's symbol.
 	modBind map[string]string
@@ -5651,7 +5698,8 @@ func (g *gen) expr(e ir.Expr) error {
 		// mangling active, resolve to the defining module's mangled symbol;
 		// otherwise drop the qualifier.
 		if path, ok := g.localModulePathOf(x.Recv); ok {
-			g.writef("%s", g.mangle(path, x.Name))
+			src, orig := g.resolveReExport(path, x.Name)
+			g.writef("%s", g.mangle(src, orig))
 			return nil
 		}
 		if d, ok := dottedName(x.Recv); ok && g.localMods[d] {
@@ -7863,6 +7911,11 @@ func (g *gen) call(c *ir.Call) error {
 		if fn, ok := g.funcs[name.N]; ok {
 			return g.userFuncCall(fn, c)
 		}
+		// Cross-module free function (sibling/venv dep, mangled name): match
+		// against the dep's signature so kwargs / defaults resolve.
+		if fn, ok := g.crossFuncs[name.N]; ok {
+			return g.userFuncCall(fn, c)
+		}
 	}
 	// Callable instance: `obj(args)` where obj is a class instance with
 	// __call__ defined dispatches to obj.Call(args). Method params have
@@ -7962,7 +8015,13 @@ func (g *gen) userFuncCall(fn *ir.Func, c *ir.Call) error {
 		kwIdx[kw.Name] = kw.Value
 	}
 	// fn came from g.funcs (own free function) → mangle by this module's path.
-	g.writef("%s(", g.declName(fn.Name))
+	// Cross-module fn from g.crossFuncs already carries the fully-mangled name;
+	// use it as-is (declName would prepend this module's path on top of it).
+	callName := g.declName(fn.Name)
+	if _, isCross := g.crossFuncs[fn.Name]; isCross {
+		callName = fn.Name
+	}
+	g.writef("%s(", callName)
 	for i, p := range fn.Params {
 		if i > 0 {
 			g.writef(", ")
@@ -10719,8 +10778,9 @@ func (g *gen) methodCall(m *ir.MethodCall) error {
 	// active, resolve to the defining module's mangled symbol; otherwise drop
 	// the qualifier (`fn(args)`).
 	if path, ok := g.localModulePathOf(m.Recv); ok {
+		src, orig := g.resolveReExport(path, m.Method)
 		return g.call(&ir.Call{
-			Func:     &ir.Name{N: g.mangle(path, m.Method)},
+			Func:     &ir.Name{N: g.mangle(src, orig)},
 			Args:     m.Args,
 			Keywords: m.Keywords,
 		})

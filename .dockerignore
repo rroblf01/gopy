@@ -1,0 +1,15 @@
+# Docker build context trimming for examples/*/Dockerfile (context = repo root).
+# Keep everything the transpiler needs to compile (cmd, transpile, ir, parser,
+# runtime, bridge, scripts, go.mod); drop history, venvs, and build artifacts.
+.git
+.github
+**/.venv
+**/venv
+**/__pycache__
+*.log
+# Test fixtures aren't needed to build a demo; drop the bulky tree.
+tests/fixtures
+tests/fixtures_multi
+# Local build outputs.
+examples/**/app
+examples/**/*.bin

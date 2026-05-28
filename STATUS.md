@@ -315,6 +315,91 @@ Deferred: `Item.objects.filter(...)` with request-derived params (path/query →
 ORM filter), POST body → `create`, converter-accurate Django 404,
 request.POST/headers, middleware.
 
+### FastAPI CRUD demo (pure Go) + Dockerfile — landed
+
+`examples/fastapi-crud/` is a copy-pasteable demo: a FastAPI CRUD (`ItemIn`
+Pydantic model, GET/POST/PUT/DELETE over `/items`, an in-memory store) that
+`gopy build -goweb` turns into a **single static binary** — no interpreter, no
+libpython, no libc. A multi-stage `Dockerfile` (build context = repo root)
+compiles the transpiler, transpiles `app.py`, and ships the binary on `scratch`.
+Verified end-to-end in Docker: full CRUD lifecycle, FastAPI-shaped 422
+validation, `/docs` Swagger UI, **8.8 MB image, ~7.5 MB RSS**. The store is
+in-memory by design (the user picked that over the not-yet-real sqlite path); a
+read-back value is `map[any]any`-typed `any`, so handlers that return a stored
+item are annotated `-> Any`.
+
+**`if __name__ == "__main__":` entrypoint — now lowered, not dropped.** The
+guard used to be discarded wholesale (correct only when its body was a bare
+`main()` call, since Go auto-runs a top-level `func main()`). Now the guard body
+is lowered into the synthesized `func main()` in source order, so an app whose
+entrypoint lives *inside* the guard (`if __name__ == "__main__":
+uvicorn.run(app, port=8000)`) builds — the idiomatic FastAPI shape. A redundant
+self-invocation is still dropped: both `main()` and `asyncio.run(main())` (gopy
+lowers `async def main()` to the same `func main()`), so `def main()` +
+`if __name__: main()` and the async fixtures keep working. Full 653-fixture
+golden suite green after the change (`ir/lower.go`: `isBareMainCall` /
+`isMainInvocation` / `mainGuardHasFlow`).
+
+**Pure-Go `sqlite3` — feasibility proven, not yet wired.** sqlite3 is currently
+a non-functional placeholder (every func → `__gopy_sqlite3_unused`, no body) and
+is shadowed by the stdlib shim so even `-bridge` can't reach it. A real pure-Go
+path is viable: `modernc.org/sqlite` (a CGO-free sqlite) builds with
+`CGO_ENABLED=0` into a static binary (~9.6 MB for the engine) and runs real SQL
+(spike: `CREATE`/`INSERT ?`/`SELECT` round-trips). gopy already has the codegen
+machinery — the `RetTag` + `taggedMethodMap` mechanism that makes
+`re.compile()→__Pattern`, `io.StringIO()→__StringIO` object types with Go
+methods — so `sqlite3.connect()→__SqliteConn`, `.cursor()→__SqliteCursor`,
+`.execute(?params)`, `fetchone/fetchall` follow that pattern. The one new piece
+is injecting the `modernc.org/sqlite` module dependency into the generated build
+(an external dep, opt-in by usage — mirroring how `UsedBridge` opts a build into
+CGO + libpython). Hard ceiling: sqlite3's CPython module is a C extension, so
+the "consult the .venv" path (below) can't transpile it; reaching pure-Go sqlite
+requires the modernc dep (decision deferred).
+
+**`-venv-deps` — gopy consults the uv `.venv` for dependency transpilation —
+landed (opt-in).** `gopy build -venv-deps -python .venv/bin/python …` resolves
+imports against the interpreter's `sysconfig.get_path('purelib')` /
+`platlib` in addition to the project's own directory, so installed pure-Python
+packages are discovered and recursively transpiled into the shared Go package
+alongside the application. Each `localDep` now carries the resolution `root` it
+matched (the entry's dir for project-local modules, a site-packages dir
+otherwise), and `modulePathOf` / `packageDottedOf` consult a per-file `rootOf`
+map so a venv dep's dotted path / mangled-symbol prefix / `goName` are computed
+relative to its own root rather than the entry's. Relative imports inside a
+site-packages package propagate the importing module's root. Off by default →
+`extraRoots == nil` → every `rootOf` entry collapses to `entryDir`, behavior is
+byte-identical to before. Combine with `-bridge` for the two-phase fallback so
+deps outside the supported subset run through the embedded interpreter instead.
+
+Verified end-to-end: a hatchling-built pure-Python package (`mylib.core` with
+typed `add`, `GREETING`, a list-comprehension `scale`) was `uv pip install`-ed
+into a `.venv`; `gopy build -venv-deps -python .venv/bin/python app.py`
+discovered `mylib` in `site-packages`, transpiled `mylib/core.py` into the
+shared Go package (symbols mangled `mylib_core_*`), and produced a fully static
+**2.5 MB pure-Go binary** whose output (`hello from mylib / 42 / [4 8 12]`)
+matches the same `app.py` run under CPython. This is the literal
+"con uv se haga el build y golang consulte el .venv para generar el
+transpilado" workflow the user described. Demo: `examples/fastapi-crud/` now
+ships a `Makefile` driving the uv flow (`uv venv`, `uv pip install`,
+`gopy build -goweb -python .venv/bin/python`); the Dockerfile mirrors it
+(copies `uv` from `ghcr.io/astral-sh/uv:latest`, creates `/opt/venv`, points
+gopy at it). Lingering subset gap (not venv-deps): an empty-list `out = []` +
+`append` doesn't infer its element type from the appends, so a typed-list
+return needs a comprehension instead.
+
+**Package `__init__.py` re-exports — now resolved through the chain.** A
+`from pkg import X` where `pkg/__init__.py` does `from .submod import X [as Y]`
+used to land on a non-existent mangled symbol (the symbol is defined in
+`pkg.submod`, mangled `pkg_submod_X`; mangling against `pkg` produced
+`pkg_X` → undefined). `buildReExports` now parses every `__init__.py` once,
+records each rebound name's `(fromMod, origName)`, and collapses chains to a
+fixed point; `resolveImportBindings` consults the map so the outside import
+resolves to the symbol's true defining module's mangled name, and a re-exported
+class still stays bare. After the fix, the venv-deps proof works with the
+idiomatic `from mylib import add, GREETING` instead of the workaround
+`from mylib.core import …`. Full 653-fixture suite green
+(`go test -count=1 ./tests/` → ok 147.764s).
+
 ## Supported
 
 - Functions, parameters, return values

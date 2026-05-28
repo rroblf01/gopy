@@ -151,8 +151,9 @@ func runBuild(args []string) {
 	keep := fs.Bool("keep", false, "keep the intermediate Go source directory (printed to stderr)")
 	bridge := fs.Bool("bridge", false, "enable the embedded-CPython bridge for non-stdlib imports (requires CGO + libpython)")
 	goweb := fs.Bool("goweb", false, "map a recognized web framework (FastAPI/Flask) app onto a pure-Go net/http server")
+	venvDeps := fs.Bool("venv-deps", false, "resolve imports against the Python interpreter's site-packages too, recursively transpiling pure-Python dependencies from the venv (combine with -bridge to fall back to the interpreter for ones outside the supported subset)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: gopy build [-o binary] [-keep] [-bridge] [-goweb] <input.py|dir>")
+		fmt.Fprintln(os.Stderr, "usage: gopy build [-o binary] [-keep] [-bridge] [-goweb] [-venv-deps] <input.py|dir>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -192,8 +193,17 @@ func runBuild(args []string) {
 		pyBin = parser.LocatePython(filepath.Dir(src))
 	}
 	// Follow the import graph to sibling .py modules so a single-file build
-	// recursively transpiles the local pure-Python deps it imports.
-	deps, localMods := discoverLocalModules(src, pyBin, dumperPath)
+	// recursively transpiles the local pure-Python deps it imports. With
+	// -venv-deps, the interpreter's site-packages are added as extra resolution
+	// roots so installed pure-Python libraries are transpiled too.
+	var extraRoots []string
+	if *venvDeps {
+		extraRoots = venvSitePackages(pyBin)
+		if len(extraRoots) == 0 {
+			fmt.Fprintln(os.Stderr, "gopy: -venv-deps set but no site-packages found for the interpreter; resolving project-local modules only")
+		}
+	}
+	deps, localMods := discoverLocalModules(src, pyBin, dumperPath, extraRoots)
 
 	tmp, err := os.MkdirTemp("", "gopy-build-")
 	check(err)
@@ -218,6 +228,13 @@ func runBuild(args []string) {
 	// dotted path, the set of all such paths, and each module's classes (so an
 	// imported class name isn't mangled).
 	entryDir := filepath.Dir(src)
+	// rootOf maps each module file to the directory its dotted path is relative
+	// to: the entry's dir for the entry and project-local modules, or a venv
+	// site-packages dir for -venv-deps dependencies.
+	rootOf := map[string]string{src: entryDir}
+	for _, d := range deps {
+		rootOf[d.path] = d.root
+	}
 	allFiles := append([]string{src}, func() []string {
 		fs := make([]string, len(deps))
 		for i, d := range deps {
@@ -230,7 +247,7 @@ func runBuild(args []string) {
 	var localModulePaths []string
 	classesOf := map[string]map[string]bool{}
 	for _, f := range allFiles {
-		p := modulePathOf(f, src, entryDir)
+		p := modulePathOf(f, src, rootOf[f])
 		pathOf[f] = p
 		if p != "" {
 			localPathSet[p] = true
@@ -241,6 +258,34 @@ func runBuild(args []string) {
 		}
 	}
 	sort.Strings(localModulePaths)
+	// Map each package __init__'s re-exports to the symbol's true defining
+	// module, so `from pkg import name` resolves through the re-export chain.
+	reExports := buildReExports(allFiles, pathOf, localPathSet, pyBin, dumperPath)
+	// Collect cross-module top-level function signatures so a caller can
+	// match kwargs / defaults against the callee's parameter list. Each dep
+	// is lowered once; failures are silently skipped (the file may not be in
+	// the supported subset — its sigs just won't be available for kwarg
+	// resolution, and a kwarg call against it will fall back to the
+	// existing error path).
+	localFuncs := map[string]*ir.Func{}
+	for _, f := range allFiles {
+		root, err := parser.ParseFileWith(pyBin, dumperPath, f)
+		if err != nil {
+			continue
+		}
+		mod, err := ir.Lower(filepath.Base(f), root)
+		if err != nil {
+			continue
+		}
+		modPath := pathOf[f]
+		for _, d := range mod.Decls {
+			fn, ok := d.(*ir.Func)
+			if !ok || fn.Receiver != nil {
+				continue
+			}
+			localFuncs[mangleSym(modPath, fn.Name)] = fn
+		}
+	}
 
 	// Recursive multi-file build. transpileDeps lists the discovered local
 	// modules to transpile into the shared package; mangle enables symbol
@@ -263,7 +308,28 @@ func runBuild(args []string) {
 				opt.ModulePath = pathOf[path]
 				opt.LocalModulePaths = localModulePaths
 				if root, err := parser.ParseFileWith(pyBin, dumperPath, path); err == nil {
-					opt.ImportedSymbols, opt.ModuleBindings = resolveImportBindings(root, packageDottedOf(path, entryDir), localPathSet, classesOf)
+					opt.ImportedSymbols, opt.ModuleBindings = resolveImportBindings(root, packageDottedOf(path, rootOf[path]), localPathSet, classesOf, reExports)
+				}
+				if len(localFuncs) > 0 {
+				opt.LocalFuncs = localFuncs
+			}
+			if len(reExports) > 0 {
+					opt.LocalReExports = make(map[string]map[string]transpile.ReExport, len(reExports))
+					for pkg, names := range reExports {
+						if classesOf[pkg] == nil {
+							classesOf[pkg] = map[string]bool{}
+						}
+						m := make(map[string]transpile.ReExport, len(names))
+						for n, r := range names {
+							// Skip class re-exports: classes stay bare per the
+							// mangling design, so leave `pkg.Cls` un-rewritten.
+							if classesOf[r.fromMod][r.origName] {
+								continue
+							}
+							m[n] = transpile.ReExport{FromMod: r.fromMod, OrigName: r.origName}
+						}
+						opt.LocalReExports[pkg] = m
+					}
 				}
 			}
 			goSrc, meta, err := tryTranspileOpts(path, pyBin, dumperPath, opt)
@@ -598,6 +664,10 @@ func tryTranspileOpts(src, python, dumper string, opt transpile.Options) ([]byte
 type localDep struct {
 	path   string
 	goName string
+	// root is the directory the module's dotted import path is relative to —
+	// the entry's dir for project-local modules, or a venv site-packages dir for
+	// dependencies discovered there (`-venv-deps`).
+	root string
 }
 
 // importRef is one candidate module an import statement might pull in. level is
@@ -676,33 +746,70 @@ func resolveModuleFile(dotted, baseDir string) string {
 // are left alone. Flat-package caveat: every module shares one Go package, so
 // two modules defining the same top-level symbol collide — keep names unique
 // across the project (or that build falls back to the bridge under -bridge).
-func discoverLocalModules(entryPath, pyBin, dumperPath string) (deps []localDep, modNames []string) {
+// venvSitePackages asks the interpreter for its site-packages directories
+// (purelib + platlib). Under -venv-deps these become extra module-resolution
+// roots, so installed pure-Python dependencies are discovered and transpiled
+// alongside the application.
+func venvSitePackages(pyBin string) []string {
+	out, err := exec.Command(pyBin, "-c",
+		"import sysconfig; print(sysconfig.get_path('purelib')); print(sysconfig.get_path('platlib'))").Output()
+	if err != nil {
+		return nil
+	}
+	var roots []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		p := strings.TrimSpace(line)
+		if p == "" || seen[p] {
+			continue
+		}
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			seen[p] = true
+			roots = append(roots, p)
+		}
+	}
+	return roots
+}
+
+func discoverLocalModules(entryPath, pyBin, dumperPath string, extraRoots []string) (deps []localDep, modNames []string) {
 	dir := filepath.Dir(entryPath)
 	entryAbs, _ := filepath.Abs(entryPath)
 	seen := map[string]bool{entryAbs: true}
 	nameSet := map[string]bool{}
-	queue := []string{entryAbs}
+	// Each queued file remembers the root its dotted path is relative to, so a
+	// dependency pulled from a venv site-packages dir (and its own relative
+	// imports) resolve and name themselves against that root, not the entry's.
+	type work struct{ file, root string }
+	queue := []work{{entryAbs, dir}}
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		root, err := parser.ParseFileWith(pyBin, dumperPath, cur)
+		root, err := parser.ParseFileWith(pyBin, dumperPath, cur.file)
 		if err != nil {
 			continue // unparseable: don't discover through it
 		}
 		for _, ref := range scanImports(root) {
-			// Absolute imports resolve from the project root (the entry's dir);
-			// relative imports resolve from the importing module's package,
-			// ascending one level per leading dot beyond the first.
-			base := dir
+			// Absolute imports resolve from the project root (the entry's dir),
+			// then any extra roots (venv site-packages); relative imports resolve
+			// from the importing module's package, ascending one level per
+			// leading dot beyond the first, within that module's own root.
+			cand, candRoot := "", ""
 			if ref.level > 0 {
-				base = filepath.Dir(cur)
+				base := filepath.Dir(cur.file)
 				for i := 1; i < ref.level; i++ {
 					base = filepath.Dir(base)
 				}
+				cand, candRoot = resolveModuleFile(ref.dotted, base), cur.root
+			} else {
+				for _, r := range append([]string{dir}, extraRoots...) {
+					if c := resolveModuleFile(ref.dotted, r); c != "" {
+						cand, candRoot = c, r
+						break
+					}
+				}
 			}
-			cand := resolveModuleFile(ref.dotted, base)
 			if cand == "" {
-				continue // not a local module
+				continue // not a local / venv module
 			}
 			// Register both the last dotted segment (the bare binding a
 			// sibling-style `from pkg import mod; mod.fn()` references) and the
@@ -716,13 +823,13 @@ func discoverLocalModules(entryPath, pyBin, dumperPath string) (deps []localDep,
 			abs, _ := filepath.Abs(cand)
 			if !seen[abs] {
 				seen[abs] = true
-				queue = append(queue, abs)
-				rel, err := filepath.Rel(dir, abs)
+				queue = append(queue, work{abs, candRoot})
+				rel, err := filepath.Rel(candRoot, abs)
 				if err != nil {
 					rel = filepath.Base(abs)
 				}
 				goName := strings.NewReplacer("/", "_", string(filepath.Separator), "_", ".py", "").Replace(rel) + ".go"
-				deps = append(deps, localDep{path: cand, goName: goName})
+				deps = append(deps, localDep{path: cand, goName: goName, root: candRoot})
 			}
 		}
 	}
@@ -787,14 +894,114 @@ func scanClasses(root parser.Node) map[string]bool {
 	return out
 }
 
+// reExport records that a package's `__init__.py` rebinds an outside name from
+// some submodule: `from .core import add as plus` in `mylib/__init__.py` gives
+// reExports["mylib"]["plus"] = {fromMod: "mylib.core", origName: "add"}.
+type reExport struct {
+	fromMod  string
+	origName string
+}
+
+// buildReExports scans every package `__init__.py` in allFiles for
+// `from <mod> import name [as alias]` lines and records each rebound name's
+// source module + original name, so an outside `from pkg import name` resolves
+// to the symbol's true defining module. Chains are collapsed to a fixed point,
+// so `a.__init__` re-exporting through `b.__init__` lands on b's defining
+// module directly. Only references to local modules (per localPath) are
+// recorded — stdlib / venv / third-party re-exports are left alone.
+func buildReExports(allFiles []string, pathOf map[string]string, localPath map[string]bool, pyBin, dumperPath string) map[string]map[string]reExport {
+	re := map[string]map[string]reExport{}
+	resolveMod := func(pkgPath string, level int, module string) string {
+		if level == 0 {
+			return module
+		}
+		base := pkgPath
+		for i := 1; i < level; i++ {
+			if idx := strings.LastIndex(base, "."); idx >= 0 {
+				base = base[:idx]
+			} else {
+				base = ""
+			}
+		}
+		switch {
+		case module == "":
+			return base
+		case base == "":
+			return module
+		default:
+			return base + "." + module
+		}
+	}
+	for _, f := range allFiles {
+		if filepath.Base(f) != "__init__.py" {
+			continue
+		}
+		pkgPath := pathOf[f]
+		if pkgPath == "" {
+			continue
+		}
+		root, err := parser.ParseFileWith(pyBin, dumperPath, f)
+		if err != nil {
+			continue
+		}
+		for _, s := range root.Children("body") {
+			if s.Type() != "ImportFrom" {
+				continue
+			}
+			level := 0
+			if lv, ok := s["level"].(float64); ok {
+				level = int(lv)
+			}
+			fm := resolveMod(pkgPath, level, s.Str("module"))
+			if !localPath[fm] {
+				continue
+			}
+			for _, a := range s.Children("names") {
+				name := a.Str("name")
+				if name == "" || name == "*" {
+					continue
+				}
+				bind := a.Str("asname")
+				if bind == "" {
+					bind = name
+				}
+				if re[pkgPath] == nil {
+					re[pkgPath] = map[string]reExport{}
+				}
+				re[pkgPath][bind] = reExport{fromMod: fm, origName: name}
+			}
+		}
+	}
+	// Collapse transitive chains: if pkg.x → (m, y) and m.y → (n, z), then
+	// pkg.x → (n, z). Iterate to a fixed point.
+	for {
+		changed := false
+		for pkg, names := range re {
+			for n, r := range names {
+				if next, ok := re[r.fromMod]; ok {
+					if nr, ok2 := next[r.origName]; ok2 {
+						re[pkg][n] = nr
+						changed = true
+					}
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return re
+}
+
 // resolveImportBindings inspects a module's import statements and classifies
 // each imported name for symbol mangling: a submodule binding (`from pkg import
 // sub`, `import M`) → modBindings[name]=path; a value symbol (`from M import
 // fn`) → imported[name]=M; a class → skipped (classes stay bare). Relative
 // imports resolve against pkg (the importing module's package). localPath is
 // the set of all local module dotted paths; classesOf maps a module path to its
-// class names.
-func resolveImportBindings(root parser.Node, pkg string, localPath map[string]bool, classesOf map[string]map[string]bool) (imported, modBindings map[string]string) {
+// class names. reExports collapses package `__init__.py` re-exports so a value
+// imported through a package resolves to its true defining module.
+func resolveImportBindings(root parser.Node, pkg string, localPath map[string]bool, classesOf map[string]map[string]bool, reExports map[string]map[string]reExport) (imported, modBindings map[string]string) {
 	imported = map[string]string{}
 	modBindings = map[string]string{}
 	resolveMod := func(level int, module string) string {
@@ -850,16 +1057,26 @@ func resolveImportBindings(root parser.Node, pkg string, localPath map[string]bo
 				if bind == "" {
 					bind = name
 				}
+				// Follow a package __init__'s re-export chain so a value imported
+				// through the package resolves to its true defining module
+				// (`from mylib import add` where mylib/__init__.py does
+				// `from .core import add` → src=mylib.core, orig=add).
+				src, orig := fm, name
+				if re, ok := reExports[fm]; ok {
+					if r, ok2 := re[name]; ok2 {
+						src, orig = r.fromMod, r.origName
+					}
+				}
 				switch {
 				case localPath[fm+"."+name]:
 					modBindings[bind] = fm + "." + name
-				case classesOf[fm][name]:
+				case classesOf[src][orig]:
 					// class — stays bare, no mangling binding
 				default:
 					// Value symbol: resolve the binding (possibly aliased) to the
 					// source module's mangled symbol, e.g. `from a import f as g`
 					// → g → "a_f".
-					imported[bind] = mangleSym(fm, name)
+					imported[bind] = mangleSym(src, orig)
 				}
 			}
 		}

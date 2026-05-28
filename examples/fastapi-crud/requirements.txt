@@ -1,0 +1,7 @@
+# Only needed to run the ORIGINAL app under CPython for comparison
+# (uv venv .venv && uv pip install -r requirements.txt && python app.py).
+# gopy itself does NOT install or import these — it reimplements their
+# behavior in Go. The transpiled binary depends on none of them.
+fastapi
+uvicorn
+pydantic

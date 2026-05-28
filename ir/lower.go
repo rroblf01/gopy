@@ -40,13 +40,33 @@ func Lower(modName string, root parser.Node) (*Module, error) {
 			hasMainFlow = true
 			break
 		}
+		if isMainGuard(stmt) && mainGuardHasFlow(stmt) {
+			hasMainFlow = true
+			break
+		}
 	}
 	modScope := newScope()
 	var mainBody []Stmt
 	for _, stmt := range root.Children("body") {
 		if isMainGuard(stmt) {
-			// `if __name__ == "__main__":` — Go runs main() automatically,
-			// so we drop the guarded block entirely.
+			// `if __name__ == "__main__":` — Go runs main() automatically.
+			// A bare `main()` self-call inside the guard is dropped (Go already
+			// invokes a top-level `def main()`); any other guarded statement is
+			// the program's real entrypoint (e.g. `uvicorn.run(app)`,
+			// `app.run()`, a setup sequence) and is lowered into the synthesized
+			// main() in source order.
+			for _, gstmt := range stmt.Children("body") {
+				if isBareMainCall(gstmt) {
+					continue
+				}
+				s, err := lowerStmt(gstmt, modScope)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %v", modName, err)
+				}
+				if s != nil {
+					mainBody = append(mainBody, s)
+				}
+			}
 			continue
 		}
 		// Capture imports so transpile can resolve `from datetime import datetime`
@@ -272,6 +292,60 @@ func isMainGuard(n parser.Node) bool {
 	}
 	v, _ := c["value"].(string)
 	return v == "__main__"
+}
+
+// isBareMainCall matches a guard statement that merely (re)invokes the
+// top-level `main` — directly (`main()`) or wrapped by asyncio.run
+// (`asyncio.run(main())`, since gopy lowers `async def main()` to the same
+// `func main()`). Such a call is redundant — Go invokes a top-level
+// `func main()` automatically — and emitting it would produce
+// `func main() { main() }`, so it is dropped.
+func isBareMainCall(n parser.Node) bool {
+	if n.Type() != "Expr" {
+		return false
+	}
+	val := n.Child("value")
+	if val == nil || val.Type() != "Call" {
+		return false
+	}
+	return isMainInvocation(val)
+}
+
+// isMainInvocation reports whether a Call node is a no-arg invocation of the
+// top-level `main` — `main()` or `asyncio.run(main())`.
+func isMainInvocation(call parser.Node) bool {
+	fn := call.Child("func")
+	if fn == nil {
+		return false
+	}
+	if fn.Type() == "Name" && fn.Str("id") == "main" {
+		return len(call.Children("args")) == 0 && len(call.Children("keywords")) == 0
+	}
+	if fn.Type() == "Attribute" && fn.Str("attr") == "run" {
+		recv := fn.Child("value")
+		if recv != nil && recv.Type() == "Name" && recv.Str("id") == "asyncio" {
+			args := call.Children("args")
+			if len(args) == 1 && args[0].Type() == "Call" {
+				return isMainInvocation(args[0])
+			}
+		}
+	}
+	return false
+}
+
+// mainGuardHasFlow reports whether a `if __name__ == "__main__":` guard carries
+// real entrypoint statements (anything other than a bare `main()` self-call),
+// which then become the synthesized func main().
+func mainGuardHasFlow(n parser.Node) bool {
+	if !isMainGuard(n) {
+		return false
+	}
+	for _, gstmt := range n.Children("body") {
+		if !isBareMainCall(gstmt) {
+			return true
+		}
+	}
+	return false
 }
 
 func lowerTopLevel(n parser.Node) ([]Decl, error) {
@@ -4354,17 +4428,24 @@ func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 	//   `for a, b in zip(xs, ys)`       — paired iteration via parallel index
 	if tgt.Type() == "Tuple" {
 		elts := tgt.Children("elts")
+		nested := false
 		for _, e := range elts {
 			if e.Type() != "Name" {
-				return nil, fmt.Errorf("line %d: for-loop unpacking targets must be Names", n.Lineno())
+				nested = true
+				break
 			}
 		}
 		var s Stmt
 		var err error
-		if len(elts) == 2 {
+		switch {
+		case nested:
+			// Any non-Name target (nested tuple, etc.) routes through the
+			// generic N-tuple path, whose destructure helper recurses.
+			s, err = lowerForTupleN(n, sc, elts, iter)
+		case len(elts) == 2:
 			v1, v2 := elts[0].Str("id"), elts[1].Str("id")
 			s, err = lowerForTuple(n, sc, v1, v2, iter)
-		} else {
+		default:
 			// N-tuple unpack (N != 2): iterate once over a synthetic
 			// per-element temp and destructure inside the body. Works
 			// for any iterable whose static element type is a tuple
@@ -4466,6 +4547,47 @@ func lowerFor(n parser.Node, sc *scope) (Stmt, error) {
 	return &ForEach{Var: varName, Iter: iterE, ElemTy: elemTy, Body: body, OrElse: orelse}, nil
 }
 
+// destructureTarget emits prelude statements that bind `target` (a Name or a
+// nested Tuple of Name/Tuple) from `src`, by hoisting `src` into a temp if
+// `target` is a Tuple and recursing on each element's subscript. The temp
+// keeps `src` from being re-evaluated per element.
+func destructureTarget(target parser.Node, src Expr, srcTy *Type, sc *scope, out *[]Stmt) error {
+	switch target.Type() {
+	case "Name":
+		name := target.Str("id")
+		sc.declare(name, srcTy)
+		*out = append(*out, &Assign{Target: name, Value: src, Decl: true})
+		return nil
+	case "Tuple":
+		elts := target.Children("elts")
+		starUnpackCounter++
+		tmp := fmt.Sprintf("__tup_unpack_%d", starUnpackCounter)
+		sc.declare(tmp, srcTy)
+		*out = append(*out, &Assign{Target: tmp, Value: src, Decl: true})
+		for i, e := range elts {
+			var elTy *Type
+			if srcTy != nil {
+				if srcTy.Kind == TyTuple && i < len(srcTy.Tuple) {
+					elTy = srcTy.Tuple[i]
+				} else if srcTy.Kind == TyList {
+					elTy = srcTy.Elem
+				}
+			}
+			childSrc := &Subscript{
+				Value: &Name{N: tmp, Ty: srcTy},
+				Index: &IntLit{V: int64(i)},
+				Ty:    elTy,
+			}
+			if err := destructureTarget(e, childSrc, elTy, sc, out); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported destructure target: %s", target.Type())
+	}
+}
+
 // lowerForTupleN lowers `for a, b, c, ... in iter` for N != 2 by binding
 // each loop element to a synthetic temp and destructuring it inside the
 // body via Subscript / type assertions. The iter's static element type
@@ -4485,10 +4607,10 @@ func lowerForTupleN(n parser.Node, sc *scope, elts []parser.Node, iter parser.No
 	tmp := fmt.Sprintf("__tup_unpack_%d", starUnpackCounter)
 	loopSc := &scope{vars: copyVars(sc.vars)}
 	loopSc.declare(tmp, elemTy)
-	// Synthesize destructure assigns at the top of the body.
+	// Synthesize destructure assigns at the top of the body — recursively, so
+	// `for k, (a, b) in items` unpacks the nested tuple via another temp.
 	var prelude []Stmt
 	for i, e := range elts {
-		name := e.Str("id")
 		var elTy *Type
 		if elemTy != nil {
 			if elemTy.Kind == TyTuple && i < len(elemTy.Tuple) {
@@ -4497,16 +4619,14 @@ func lowerForTupleN(n parser.Node, sc *scope, elts []parser.Node, iter parser.No
 				elTy = elemTy.Elem
 			}
 		}
-		loopSc.declare(name, elTy)
-		prelude = append(prelude, &Assign{
-			Target: name,
-			Value: &Subscript{
-				Value: &Name{N: tmp, Ty: elemTy},
-				Index: &IntLit{V: int64(i)},
-				Ty:    elTy,
-			},
-			Decl: true,
-		})
+		src := &Subscript{
+			Value: &Name{N: tmp, Ty: elemTy},
+			Index: &IntLit{V: int64(i)},
+			Ty:    elTy,
+		}
+		if err := destructureTarget(e, src, elTy, loopSc, &prelude); err != nil {
+			return nil, fmt.Errorf("line %d: %v", n.Lineno(), err)
+		}
 	}
 	body, err := lowerBody(n.Children("body"), loopSc)
 	if err != nil {
