@@ -7911,10 +7911,18 @@ func (g *gen) call(c *ir.Call) error {
 		if fn, ok := g.funcs[name.N]; ok {
 			return g.userFuncCall(fn, c)
 		}
-		// Cross-module free function (sibling/venv dep, mangled name): match
-		// against the dep's signature so kwargs / defaults resolve.
+		// Cross-module free function: methodCall has already mangled
+		// (`mylib_core_add`), but a direct `from m import greet; greet(...)`
+		// arrives with the raw imported name — resolve through refName.
 		if fn, ok := g.crossFuncs[name.N]; ok {
 			return g.userFuncCall(fn, c)
+		}
+		if mangled := g.refName(name.N); mangled != name.N {
+			if fn, ok := g.crossFuncs[mangled]; ok {
+				// fn.Name is already mangled (driver shallow-copies on insert)
+				// so userFuncCall's write hits the cross-fn name verbatim.
+				return g.userFuncCall(fn, c)
+			}
 		}
 	}
 	// Callable instance: `obj(args)` where obj is a class instance with

@@ -400,6 +400,45 @@ idiomatic `from mylib import add, GREETING` instead of the workaround
 `from mylib.core import …`. Full 653-fixture suite green
 (`go test -count=1 ./tests/` → ok 147.764s).
 
+**Re-exports reach attribute reads + method calls too.** The reExport map is
+now also passed into transpile (`Options.LocalReExports`), and the
+`pkg.fn(...)` / `pkg.CONST` codegen sites consult it via
+`gen.resolveReExport` so `import mylib; mylib.add(...)` /
+`mylib.GREETING` route through `mylib/__init__.py`'s `from .core import …`
+to `mylib_core_add` / `mylib_core_GREETING`. Class re-exports are pruned by
+the driver (they stay bare per the symbol-mangling design). Suite green.
+
+**Nested-tuple unpack in for-loops — now lowers.** `for k, (a, b) in items:`
+used to error with "for-loop unpacking targets must be Names" because the
+elt check rejected anything other than a flat list of Names. A new
+`destructureTarget` helper recursively binds a target Name from a source
+expression and, for nested Tuple targets, hoists into a fresh temp + recurses
+over each subscript. `lowerForTupleN` is the common entry point for any
+nested case (2-elt nested no longer falls into the enumerate/items/zip
+patterns of `lowerForTuple`). Verified: `pairs = [(1, ("a", 10)), …]`
+`for k, (label, v) in pairs: print(...)` matches CPython. Full suite green.
+
+**Cross-module kwarg + default resolution — now works.** A call to a
+sibling/venv-dep function with kwargs (`uvicorn.run(app, port=8000)` shape, or
+`from m import f; f(x="...")`) used to die with "kwargs not supported on this
+call target" because `g.funcs` only held the current module's defs, and the
+fallback path rejected anything with kwargs. The build driver now lowers each
+dependency once during setup, mangles each top-level free function's name,
+and passes the signatures via `Options.LocalFuncs`. `gen.crossFuncs` (kept
+separate from `g.funcs` to avoid emission accidents) is consulted as a
+fallback in the user-func call path (both for already-mangled call targets
+from a `pkg.fn(...)` lowering and for raw imported names resolved through
+`g.refName`). `userFuncCall` emits `fn.Name` directly when the function is
+cross-module (driver shallow-copies the sig with `Name = mangled`) so
+`declName` doesn't re-prefix the current module's path. Eager dep lowering
+is panic-guarded with `recover()` so a malformed/heavy-dynamic dep
+(fastapi/pydantic exposed a `lowerFunc` slice-underflow on a specific shape)
+silently skips signature collection instead of killing the build. Verified:
+a controlled `mylib.core.greet(name="ana")` / `greet(name="bob",
+excited=True)` / `mylib.add(3, b=4)` (kwargs + defaults + reExport +
+methodCall combo) all match CPython, in a pure-Go static binary. Full suite
+green.
+
 ## Supported
 
 - Functions, parameters, return values

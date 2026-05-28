@@ -273,8 +273,17 @@ func runBuild(args []string) {
 		if err != nil {
 			continue
 		}
-		mod, err := ir.Lower(filepath.Base(f), root)
-		if err != nil {
+		// Lower with a panic guard: a malformed/unsupported dep (lowerFunc
+		// has rough edges on heavy-dynamic libs like fastapi/pydantic) must
+		// not kill the build — its signatures just won't be available for
+		// kwarg resolution, and any call against it falls back to the
+		// existing error / bridge path.
+		var mod *ir.Module
+		func() {
+			defer func() { recover() }()
+			mod, err = ir.Lower(filepath.Base(f), root)
+		}()
+		if err != nil || mod == nil {
 			continue
 		}
 		modPath := pathOf[f]
@@ -283,7 +292,12 @@ func runBuild(args []string) {
 			if !ok || fn.Receiver != nil {
 				continue
 			}
-			localFuncs[mangleSym(modPath, fn.Name)] = fn
+			mangled := mangleSym(modPath, fn.Name)
+			// Shallow copy so the rewritten Name doesn't corrupt the module's
+			// own IR if it's lowered again during transpile.
+			sig := *fn
+			sig.Name = mangled
+			localFuncs[mangled] = &sig
 		}
 	}
 
